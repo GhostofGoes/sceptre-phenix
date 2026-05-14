@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -66,6 +68,144 @@ func vmArgsCompletion(_ *cobra.Command, args []string, toComplete string) ([]str
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
+func addVMFilterFlag(cmd *cobra.Command) {
+	cmd.Flags().StringArrayP(
+		"filter",
+		"f",
+		nil,
+		"Filter VM labels (supports glob patterns); use 'all' to select every VM",
+	)
+}
+
+func normalizeVMFilters(filters []string) []string {
+	var normalized []string
+
+	for _, filter := range filters {
+		for _, piece := range strings.Split(filter, ",") {
+			piece = strings.TrimSpace(piece)
+			if piece == "" {
+				continue
+			}
+
+			normalized = append(normalized, piece)
+		}
+	}
+
+	return normalized
+}
+
+func vmLabelMatchesFilter(label, filter string) (bool, error) {
+	if strings.EqualFold(label, filter) {
+		return true, nil
+	}
+
+	if strings.ContainsAny(filter, "*?[") {
+		matched, err := path.Match(strings.ToLower(filter), strings.ToLower(label))
+		if err != nil {
+			return false, err
+		}
+
+		if matched {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func vmMatchesAnyFilter(vmInfo mm.VM, filters []string) (bool, error) {
+	if len(filters) == 0 {
+		return false, nil
+	}
+
+	if slices.ContainsFunc(filters, func(filter string) bool { return strings.EqualFold(filter, "all") }) {
+		return true, nil
+	}
+
+	for label := range vmInfo.Tags {
+		for _, filter := range filters {
+			matched, err := vmLabelMatchesFilter(label, filter)
+			if err != nil {
+				return false, fmt.Errorf("invalid filter %q: %w", filter, err)
+			}
+
+			if matched {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func listFilteredVMs(expName string, filters []string) ([]mm.VM, error) {
+	allVMs, err := vm.List(expName)
+	if err != nil {
+		return nil, err
+	}
+
+	if slices.ContainsFunc(filters, func(filter string) bool { return strings.EqualFold(filter, "all") }) {
+		return allVMs, nil
+	}
+
+	var filtered []mm.VM
+
+	for _, vmInfo := range allVMs {
+		matched, matchErr := vmMatchesAnyFilter(vmInfo, filters)
+		if matchErr != nil {
+			return nil, matchErr
+		}
+
+		if matched {
+			filtered = append(filtered, vmInfo)
+		}
+	}
+
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("no VMs matched filter(s): %s", strings.Join(filters, ", "))
+	}
+
+	return filtered, nil
+}
+
+func vmTargetNamesForCommand(cmd *cobra.Command, args []string) (string, []string, error) {
+	if len(args) < 1 {
+		return "", nil, errors.New("must provide an experiment name")
+	}
+
+	expName := args[0]
+
+	if !cmd.Flags().Changed("filter") {
+		if len(args) != pauseArgs {
+			return "", nil, errors.New("must provide an experiment and VM name (or use --filter)")
+		}
+
+		return expName, []string{args[1]}, nil
+	}
+
+	flagFilters, err := cmd.Flags().GetStringArray("filter")
+	if err != nil {
+		return "", nil, fmt.Errorf("getting vm filter values: %w", err)
+	}
+
+	filters := normalizeVMFilters(append(flagFilters, args[1:]...))
+	if len(filters) == 0 {
+		return "", nil, errors.New("must provide at least one VM label filter")
+	}
+
+	vms, err := listFilteredVMs(expName, filters)
+	if err != nil {
+		return "", nil, err
+	}
+
+	names := make([]string, 0, len(vms))
+	for _, vmInfo := range vms {
+		names = append(names, vmInfo.Name)
+	}
+
+	return expName, names, nil
+}
+
 func newVMCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "vm",
@@ -85,13 +225,36 @@ func newVMInfoCmd() *cobra.Command {
   virtual machine name is optional, when included will display only that VM.`
 
 	cmd := &cobra.Command{
-		Use:               "info <experiment name> <vm name>",
+		Use:               "info <experiment name> [vm name]",
 		Short:             "Table of virtual machine(s)",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
 				return errors.New("must provide an experiment name")
+			}
+
+			if cmd.Flags().Changed("filter") {
+				flagFilters, err := cmd.Flags().GetStringArray("filter")
+				if err != nil {
+					return fmt.Errorf("getting vm filter values: %w", err)
+				}
+
+				filters := normalizeVMFilters(append(flagFilters, args[1:]...))
+				if len(filters) == 0 {
+					return errors.New("must provide at least one VM label filter")
+				}
+
+				vms, err := listFilteredVMs(args[0], filters)
+				if err != nil {
+					err := util.HumanizeError(err, "Unable to get a filtered list of VMs")
+
+					return err.Humanized()
+				}
+
+				printer.PrintTableOfVMs(os.Stdout, vms...)
+
+				return nil
 			}
 
 			switch len(args) {
@@ -125,98 +288,100 @@ func newVMInfoCmd() *cobra.Command {
 		},
 	}
 
+	addVMFilterFlag(cmd)
+
 	return cmd
 }
 
 func newVMPauseCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "pause <experiment name> <vm name>",
+		Use:               "pause <experiment name> [vm name]",
 		Short:             "Pause a running VM for a specific experiment",
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != pauseArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.Pause(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to pause the "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm paused", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.Pause(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to pause the "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm paused", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
 
 func newVMResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "resume <experiment name> <vm name>",
+		Use:               "resume <experiment name> [vm name]",
 		Short:             "Resume a paused VM for a specific experiment",
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != pauseArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.Resume(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to resume the "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm resumed", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.Resume(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to resume the "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm resumed", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
 
 func newVMRestartCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "restart <experiment name> <vm name>",
+		Use:               "restart <experiment name> [vm name]",
 		Short:             "Restart a running, paused, or powered off VM",
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != pauseArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.Restart(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to restart the "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm restarted", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.Restart(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to restart the "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm restarted", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
@@ -228,32 +393,32 @@ func newVMResetDiskCmd() *cobra.Command {
   experiment.  The VM's snapshot flag must be set to true in order to use this command.`
 
 	cmd := &cobra.Command{
-		Use:               "reset-disk <experiment name> <vm name>",
+		Use:               "reset-disk <experiment name> [vm name]",
 		Short:             "Resets the disk state for a running or powered off VM",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != pauseArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.ResetDiskState(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to reset disk for "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm disk reset", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.ResetDiskState(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to reset disk for "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm disk reset", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
@@ -271,20 +436,19 @@ func newVMRedeployCmd() *cobra.Command {
   values can be modified`
 
 	cmd := &cobra.Command{
-		Use:               "redeploy <experiment name> <vm name>",
+		Use:               "redeploy <experiment name> [vm name]",
 		Short:             "Redeploy a running experiment VM",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != redeployArgs {
-				return errors.New("must provide an experiment and VM name")
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
+			if err != nil {
+				return err
 			}
 
 			var (
-				expName = args[0]
-				vmName  = args[1]
-				disk    = MustGetString(cmd.Flags(), "disk")
-				inject  = MustGetBool(cmd.Flags(), "replicate-injects")
+				disk   = MustGetString(cmd.Flags(), "disk")
+				inject = MustGetBool(cmd.Flags(), "replicate-injects")
 			)
 
 			if cpu != 0 && (cpu < 1 || cpu > 8) {
@@ -305,14 +469,16 @@ func newVMRedeployCmd() *cobra.Command {
 				vm.InjectPartition(part),
 			}
 
-			err := vm.Redeploy(expName, vmName, opts...)
-			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to redeploy the "+vmName+" VM")
+			for _, vmName := range vmNames {
+				err := vm.Redeploy(expName, vmName, opts...)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to redeploy the "+vmName+" VM")
 
-				return err.Humanized()
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm redeployed", "vm", vmName, "exp", expName)
 			}
-
-			plog.Info(plog.TypeSystem, "vm redeployed", "vm", vmName, "exp", expName)
 
 			return nil
 		},
@@ -326,6 +492,7 @@ func newVMRedeployCmd() *cobra.Command {
 	cmd.Flags().BoolP("replicate-injects", "r", false, "Recreate disk snapshot and VM injections")
 	cmd.Flags().
 		IntVarP(&part, "partition", "p", 1, "Partition of disk to inject files into (only used if disk option is specified)")
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
@@ -337,32 +504,32 @@ func newVMShutdownCmd() *cobra.Command {
   experiment.  The shutdown is not graceful and is equivalent to pulling the power cord`
 
 	cmd := &cobra.Command{
-		Use:               "shutdown <experiment name> <vm name>",
+		Use:               "shutdown <experiment name> [vm name]",
 		Short:             "Shutdown a running or paused VM",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != shutdownArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.Shutdown(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to shutdown the "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm shutdown", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.Shutdown(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to shutdown the "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm shutdown", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
@@ -374,32 +541,32 @@ func newVMKillCmd() *cobra.Command {
   experiment`
 
 	cmd := &cobra.Command{
-		Use:               "kill <experiment name> <vm name>",
+		Use:               "kill <experiment name> [vm name]",
 		Short:             "Kill a running or pause VM",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != killArgs {
-				return errors.New("must provide an experiment and VM name")
-			}
-
-			var (
-				expName = args[0]
-				vmName  = args[1]
-			)
-
-			err := vm.Kill(expName, vmName)
+			expName, vmNames, err := vmTargetNamesForCommand(cmd, args)
 			if err != nil {
-				err := util.HumanizeError(err, "%s", "Unable to kill the "+vmName+" VM")
-
-				return err.Humanized()
+				return err
 			}
 
-			plog.Info(plog.TypeSystem, "vm killed", "vm", vmName, "exp", expName)
+			for _, vmName := range vmNames {
+				err := vm.Kill(expName, vmName)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to kill the "+vmName+" VM")
+
+					return err.Humanized()
+				}
+
+				plog.Info(plog.TypeSystem, "vm killed", "vm", vmName, "exp", expName)
+			}
 
 			return nil
 		},
 	}
+
+	addVMFilterFlag(cmd)
 
 	return cmd
 }
