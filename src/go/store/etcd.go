@@ -18,7 +18,7 @@ type Etcd struct {
 	cli *clientv3.Client
 }
 
-func NewEtcd() Store { //nolint:ireturn // factory
+func NewEtcd() Store {
 	return new(Etcd)
 }
 

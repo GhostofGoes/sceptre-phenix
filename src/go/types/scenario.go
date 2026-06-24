@@ -28,7 +28,7 @@ func init() { //nolint:gochecknoinits // interface assertion
 	_, _ = spec.(ifaces.ScenarioAppHost)
 }
 
-func DecodeScenarioFromConfig(c store.Config) (ifaces.ScenarioSpec, error) { //nolint:ireturn // interface
+func DecodeScenarioFromConfig(c store.Config) (ifaces.ScenarioSpec, error) {
 	var (
 		iface         any
 		latestVersion = version.StoredVersion[c.Kind]
@@ -69,7 +69,7 @@ func DecodeScenarioFromConfig(c store.Config) (ifaces.ScenarioSpec, error) { //n
 	return spec, nil
 }
 
-func MakeCustomScenarioFromConfig( //nolint:ireturn // interface
+func MakeCustomScenarioFromConfig(
 	c store.Config,
 	disabledApps []string,
 ) (ifaces.ScenarioSpec, error) {

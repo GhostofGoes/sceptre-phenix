@@ -55,7 +55,6 @@ func init() { //nolint:gochecknoinits // component registration
 	}
 }
 
-//nolint:ireturn // factory function returns interface
 func GetComponent(name string) Component {
 	cmp, ok := components[name]
 	if !ok {

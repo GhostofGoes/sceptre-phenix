@@ -37,7 +37,7 @@ func (n Network) Routes() []ifaces.NodeNetworkRoute {
 	return routes
 }
 
-func (n Network) OSPF() ifaces.NodeNetworkOSPF { //nolint:ireturn // interface
+func (n Network) OSPF() ifaces.NodeNetworkOSPF {
 	return n.OSPFF
 }
 
@@ -379,7 +379,7 @@ func (rs Ruleset) Rules() []ifaces.NodeNetworkRulesetRule {
 	return rules
 }
 
-func (rs *Ruleset) UnshiftRule() ifaces.NodeNetworkRulesetRule { //nolint:ireturn // interface
+func (rs *Ruleset) UnshiftRule() ifaces.NodeNetworkRulesetRule {
 	minVal := -1
 
 	for _, rule := range rs.RulesF {
@@ -444,11 +444,11 @@ func (r Rule) Protocol() string {
 	return r.ProtocolF
 }
 
-func (r Rule) Source() ifaces.NodeNetworkRulesetRuleAddrPort { //nolint:ireturn // interface
+func (r Rule) Source() ifaces.NodeNetworkRulesetRuleAddrPort {
 	return r.SourceF
 }
 
-func (r Rule) Destination() ifaces.NodeNetworkRulesetRuleAddrPort { //nolint:ireturn // interface
+func (r Rule) Destination() ifaces.NodeNetworkRulesetRuleAddrPort {
 	return r.DestinationF
 }
 

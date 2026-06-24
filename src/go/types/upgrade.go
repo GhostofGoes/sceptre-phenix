@@ -18,7 +18,7 @@ func RegisterUpgrader(v string, u Upgrader) {
 	upgraders[v] = u
 }
 
-func GetUpgrader(v string) Upgrader { //nolint:ireturn // interface
+func GetUpgrader(v string) Upgrader {
 	v = strings.ToLower(v)
 
 	return upgraders[v]

@@ -128,7 +128,7 @@ func (s *SOH) deployCapture(exp *types.Experiment, dryrun bool) error {
 	return nil
 }
 
-func (s *SOH) buildElasticServerNode( //nolint:ireturn // complex logic
+func (s *SOH) buildElasticServerNode(
 	exp *types.Experiment,
 	ip string,
 	cidr int,
