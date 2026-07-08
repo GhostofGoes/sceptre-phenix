@@ -11,7 +11,7 @@ The following output results from `bin/phenix --help`:
 
 Example
 
-	$> bin/phenix config create data/topology.yml data/scenario.yml data/experiment.yml
+	$> bin/phenix config create /path/to/topology.yml /path/to/scenario.yml /path/to/experiment.yml
 	Topology/foo-bar-topo config created
 	Scenario/foo-bar-scenario config created
 	experiment app sink not found
