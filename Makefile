@@ -1,4 +1,4 @@
-.PHONY: all build check clean deb docker examples example-go example-python format generate help help-all install-dev install-wrapper uninstall-wrapper lint run-examples test tunneler ui version
+.PHONY: all build check clean deb docker examples example-go example-python format generate help help-all install-dev update-actions install-wrapper uninstall-wrapper lint prek run-examples test tunneler ui version
 .DEFAULT_GOAL := help
 
 DOCKER_TAG ?= latest
@@ -13,26 +13,28 @@ help:
 	@echo "Available targets:"
 	@echo ""
 	@echo "Development:"
-	@echo "  all          - Run all development tasks (format, lint, test) and build examples"
-	@echo "  check        - Run linters without fixing (for CI)"
-	@echo "  format       - Format code"
-	@echo "  generate     - Run code generation (protobuf, mocks, etc)"
-	@echo "  lint         - Run linters and fix issues"
-	@echo "  test         - Run unit tests"
-	@echo "  examples     - Build/Check example applications"
-	@echo "  run-examples - Run example applications"
+	@echo "  all            - Run all development tasks (format, lint, test) and build examples"
+	@echo "  check          - Run linters without fixing (for CI)"
+	@echo "  format         - Format code"
+	@echo "  generate       - Run code generation (protobuf, mocks, etc)"
+	@echo "  lint           - Run linters and fix issues"
+	@echo "  prek           - Run prek hooks across the whole repository"
+	@echo "  test           - Run unit tests"
+	@echo "  examples       - Build/Check example applications"
+	@echo "  run-examples   - Run example applications"
+	@echo "  update-actions - Update pinned actions in GitHub workflows"
 	@echo ""
 	@echo "Build:"
-	@echo "  build        - Build the main phenix binary"
-	@echo "  deb          - Build the phenix .deb package"
-	@echo "  docker       - Build the phenix docker image"
-	@echo "  ui           - Build the frontend UI"
-	@echo "  tunneler     - Build phenix-tunneler binaries"
+	@echo "  build          - Build the main phenix binary"
+	@echo "  deb            - Build the phenix .deb package"
+	@echo "  docker         - Build the phenix docker image"
+	@echo "  ui             - Build the frontend UI"
+	@echo "  tunneler       - Build phenix-tunneler binaries"
 	@echo ""
 	@echo "Installation:"
-	@echo "  install-dev  - Install development and build dependencies"
-	@echo "  install-wrapper - Install the Docker wrapper script (required for shell completion)"
-	@echo "  uninstall-wrapper - Uninstall the Docker wrapper script"
+	@echo "  install-dev        - Install development and build dependencies"
+	@echo "  install-wrapper    - Install the Docker wrapper script (required for shell completion)"
+	@echo "  uninstall-wrapper  - Uninstall the Docker wrapper script"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  clean        - Clean build artifacts"
@@ -72,6 +74,10 @@ lint: generate
 	$(MAKE) -C src/go lint
 	$(MAKE) -C examples lint
 
+prek:
+	$(call check-command,prek,Please install prek (e.g. pip install 'prek>=0.4.3'))
+	prek run --all-files
+
 format:
 	$(MAKE) -C src/go format
 	$(MAKE) -C examples format
@@ -86,8 +92,14 @@ install-dev:
 	$(call check-command,yarn,Please install yarn (e.g. sudo npm install -g yarn))
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 	go install go.uber.org/mock/mockgen@latest
+	pip install 'prek>=0.4.3'
+	prek install
 	$(MAKE) -C src/go install-dev
 	$(MAKE) -C examples install-dev
+
+update-actions:
+	@echo "Updating pinned actions in GitHub workflows..."
+	@docker run --rm -v $(CURDIR):/workflows mheap/pin-github-action .github/workflows/
 
 install-wrapper:
 	@echo "Installing wrapper script to /usr/local/bin/phenix (requires sudo)..."

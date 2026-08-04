@@ -1,0 +1,34 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    name: prek
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install prek
+        run: pip install 'prek>=0.4.3'
+      - name: Validate prek config
+        run: prek validate-config prek.toml
+      - name: Run prek
+        # The no-commit-to-branch hook exists to stop contributors from
+        # committing straight to main/master locally. It rightfully fails on
+        # push/PR branches that violate the naming rules, but it must be
+        # skipped here once code has actually landed on main/master upstream,
+        # otherwise every push to those branches would fail this check.
+        env:
+          PREK_SKIP: ${{ (github.ref == 'refs/heads/main') && 'no-commit-to-branch' || '' }}
+        run: prek run --all-files --show-diff-on-failure

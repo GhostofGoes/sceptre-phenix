@@ -1,8 +1,9 @@
-Contributing to SCEPTRE Phenix
+# Contributing to SCEPTRE Phenix
 
 Thank you for your interest in contributing to SCEPTRE Phenix! We welcome contributions from everyone and appreciate your efforts to improve our project. This guide will help you understand how to contribute effectively.
 
-> Note: A failure to follow this guide will result in delay of PRs until there is compliance.
+> [!NOTE]
+> A failure to follow this guide will result in delay of PRs until there is compliance.
 
 ## Table of Contents
 
@@ -11,6 +12,8 @@ Thank you for your interest in contributing to SCEPTRE Phenix! We welcome contri
   - [Reporting Issues](#reporting-issues)
   - [Suggesting Enhancements](#suggesting-enhancements)
   - [Submitting Code](#submitting-code)
+- [Code Quality](#code-quality)
+- [Updating Actions](#updating-actions)
 - [License](#license)
 
 ## Getting Started
@@ -134,5 +137,35 @@ We welcome suggestions for improvements! Please open an issue to discuss your id
 
 6. **Open a Pull Request**: Go to the original repository and open a [pull request](https://github.com/sandialabs/sceptre-phenix/pulls). Provide a clear description of your changes and reference any related issues.
 
+## Code Quality
+
+This project uses [prek](https://prek.j178.dev/) (a Rust drop-in alternative to `pre-commit`) to enforce repository-wide checks (shell linting, YAML linting, spell-checking, conventional commit validation, and general hygiene). The same checks run in CI via the [Lint workflow](workflows/lint.yml).
+
+Install the dev tooling and register git pre-commit hooks once:
+
+```bash
+make install-dev
+```
+
+Run every hook against every file manually:
+
+```bash
+make lint
+# or, equivalently
+prek run --all-files
+```
+
+## Updating Actions
+
+To update the pinned versions of Actions in the GitHub Workflows:
+
+1. Change the version comment, e.g. `# v4` to `# v7` to update an action from v4 to v7.
+1. Update the pinned hash:
+
+    ```bash
+    make update-actions
+    ```
+
 ## License
+
 By contributing to this project, you agree that your contributions will be licensed under the [GNU](https://github.com/sandialabs/sceptre-phenix/blob/main/LICENSE) License.
