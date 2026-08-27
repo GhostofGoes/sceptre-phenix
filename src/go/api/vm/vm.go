@@ -118,6 +118,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 
 			if iface.VLAN() != "" { // might be empty for external nodes
 				vm.Networks = append(vm.Networks, iface.VLAN())
+				vm.IfaceNames = append(vm.IfaceNames, iface.Name())
 				vm.Interfaces[iface.VLAN()] = iface.Address() // empty for DHCP
 			}
 		}
@@ -180,7 +181,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 // name. If the experiment is running, topology VM settings are combined with
 // running VM details. It returns a pointer to a VM struct, and any errors
 // encountered while retrieving the VM.
-func Get(expName, vmName string) (*mm.VM, error) {
+func Get(expName, vmName string) (*mm.VM, error) { //nolint:funlen // complex logic
 	if expName == "" {
 		return nil, errors.New("no experiment name provided")
 	}
@@ -223,6 +224,7 @@ func Get(expName, vmName string) (*mm.VM, error) {
 		for _, iface := range node.Network().Interfaces() {
 			vm.IPv4 = append(vm.IPv4, iface.Address()) // empty for DHCP
 			vm.Networks = append(vm.Networks, iface.VLAN())
+			vm.IfaceNames = append(vm.IfaceNames, iface.Name())
 			vm.Interfaces[iface.VLAN()] = iface.Address() // empty for DHCP
 		}
 
