@@ -65,20 +65,45 @@ func StartCapture(expName, vmName string, iface int, out string) error {
 		return errors.New("no output file provided")
 	}
 
-	vm, err := Get(expName, vmName)
+	v, err := Get(expName, vmName)
 	if err != nil {
 		return fmt.Errorf("getting VM details: %w", err)
 	}
 
-	if !vm.Running {
+	return StartCaptureForVM(v, expName, vmName, iface, out)
+}
+
+// StartCaptureForVM behaves like StartCapture, but accepts an already-fetched
+// VM instead of looking it up itself. Callers that already have the VM's
+// details on hand (e.g. because they resolved an interface name to an index
+// via ResolveInterface, which also requires the VM's details) should use this
+// to avoid an extra, redundant VM lookup.
+func StartCaptureForVM(v *mm.VM, expName, vmName string, iface int, out string) error {
+	if v == nil {
+		return errors.New("no VM details provided")
+	}
+
+	if expName == "" {
+		return errors.New("no experiment name provided")
+	}
+
+	if vmName == "" {
+		return errors.New("no VM name provided")
+	}
+
+	if out == "" {
+		return errors.New("no output file provided")
+	}
+
+	if !v.Running {
 		return errors.New("vm is not running")
 	}
 
-	if iface < 0 || iface >= len(vm.Networks) {
+	if iface < 0 || iface >= len(v.Networks) {
 		return errors.New("invalid interface provided for capture")
 	}
 
-	if vm.Networks[iface] == "disconnected" {
+	if v.Networks[iface] == "disconnected" {
 		return errors.New("cannot capture on a disconnected interface")
 	}
 

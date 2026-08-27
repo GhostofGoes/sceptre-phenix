@@ -191,7 +191,7 @@ func TestVMCaptureStartResolvesInterfaceByName(t *testing.T) {
 
 	fake := &captureCmdTestMM{
 		vmInfo: mm.VMs{
-			{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}},
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
 		},
 	}
 	installCaptureCmdTestMM(t, fake)
@@ -216,7 +216,7 @@ func TestVMCaptureStartUnknownInterfaceName(t *testing.T) {
 
 	fake := &captureCmdTestMM{
 		vmInfo: mm.VMs{
-			{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}},
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
 		},
 	}
 	installCaptureCmdTestMM(t, fake)
@@ -240,7 +240,7 @@ func TestVMCaptureStopResolvesInterfaceByName(t *testing.T) {
 
 	fake := &captureCmdTestMM{
 		vmInfo: mm.VMs{
-			{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}},
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
 		},
 		captures: []mm.Capture{
 			{VM: "test-vm", Interface: 0, Filepath: "/tmp/0.pcap"},
@@ -265,7 +265,7 @@ func TestVMCaptureStopUnknownInterfaceName(t *testing.T) {
 
 	fake := &captureCmdTestMM{
 		vmInfo: mm.VMs{
-			{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}},
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
 		},
 		captures: []mm.Capture{
 			{VM: "test-vm", Interface: 0, Filepath: "/tmp/0.pcap"},

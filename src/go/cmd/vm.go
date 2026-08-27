@@ -961,7 +961,7 @@ func newVMCaptureCmd() *cobra.Command {
 				return err.Humanized()
 			}
 
-			if err := vm.StartCapture(expName, vmName, iface, out); err != nil {
+			if err := vm.StartCaptureForVM(v, expName, vmName, iface, out); err != nil {
 				err := util.HumanizeError(
 					err,
 					"%s",

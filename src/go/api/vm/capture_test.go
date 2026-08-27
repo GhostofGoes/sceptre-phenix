@@ -2,6 +2,7 @@ package vm_test
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -562,7 +563,9 @@ func TestResolveInterfaceByName(t *testing.T) {
 	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
 
 	fake := &captureTestMM{
-		vmInfo: mm.VMs{{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}}},
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
+		},
 	}
 	installCaptureTestMM(t, fake)
 
@@ -588,7 +591,9 @@ func TestResolveInterfaceByNameCaseInsensitive(t *testing.T) {
 	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
 
 	fake := &captureTestMM{
-		vmInfo: mm.VMs{{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}}},
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
+		},
 	}
 	installCaptureTestMM(t, fake)
 
@@ -611,7 +616,9 @@ func TestResolveInterfaceUnknownName(t *testing.T) {
 	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
 
 	fake := &captureTestMM{
-		vmInfo: mm.VMs{{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}}},
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
+		},
 	}
 	installCaptureTestMM(t, fake)
 
@@ -625,6 +632,57 @@ func TestResolveInterfaceUnknownName(t *testing.T) {
 	}
 }
 
+// TestResolveInterfaceByNameWhenMinimegaReordersInterfaces is a regression
+// test verifying that interface names remain correctly aligned with their
+// interface index even when minimega reports the VM's networks in a
+// different order than they were declared in the topology. minimega is the
+// source of truth for interface ordering on a running VM (see the ordering
+// note on api/vm/vm.go's `List`/`Get`), so `vm.Get` must reconcile
+// `IfaceNames` against that minimega-reported order rather than leaving it
+// in topology-declaration order.
+func TestResolveInterfaceByNameWhenMinimegaReordersInterfaces(t *testing.T) {
+	// Topology declares IF0/EXP_1 then IF1/EXP_2, but minimega reports the
+	// VM's networks in the opposite order.
+	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
+
+	fake := &captureTestMM{
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_2 (102)", "EXP_1 (101)"}},
+		},
+	}
+	installCaptureTestMM(t, fake)
+
+	v, err := vm.Get("test-experiment", "test-vm")
+	if err != nil {
+		t.Fatalf("unexpected error getting VM: %v", err)
+	}
+
+	wantIfaceNames := []string{"IF1", "IF0"}
+	if !reflect.DeepEqual(v.IfaceNames, wantIfaceNames) {
+		t.Fatalf("expected IfaceNames %v to be reordered to match minimega's Networks %v, got %v", wantIfaceNames, v.Networks, v.IfaceNames)
+	}
+
+	// IF0 is declared first in the topology, but minimega reports it second
+	// (index 1) for this VM, so resolving by name must return 1, not 0.
+	idx, err := vm.ResolveInterface(v, "IF0")
+	if err != nil {
+		t.Fatalf("unexpected error resolving interface by name: %v", err)
+	}
+
+	if idx != 1 {
+		t.Fatalf("expected IF0 to resolve to index 1 (minimega's order), got %d", idx)
+	}
+
+	idx, err = vm.ResolveInterface(v, "IF1")
+	if err != nil {
+		t.Fatalf("unexpected error resolving interface by name: %v", err)
+	}
+
+	if idx != 0 {
+		t.Fatalf("expected IF1 to resolve to index 0 (minimega's order), got %d", idx)
+	}
+}
+
 // TestStartCaptureByInterfaceName is an end-to-end (within the vm package)
 // check that StartCapture works when combined with ResolveInterface to
 // support specifying an interface by name, mirroring how the CLI layer uses
@@ -633,7 +691,9 @@ func TestStartCaptureByInterfaceName(t *testing.T) {
 	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
 
 	fake := &captureTestMM{
-		vmInfo: mm.VMs{{Name: "test-vm", Running: true, Networks: []string{"EXP_1", "EXP_2"}}},
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
+		},
 	}
 	installCaptureTestMM(t, fake)
 
@@ -653,5 +713,45 @@ func TestStartCaptureByInterfaceName(t *testing.T) {
 
 	if fake.startCalls != 1 {
 		t.Fatalf("expected StartVMCapture to be called once, got %d calls", fake.startCalls)
+	}
+}
+
+// TestStartCaptureForVMSkipsRedundantLookup verifies that StartCaptureForVM
+// uses the caller-provided VM details directly instead of re-fetching them,
+// so callers that already resolved the VM (e.g. to resolve an interface name
+// via ResolveInterface) don't pay for a second lookup.
+func TestStartCaptureForVMSkipsRedundantLookup(t *testing.T) {
+	getNamedCaptureTestExperiment(t, []string{"IF0", "IF1"}, []string{"EXP_1", "EXP_2"}, t.TempDir())
+
+	fake := &captureTestMM{
+		vmInfo: mm.VMs{
+			{Name: "test-vm", Running: true, Networks: []string{"EXP_1 (101)", "EXP_2 (102)"}},
+		},
+	}
+	installCaptureTestMM(t, fake)
+
+	v, err := vm.Get("test-experiment", "test-vm")
+	if err != nil {
+		t.Fatalf("unexpected error getting VM: %v", err)
+	}
+
+	// Zero out the fake's GetVMInfo results so any *additional* call to
+	// vm.Get (which calls mm.GetVMInfo) would cause StartCaptureForVM to see
+	// no VM details and fail with a different error than expected below,
+	// proving StartCaptureForVM doesn't call Get again internally.
+	fake.vmInfo = nil
+
+	if err := vm.StartCaptureForVM(v, "test-experiment", "test-vm", 1, "out.pcap"); err != nil {
+		t.Fatalf("unexpected error starting capture via pre-fetched VM: %v", err)
+	}
+
+	if fake.startCalls != 1 {
+		t.Fatalf("expected StartVMCapture to be called once, got %d calls", fake.startCalls)
+	}
+}
+
+func TestStartCaptureForVMNilVM(t *testing.T) {
+	if err := vm.StartCaptureForVM(nil, "test-experiment", "test-vm", 0, "out.pcap"); err == nil {
+		t.Fatal("expected error for nil VM")
 	}
 }
