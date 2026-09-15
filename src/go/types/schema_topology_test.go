@@ -109,7 +109,25 @@ func TestTopologySchema(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "node with no drives is rejected",
+			name: "printer node type is rejected",
+			node: func() map[string]any {
+				n := validNode()
+				n["type"] = "Printer"
+				return n
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "server node type is rejected",
+			node: func() map[string]any {
+				n := validNode()
+				n["type"] = "Server"
+				return n
+			}(),
+			wantErr: true,
+		},
+		{
+			name:    "node with no drives is rejected",
 			node: func() map[string]any {
 				n := validNode()
 				n["hardware"].(map[string]any)["drives"] = []any{}
