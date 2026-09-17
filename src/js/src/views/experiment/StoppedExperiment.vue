@@ -434,8 +434,11 @@
                     @update:modelValue="
                       (value) => assignDisk(props.row.name, value)
                     ">
-                    <option v-for="(d, index) in disks" :key="index" :value="d">
-                      {{ getBaseName(d) }}
+                    <option
+                      v-for="d in disks"
+                      :key="d.fullPath"
+                      :value="d.fullPath">
+                      {{ getDiskLabel(d) }}
                     </option>
                   </b-select>
                 </b-tooltip>
@@ -674,13 +677,14 @@
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import { roleAllowed } from '@/utils/rbac.js';
   import axiosInstance from '@/utils/axios.js';
+  import { getDiskLabel } from '@/utils/disk.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
 
   export default {
     mixins: [formattingMixin],
     setup() {
-      return { roleAllowed, tagCount };
+      return { getDiskLabel, roleAllowed, tagCount };
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);
@@ -970,11 +974,11 @@
             this.isWaiting = false;
 
             for (let i = 0; i < response.data.disks.length; i++) {
-              this.disks.push(response.data.disks[i].fullPath);
+              this.disks.push(response.data.disks[i]);
             }
 
             this.disks.sort((a, b) =>
-              this.getBaseName(a).localeCompare(this.getBaseName(b)),
+              this.getDiskLabel(a).localeCompare(this.getDiskLabel(b)),
             );
           },
           (err) => {
@@ -1673,7 +1677,7 @@
       },
 
       getDiskToolTip(fullPath) {
-        return this.disks.indexOf(fullPath) == -1
+        return this.disks.findIndex((disk) => disk.fullPath == fullPath) == -1
           ? 'menu for assigning vm(s) disk'
           : fullPath;
       },

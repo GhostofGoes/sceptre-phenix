@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
+- **Disks UI**: List images recursively under the minimega files directory, preserve topology-referenced external images, and display paths that distinguish duplicate filenames.
 
 ## [1.0.0]
 

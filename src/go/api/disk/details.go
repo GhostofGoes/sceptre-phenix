@@ -51,6 +51,7 @@ func StringToKind(kind string) Kind {
 type Details struct {
 	Kind          Kind     `json:"kind"`
 	Name          string   `json:"name"`
+	DisplayName   string   `json:"displayName"`
 	FullPath      string   `json:"fullPath"`
 	Size          string   `json:"size"`
 	VirtualSize   string   `json:"virtualSize"`

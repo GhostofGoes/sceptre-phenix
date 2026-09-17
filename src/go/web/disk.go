@@ -78,7 +78,11 @@ func GetDisks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sort.Slice(allowed, func(i, j int) bool {
-		return allowed[i].Name < allowed[j].Name
+		if allowed[i].DisplayName == allowed[j].DisplayName {
+			return allowed[i].FullPath < allowed[j].FullPath
+		}
+
+		return allowed[i].DisplayName < allowed[j].DisplayName
 	})
 
 	body, err := json.Marshal(util.WithRoot("disks", allowed))

@@ -136,22 +136,26 @@ func (MMDiskFiles) GetImage(path string) (Details, error) {
 
 // Get all image files from the minimega files directory.
 func getAllFiles(details map[string]Details) {
+	getAllFilesWith(details, mmcli.RunTabular, resolveImage)
+}
+
+func getAllFilesWith(
+	details map[string]Details,
+	runTabular func(*mmcli.Command) []map[string]string,
+	resolve func(string) []Details,
+) {
 	// First, get file listings from cluster nodes.
 	cmd := mmcli.NewCommand()
-	cmd.Command = "file list"
+	cmd.Command = "file list / recursive"
 
-	for _, row := range mmcli.RunTabular(cmd) {
-		if _, ok := details[row["name"]]; row["dir"] == "" && !ok {
-			for _, image := range resolveImage(mm.GetMMFullPath(row["name"])) {
-				if _, ok2 := details[image.Name]; !ok2 {
-					details[image.Name] = image
-				}
-			}
+	for _, row := range runTabular(cmd) {
+		if row["dir"] == "" {
+			addImagePathWith(details, row["name"], resolve)
 		}
 	}
 }
 
-// Retrieves all the unique image names defined in the topology.
+// Retrieves all the unique image paths defined in the topology.
 func getTopologyFiles(expName string, details map[string]Details) error {
 	// Retrieve the experiment
 	exp, err := experiment.Get(expName)
@@ -165,22 +169,28 @@ func getTopologyFiles(expName string, details map[string]Details) error {
 				continue
 			}
 
-			path := drive.Image()
-			if !filepath.IsAbs(path) {
-				path = mm.GetMMFullPath(path)
-			}
-
-			if _, ok := details[filepath.Base(path)]; !ok {
-				for _, image := range resolveImage(path) {
-					if _, ok2 := details[image.Name]; !ok2 {
-						details[image.Name] = image
-					}
-				}
-			}
+			addImagePath(details, drive.Image())
 		}
 	}
 
 	return nil
+}
+
+func addImagePath(details map[string]Details, path string) {
+	addImagePathWith(details, path, resolveImage)
+}
+
+func addImagePathWith(details map[string]Details, path string, resolve func(string) []Details) {
+	if !filepath.IsAbs(path) {
+		path = mm.GetMMFullPath(path)
+	}
+
+	for _, image := range resolve(path) {
+		key := filepath.Clean(image.FullPath)
+		if _, ok := details[key]; !ok {
+			details[key] = image
+		}
+	}
 }
 
 func resolveImage(path string) []Details {
@@ -212,6 +222,7 @@ func resolveImage(path string) []Details {
 	for i, row := range images {
 		image := Details{ //nolint:exhaustruct // partial initialization
 			Name:          filepath.Base(row["image"]),
+			DisplayName:   displayImagePath(row["image"]),
 			FullPath:      row["image"],
 			Size:          row["disksize"],
 			VirtualSize:   row["virtualsize"],
@@ -249,4 +260,16 @@ func resolveImage(path string) []Details {
 	}
 
 	return imageDetails
+}
+
+func displayImagePath(path string) string {
+	cleanPath := filepath.Clean(path)
+	filesDir := filepath.Clean(mm.GetMMFullPath(""))
+	relative, err := filepath.Rel(filesDir, cleanPath)
+
+	if err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return relative
+	}
+
+	return cleanPath
 }

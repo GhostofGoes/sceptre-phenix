@@ -7,7 +7,9 @@
       has-modal-card>
       <div class="modal-card">
         <header class="modal-card-head">
-          <p class="modal-card-title">{{ detailsModal.disk.name }}</p>
+          <p class="modal-card-title">
+            {{ getDiskLabel(detailsModal.disk) }}
+          </p>
         </header>
         <section class="modal-card-body">
           <p class="title is-5">Details</p>
@@ -45,7 +47,7 @@
             <hr />
             <p class="title is-5">Backing Chain</p>
             <div style="text-align: center">
-              <b>{{ detailsModal.disk.name }}</b>
+              <b>{{ getDiskLabel(detailsModal.disk) }}</b>
               <div
                 v-for="(i, index) in detailsModal.disk.backingImages"
                 :key="index">
@@ -147,7 +149,7 @@
             <option value="">None</option>
             <template v-for="d in disks" :key="d.fullPath">
               <option v-if="d !== detailsModal.disk" :value="d.fullPath">
-                {{ d.name }}
+                {{ getDiskLabel(d) }}
               </option>
             </template>
           </b-select>
@@ -212,7 +214,7 @@
           placeholder="Find a disk"
           icon="search"
           @select="(option) => (selected = option)"
-          :data="filteredDisks.map((d) => d.name)"
+          :data="filteredDisks.map(getDiskLabel)"
           style="width: 512px">
         </b-autocomplete>
 
@@ -267,8 +269,8 @@
         </section>
       </template>
 
-      <b-table-column field="name" label="Name" sortable v-slot="props">
-        {{ props.row.name }}
+      <b-table-column field="displayName" label="Name" sortable v-slot="props">
+        {{ getDiskLabel(props.row) }}
       </b-table-column>
 
       <b-table-column field="kind" label="Kind" sortable v-slot="props">
@@ -314,10 +316,11 @@
   import { usePhenixStore } from '@/store.js';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
+  import { getDiskLabel } from '@/utils/disk.js';
 
   export default {
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable(), getDiskLabel, roleAllowed };
     },
     async created() {
       this.updateDisks();
@@ -333,7 +336,7 @@
           ? []
           : this.disks.filter(
               (disk) =>
-                disk.name
+                getDiskLabel(disk)
                   .toLowerCase()
                   .indexOf(this.filterString.toLowerCase()) >= 0,
             );

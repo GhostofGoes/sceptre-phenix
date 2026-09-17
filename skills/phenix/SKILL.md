@@ -358,6 +358,10 @@ running `phenix ui` server, or building a UI integration).
 
 ## Gotchas
 
+- **Disk listings recurse through minimega's configured file directory.** Images
+  under subdirectories are shown with minimega-relative paths; absolute images
+  outside that directory appear only when referenced by a stored experiment
+  topology and are shown with absolute paths.
 - **Kind names in `config`/`experiment` commands are case-insensitive but must be one of**
   `topology, scenario, experiment, image, user, role` (plus `all` where supported) —
   anything else errors before hitting the store.
