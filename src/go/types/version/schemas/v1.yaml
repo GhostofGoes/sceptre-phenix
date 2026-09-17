@@ -104,6 +104,28 @@ components:
         roleName:
           type: string
           example: Example Role
+        resourceLimits:
+          type: object
+          description: >-
+            Optional caps on how much of a resource this role's users may
+            consume. A zero/omitted field means "no limit".
+          properties:
+            maxVCPUs:
+              type: integer
+              description: Max vCPUs allowed for a single VM.
+              example: 4
+            maxMemoryMB:
+              type: integer
+              description: Max RAM (in MB) allowed for a single VM.
+              example: 8192
+            maxDiskGB:
+              type: integer
+              description: Max size (in GB) a disk image may be resized to.
+              example: 100
+            maxVMsPerExperiment:
+              type: integer
+              description: Max number of VMs allowed in a single topology.
+              example: 20
     User:
       type: object
       required:

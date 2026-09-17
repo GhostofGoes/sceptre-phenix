@@ -42,6 +42,11 @@ spec:
 			- bar_inverter
 			verbs:
 			- get
+		resourceLimits:
+			maxVCPUs: 4
+			maxMemoryMB: 8192
+			maxDiskGB: 100
+			maxVMsPerExperiment: 20
 */
 
 var ErrPasswordInvalid = errors.New("password invalid")

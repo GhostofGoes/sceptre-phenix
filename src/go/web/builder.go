@@ -96,6 +96,22 @@ func CreateExperimentFromBuilder(w http.ResponseWriter, r *http.Request) error {
 		return weberror.NewWebError(err, "unmarshaling request body")
 	}
 
+	if err := checkRawTopologyResourceLimits(role, req.Topology); err != nil {
+		plog.Warn(
+			plog.TypeSecurity,
+			"topology from builder exceeds resource limits",
+			"user",
+			ctx.Value(middleware.ContextKeyUser),
+			"name",
+			req.Name,
+			"err",
+			err,
+		)
+
+		return weberror.NewWebError(err, "topology exceeds role's resource limits").
+			WithMetadata("type", "topology", true)
+	}
+
 	// create new topology
 
 	topo, _ := store.NewConfig("topology/" + req.Name)
@@ -292,6 +308,22 @@ func UpdateExperimentFromBuilder(w http.ResponseWriter, r *http.Request) error {
 
 	if err := json.Unmarshal(body, &req); err != nil {
 		return weberror.NewWebError(err, "unmarshaling request body")
+	}
+
+	if err := checkRawTopologyResourceLimits(role, req.Topology); err != nil {
+		plog.Warn(
+			plog.TypeSecurity,
+			"topology from builder exceeds resource limits",
+			"user",
+			ctx.Value(middleware.ContextKeyUser),
+			"name",
+			req.Name,
+			"err",
+			err,
+		)
+
+		return weberror.NewWebError(err, "topology exceeds role's resource limits").
+			WithMetadata("type", "topology", true)
 	}
 
 	// update existing topology

@@ -32,6 +32,8 @@ import (
 	"phenix/api/settings"
 	"phenix/api/vm"
 	"phenix/app"
+	"phenix/store"
+	"phenix/types"
 	putil "phenix/util"
 	"phenix/util/common"
 	"phenix/util/mm"
@@ -223,6 +225,46 @@ func CreateExperiment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer cache.UnlockExperiment(req.GetName())
+
+	if req.GetTopology() != "" {
+		topoC, err := store.NewConfig("topology/" + req.GetTopology())
+		if err == nil {
+			err = store.Get(topoC)
+		}
+
+		if err != nil {
+			plog.Error(plog.TypeSystem, "getting topology config", "topology", req.GetTopology(), "err", err)
+			http.Error(w, "unable to get topology", http.StatusBadRequest)
+
+			return
+		}
+
+		topo, err := types.DecodeTopologyFromConfig(*topoC)
+		if err != nil {
+			plog.Error(plog.TypeSystem, "decoding topology config", "topology", req.GetTopology(), "err", err)
+			http.Error(w, "unable to decode topology", http.StatusInternalServerError)
+
+			return
+		}
+
+		if err := checkTopologyResourceLimits(role, topo); err != nil {
+			plog.Warn(
+				plog.TypeSecurity,
+				"creating experiment exceeds resource limits",
+				"user",
+				middleware.UserFromContext(ctx),
+				"exp",
+				req.GetName(),
+				"topology",
+				req.GetTopology(),
+				"err",
+				err,
+			)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+	}
 
 	deployMode, err := common.ParseDeployMode(req.GetDeployMode())
 	if err != nil {
@@ -1448,6 +1490,24 @@ func UpdateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkVMHardwareLimits(role, int(req.GetCpus()), int(req.GetRam())); err != nil {
+		plog.Warn(
+			plog.TypeSecurity,
+			"updating vm exceeds resource limits",
+			"user",
+			middleware.UserFromContext(ctx),
+			"exp",
+			expName,
+			"vm",
+			name,
+			"err",
+			err,
+		)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
 	opts := []vm.UpdateOption{
 		vm.UpdateExperiment(expName),
 		vm.UpdateVM(name),
@@ -1584,6 +1644,24 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 				expName,
 				"vm",
 				vmRequest.GetName(),
+			)
+
+			continue
+		}
+
+		// Skip any vms whose requested hardware exceeds the role's resource limits
+		if err := checkVMHardwareLimits(role, int(vmRequest.GetCpus()), int(vmRequest.GetRam())); err != nil {
+			plog.Warn(
+				plog.TypeSecurity,
+				"updating vm exceeds resource limits",
+				"user",
+				middleware.UserFromContext(ctx),
+				"exp",
+				expName,
+				"vm",
+				vmRequest.GetName(),
+				"err",
+				err,
 			)
 
 			continue

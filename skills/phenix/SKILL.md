@@ -255,6 +255,34 @@ phenix config delete <kind>/<name> ...              # delete one or more specifi
 phenix config delete all [kind]                     # delete every stored config, or every config of one kind
 ```
 
+### RBAC roles and resource limits
+
+Roles (`kind: Role`, stored via `phenix config create role/<name>`) grant
+`policies` (resource + resourceName glob + verb) as before. Roles may also set
+an optional `resourceLimits` block to cap VM hardware/count for users with
+that role — unset/zero fields mean unlimited:
+
+```yaml
+version: phenix.sandia.gov/v1
+kind: Role
+metadata:
+  name: limited-experimenter
+spec:
+  roleName: Limited Experimenter
+  policies: [...]
+  resourceLimits:
+    maxVCPUs: 4              # max vCPUs per VM
+    maxMemoryMB: 8192        # max RAM (MB) per VM
+    maxDiskGB: 100           # max size (GB) a disk may be resized to
+    maxVMsPerExperiment: 20  # max VM count in a single topology
+```
+
+Limits are enforced at the web API layer only (experiment/builder create,
+`PATCH` VM, and disk resize) — the `phenix` CLI runs with full local
+privileges and is unaffected. These are per-VM/per-experiment caps only;
+aggregate quotas across a user's total resource usage are not yet supported
+(there's no experiment/VM ownership tracking to compute them against).
+
 ### `phenix experiment` — experiment lifecycle
 
 ```bash

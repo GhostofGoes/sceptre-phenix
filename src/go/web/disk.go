@@ -290,6 +290,25 @@ func ResizeDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := role.CheckDiskSizeLimit(size); err != nil {
+		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
+		plog.Warn(
+			plog.TypeSecurity,
+			"resizing disk exceeds resource limits",
+			"user",
+			user,
+			"disk",
+			path,
+			"size",
+			size,
+			"err",
+			err,
+		)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
 	err := disk.ResizeDisk(path, size)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

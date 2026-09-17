@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **RBAC**: Added optional per-role `resourceLimits` (`maxVCPUs`, `maxMemoryMB`, `maxDiskGB`, `maxVMsPerExperiment`) to cap VM hardware, disk resize, and VM count when creating/updating experiments, topologies (including via the builder), and VMs. Unset/zero limits remain unlimited, preserving backward compatibility with existing role configs.
+
 ### Changed
 
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
