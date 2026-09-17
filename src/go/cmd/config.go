@@ -311,35 +311,7 @@ func newConfigCreateCmd() *cobra.Command {
 			skip := MustGetBool(cmd.Flags(), "skip-validation")
 
 			for _, f := range args {
-				var configs []string
-
-				err := filepath.Walk(f, func(path string, info os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
-
-					// Don't recursively process subdirectories.
-					if info.IsDir() {
-						return nil
-					}
-
-					extensions := []string{"*.json", "*.yaml", "*.yml"}
-
-					for _, ext := range extensions {
-						match, err := filepath.Match(ext, filepath.Base(path))
-						if err != nil {
-							return err
-						}
-
-						if match {
-							configs = append(configs, path)
-
-							break
-						}
-					}
-
-					return nil
-				})
+				configs, err := configFiles(f)
 				if err != nil {
 					err := util.HumanizeError(err, "%s", "Unable to create configuration from "+f)
 
@@ -380,6 +352,101 @@ func newConfigCreateCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Bool("skip-validation", false, "Skip configuration spec validation against schema")
+
+	return cmd
+}
+
+func configFiles(root string) ([]string, error) {
+	var configs []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		extensions := []string{"*.json", "*.yaml", "*.yml"}
+
+		for _, ext := range extensions {
+			match, err := filepath.Match(ext, filepath.Base(path))
+			if err != nil {
+				return err
+			}
+
+			if match {
+				configs = append(configs, path)
+
+				break
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(configs) == 0 {
+		return nil, errors.New("no JSON or YAML configuration files found")
+	}
+
+	return configs, nil
+}
+
+func newConfigUpdateCmd() *cobra.Command {
+	desc := `Update a configuration(s)
+
+  This subcommand is used to update one or more existing configurations from
+  JSON or YAML file(s). A directory path can also be given, and all JSON and
+  YAML files in the given directory will be parsed. The target configuration
+  is selected using the kind and metadata.name fields in each file.`
+
+	cmd := &cobra.Command{
+		Use:   "update </path/to/filename> ...",
+		Short: "Update a configuration(s)",
+		Long:  desc,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return errors.New("must provide at least one configuration file")
+			}
+
+			for _, f := range args {
+				configs, err := configFiles(f)
+				if err != nil {
+					err := util.HumanizeError(err, "%s", "Unable to update configuration from "+f)
+
+					return err.Humanized()
+				}
+
+				for _, f := range configs {
+					c, err := config.UpdateFromPath(f)
+					if err != nil {
+						err := util.HumanizeError(
+							err,
+							"%s",
+							"Unable to update configuration from "+f,
+						)
+
+						return err.Humanized()
+					}
+
+					plog.Info(
+						plog.TypeSystem,
+						"configuration updated",
+						"kind",
+						c.Kind,
+						"name",
+						c.Metadata.Name,
+					)
+				}
+			}
+
+			return nil
+		},
+	}
 
 	return cmd
 }
@@ -523,6 +590,7 @@ func init() { //nolint:gochecknoinits // cobra command
 	configCmd.AddCommand(newConfigListCmd())
 	configCmd.AddCommand(newConfigGetCmd())
 	configCmd.AddCommand(newConfigCreateCmd())
+	configCmd.AddCommand(newConfigUpdateCmd())
 	configCmd.AddCommand(newConfigEditCmd())
 	configCmd.AddCommand(deleteCmd)
 

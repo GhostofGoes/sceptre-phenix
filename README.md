@@ -252,6 +252,18 @@ phenix settings unset log.level
 phenix settings unset --all
 ```
 
+#### Updating Stored Configs
+
+Update an existing stored config from its edited YAML or JSON file:
+
+```bash
+phenix config update /phenix/configs/example-topology.yaml
+```
+
+The file's `kind` and `metadata.name` select the stored config to replace. An
+existing experiment embeds a snapshot of its topology and scenario, so recreate
+the experiment to use those updated configs.
+
 ### 👨‍💻 Developer Guide
 
 > [!TIP]

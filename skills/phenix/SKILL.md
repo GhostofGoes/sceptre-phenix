@@ -250,6 +250,7 @@ phenix config list <kind|all>                      # table of stored configs
 phenix config get <kind>/<name> [-o yaml|json] [-p] # dump a config
 phenix config create </path/to/file.yaml> ...       # create from file(s) or dir; validates against schema
 phenix config create --skip-validation <file>       # skip schema validation
+phenix config update </path/to/file.yaml> ...       # update existing config(s) using kind/name from each file
 phenix config edit <kind>/<name> [--force]          # open in $EDITOR
 phenix config delete <kind>/<name> ...              # delete one or more specific configs by kind/name
 phenix config delete all [kind]                     # delete every stored config, or every config of one kind
@@ -365,6 +366,9 @@ running `phenix ui` server, or building a UI integration).
   path (has a file extension) instead of an existing config name, it runs `config create`
   with validation first, then uses the resulting config name — so a typo'd path silently
   becomes "config not found" further down the pipeline.
+- **`phenix config update` does not refresh existing experiments.** Experiment configs
+  embed topology and scenario snapshots, so recreate an experiment after updating either
+  source config.
 - **`vm_type` default is `kvm`, not `container`** — don't assume container semantics unless
   the topology explicitly sets `general.vm_type: container`.
 - **Auth uses a custom header, not `Authorization`.** Web API calls must use

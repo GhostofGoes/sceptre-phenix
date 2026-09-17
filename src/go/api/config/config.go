@@ -374,6 +374,37 @@ func Create(opts ...CreateOption) (*store.Config, error) {
 	return c, nil
 }
 
+// UpdateFromPath reads a config file from the given path and updates the
+// matching config in the store.
+func UpdateFromPath(path string) (*store.Config, error) {
+	c, err := store.NewConfigFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config from file: %w", err)
+	}
+
+	name := c.FullName()
+
+	if c.Kind == kindExperiment {
+		old, err := Get(name, false)
+		if err != nil {
+			return nil, fmt.Errorf("getting experiment config to update: %w", err)
+		}
+
+		if c.Spec == nil {
+			c.Spec = make(map[string]any)
+		}
+
+		c.Status = old.Status
+		c.Spec["experimentName"] = old.Metadata.Name
+	}
+
+	if err := Update(name, c); err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
 // Edit retrieves the config with the given name for editing. The given name
 // should be of the form `type/name`, where `type` is one of `topology,
 // scenario, or experiment`. A YAML representation of the config is written to a
