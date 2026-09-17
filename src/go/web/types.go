@@ -65,8 +65,20 @@ type Policy struct {
 }
 
 type Role struct {
-	Name     string   `json:"name"`
-	Policies []Policy `json:"policies"`
+	MetadataName string   `json:"metadata_name"`
+	Name         string   `json:"name"`
+	Policies     []Policy `json:"policies"`
+}
+
+type RoleRequest struct {
+	MetadataName string   `json:"metadata_name"`
+	Name         string   `json:"name"`
+	Policies     []Policy `json:"policies"`
+}
+
+type KnownPermission struct {
+	Resource string   `json:"resource"`
+	Verbs    []string `json:"verbs"`
 }
 
 func userFromRBAC(u rbac.User) User {
@@ -94,8 +106,9 @@ func roleFromRBAC(r rbac.Role) Role {
 	}
 
 	role := Role{
-		Name:     r.Spec.Name,
-		Policies: policies,
+		MetadataName: r.MetadataName(),
+		Name:         r.Spec.Name,
+		Policies:     policies,
 	}
 
 	return role

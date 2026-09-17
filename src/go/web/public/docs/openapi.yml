@@ -1199,6 +1199,90 @@ paths:
       responses:
         "204":
           description: successful operation
+  "/roles":
+    get:
+      tags:
+        - Roles
+      summary: Get all roles
+      description: ""
+      operationId: getRoles
+      responses:
+        "200":
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Roles"
+    post:
+      tags:
+        - Roles
+      summary: Create a new role
+      description: ""
+      operationId: postRoles
+      requestBody:
+        description: role details
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RBACRole"
+      responses:
+        "201":
+          description: successful operation
+  "/roles/resources":
+    get:
+      tags:
+        - Roles
+      summary: Get known role resources and verbs
+      description: ""
+      operationId: getRoleResources
+      responses:
+        "200":
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleResources"
+  "/roles/{name}":
+    put:
+      tags:
+        - Roles
+      summary: Update existing role
+      description: ""
+      operationId: putRoleName
+      parameters:
+        - name: name
+          in: path
+          description: metadata name of role to update
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: role details
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RBACRole"
+      responses:
+        "204":
+          description: successful operation
+    delete:
+      tags:
+        - Roles
+      summary: Delete existing role
+      description: ""
+      operationId: deleteRoleName
+      parameters:
+        - name: name
+          in: path
+          description: metadata name of role to delete
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: successful operation
   "/signup":
     post:
       tags:
@@ -1524,6 +1608,55 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/User"
+    Roles:
+      type: object
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/RBACRole"
+    RBACRole:
+      type: object
+      properties:
+        metadata_name:
+          type: string
+        name:
+          type: string
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/RBACPolicy"
+    RBACPolicy:
+      type: object
+      properties:
+        resources:
+          type: array
+          items:
+            type: string
+        resourceNames:
+          type: array
+          items:
+            type: string
+        verbs:
+          type: array
+          items:
+            type: string
+    RoleResources:
+      type: object
+      properties:
+        resources:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleResource"
+    RoleResource:
+      type: object
+      properties:
+        resource:
+          type: string
+        verbs:
+          type: array
+          items:
+            type: string
     User:
       type: object
       properties:

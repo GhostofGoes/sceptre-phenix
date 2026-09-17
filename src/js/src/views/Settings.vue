@@ -1,109 +1,136 @@
 <template>
   <section>
-    <div class="form-section">
-      <form class="content">
-        <h3>Password Settings</h3>
-        <b-field>
-          <b-switch v-model="settings_obj.password_settings.lowercase_req">
-            Require a lowercase letter
-          </b-switch>
-        </b-field>
-        <b-field>
-          <b-switch v-model="settings_obj.password_settings.uppercase_req">
-            Require an uppercase letter
-          </b-switch>
-        </b-field>
-        <b-field>
-          <b-switch v-model="settings_obj.password_settings.number_req">
-            Require a number
-          </b-switch>
-        </b-field>
-        <b-field>
-          <b-switch v-model="settings_obj.password_settings.symbol_req">
-            Require a symbol
-          </b-switch>
-        </b-field>
-        <b-field>
-          Minimum length of password
-          <b-numberinput
-            v-model="settings_obj.password_settings.min_length"
-            class="custom-small"
-            min="4"
-            max="32"
-            :controls="false">
-          </b-numberinput>
-        </b-field>
-        <h3>Timeout Settings</h3>
-        <b-field>
-          <b-switch v-model="settings_obj.timeout_settings.enabled">
-            Log out users after period of inactivity
-          </b-switch>
-        </b-field>
-        <b-field>
-          Time (minutes) to log out users after idle for
-          <b-numberinput
-            v-model="settings_obj.timeout_settings.timeout_min"
-            :disabled="!settings_obj.timeout_settings.enabled"
-            :controls="false"
-            step=".5"
-            class="custom-small">
-          </b-numberinput>
-        </b-field>
-        <b-field>
-          Display idle user logout with (minutes) left
-          <b-numberinput
-            v-model="settings_obj.timeout_settings.warning_min"
-            :disabled="!settings_obj.timeout_settings.enabled"
-            :controls="false"
-            step=".5"
-            class="custom-small">
-          </b-numberinput>
-        </b-field>
+    <b-tabs v-model="activeTab">
+      <b-tab-item v-if="canEditSettings" label="General">
+        <div class="form-section">
+          <form class="content">
+            <h3>Password Settings</h3>
+            <b-field>
+              <b-switch v-model="settings_obj.password_settings.lowercase_req">
+                Require a lowercase letter
+              </b-switch>
+            </b-field>
+            <b-field>
+              <b-switch v-model="settings_obj.password_settings.uppercase_req">
+                Require an uppercase letter
+              </b-switch>
+            </b-field>
+            <b-field>
+              <b-switch v-model="settings_obj.password_settings.number_req">
+                Require a number
+              </b-switch>
+            </b-field>
+            <b-field>
+              <b-switch v-model="settings_obj.password_settings.symbol_req">
+                Require a symbol
+              </b-switch>
+            </b-field>
+            <b-field>
+              Minimum length of password
+              <b-numberinput
+                v-model="settings_obj.password_settings.min_length"
+                class="custom-small"
+                min="4"
+                max="32"
+                :controls="false">
+              </b-numberinput>
+            </b-field>
+            <h3>Timeout Settings</h3>
+            <b-field>
+              <b-switch v-model="settings_obj.timeout_settings.enabled">
+                Log out users after period of inactivity
+              </b-switch>
+            </b-field>
+            <b-field>
+              Time (minutes) to log out users after idle for
+              <b-numberinput
+                v-model="settings_obj.timeout_settings.timeout_min"
+                :disabled="!settings_obj.timeout_settings.enabled"
+                :controls="false"
+                step=".5"
+                class="custom-small">
+              </b-numberinput>
+            </b-field>
+            <b-field>
+              Display idle user logout with (minutes) left
+              <b-numberinput
+                v-model="settings_obj.timeout_settings.warning_min"
+                :disabled="!settings_obj.timeout_settings.enabled"
+                :controls="false"
+                step=".5"
+                class="custom-small">
+              </b-numberinput>
+            </b-field>
 
-        <h3>File Logging Settings</h3>
-        <b-field>
-          Max log file size (MiB)
-          <b-numberinput
-            v-model="settings_obj.logging_settings.max_file_size"
-            :controls="false"
-            step="1"
-            class="custom-small">
-          </b-numberinput>
-        </b-field>
-        <b-field>
-          Max number of file rotations (0 for infinite)
-          <b-numberinput
-            v-model="settings_obj.logging_settings.max_file_rotations"
-            :controls="false"
-            step="1"
-            class="custom-small"
-            min="0">
-          </b-numberinput>
-        </b-field>
-        <b-field>
-          Max rotated log file age (0 for infinite)
-          <b-numberinput
-            v-model="settings_obj.logging_settings.max_file_age"
-            :controls="false"
-            step="1"
-            class="custom-small"
-            min="0">
-          </b-numberinput>
-        </b-field>
+            <h3>File Logging Settings</h3>
+            <b-field>
+              Max log file size (MiB)
+              <b-numberinput
+                v-model="settings_obj.logging_settings.max_file_size"
+                :controls="false"
+                step="1"
+                class="custom-small">
+              </b-numberinput>
+            </b-field>
+            <b-field>
+              Max number of file rotations (0 for infinite)
+              <b-numberinput
+                v-model="settings_obj.logging_settings.max_file_rotations"
+                :controls="false"
+                step="1"
+                class="custom-small"
+                min="0">
+              </b-numberinput>
+            </b-field>
+            <b-field>
+              Max rotated log file age (0 for infinite)
+              <b-numberinput
+                v-model="settings_obj.logging_settings.max_file_age"
+                :controls="false"
+                step="1"
+                class="custom-small"
+                min="0">
+              </b-numberinput>
+            </b-field>
 
-        <hr />
-        <!-- <b-button @click="getSettings">Reset Form</b-button> -->
-        <b-button @click="sendSettingsToServer">Save Changes</b-button>
-      </form>
-    </div>
+            <hr />
+            <!-- <b-button @click="getSettings">Reset Form</b-button> -->
+            <b-button @click="sendSettingsToServer">Save Changes</b-button>
+          </form>
+        </div>
+      </b-tab-item>
+      <b-tab-item v-if="canListRoles" label="Roles & Resources">
+        <RolesResources />
+      </b-tab-item>
+    </b-tabs>
   </section>
 </template>
 <script>
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { roleAllowed } from '@/utils/rbac.js';
+  import RolesResources from '@/components/settings/RolesResources.vue';
+
   export default {
+    components: {
+      RolesResources,
+    },
+    setup() {
+      return { roleAllowed };
+    },
     async created() {
-      this.getSettings();
+      if (this.canEditSettings) {
+        this.getSettings();
+      }
+    },
+
+    computed: {
+      canEditSettings() {
+        return roleAllowed('settings', 'edit');
+      },
+      canListRoles() {
+        return roleAllowed('roles', 'list');
+      },
     },
 
     methods: {
@@ -136,6 +163,7 @@
     },
     data() {
       return {
+        activeTab: 0,
         settings_obj: {
           password_settings: {
             number_req: false,

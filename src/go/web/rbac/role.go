@@ -27,6 +27,14 @@ type Role struct {
 	mappedPolicies map[string][]Policy
 }
 
+func (r Role) MetadataName() string {
+	if r.config == nil {
+		return ""
+	}
+
+	return r.config.Metadata.Name
+}
+
 func GetRoles() ([]*Role, error) {
 	configs, err := config.List("role")
 	if err != nil {
