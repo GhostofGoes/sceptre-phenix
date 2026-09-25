@@ -662,11 +662,24 @@ func GetPipeline(w http.ResponseWriter, r *http.Request) error {
 // TODO: change this to `scorch/runs`
 
 // StartPipeline - POST /experiments/{name}/scorch/pipelines/{run}.
-//
-//nolint:funlen // handler
 func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "StartPipeline")
 
+	return startPipeline(w, r, false)
+}
+
+// CleanupPipeline - POST /experiments/{name}/scorch/pipelines/{run}/cleanup.
+//
+// Runs only the run's cleanup stage, for example to tear down what a canceled
+// run left behind.
+func CleanupPipeline(w http.ResponseWriter, r *http.Request) error {
+	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "CleanupPipeline")
+
+	return startPipeline(w, r, true)
+}
+
+//nolint:funlen // handler
+func startPipeline(w http.ResponseWriter, r *http.Request, cleanupOnly bool) error {
 	var (
 		ctx     = r.Context()
 		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
@@ -708,6 +721,26 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 		return weberror.NewWebError(err, "unable to get experiment %s from store", name)
 	}
 
+	if cleanupOnly {
+		md, err := scorchmd.DecodeMetadata(exp)
+		if err != nil {
+			err := weberror.NewWebError(err, "unable to decode scorch metadata for experiment %s", name)
+
+			return err.SetStatus(http.StatusInternalServerError)
+		}
+
+		if run < 0 || run >= len(md.Runs) || len(md.Runs[run].Cleanup) == 0 {
+			err := weberror.NewWebError(
+				nil,
+				"Scorch run %d for experiment %s has no cleanup components",
+				run,
+				name,
+			)
+
+			return err.SetStatus(http.StatusBadRequest)
+		}
+	}
+
 	if scorchexe.HasCanceler(name, run) {
 		return weberror.NewWebError(nil, "Scorch run already executing for experiment %s", name)
 	}
@@ -715,6 +748,10 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 	// We don't want to use the HTTP request's context here.
 	ctx = scorchexe.AddCanceler(context.Background(), name, run)
 	ctx = app.SetContextTriggerUI(ctx)
+
+	if cleanupOnly {
+		ctx = scorchexe.SetCleanupOnly(ctx)
+	}
 
 	go func() {
 		plog.Debug(plog.TypeSystem, "executing Scorch run for experiment", "exp", name, "run", run)

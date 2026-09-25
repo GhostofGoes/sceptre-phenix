@@ -277,6 +277,8 @@ func Start(opts ...ServerOption) error {
 		Methods("GET", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}/{loop}", weberror.ErrorHandler(scorch.GetPipeline)).
 		Methods("GET", "OPTIONS")
+	api.Handle("/experiments/{name}/scorch/pipelines/{run}/cleanup", weberror.ErrorHandler(scorch.CleanupPipeline)).
+		Methods("POST", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}", weberror.ErrorHandler(scorch.StartPipeline)).
 		Methods("POST", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}", weberror.ErrorHandler(scorch.CancelPipeline)).
