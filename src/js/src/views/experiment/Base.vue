@@ -11,6 +11,7 @@ this will only show a list of VMs that a user can view.
 
 <script setup>
   import { usePhenixStore } from '@/store';
+  import { debug } from '@/utils/debug.js';
   import axiosInstance from '@/utils/axios';
   import { defineAsyncComponent } from 'vue';
   import { useRoute } from 'vue-router';
@@ -19,13 +20,10 @@ this will only show a list of VMs that a user can view.
   const component = defineAsyncComponent(() => {
     let isRunning = window.history.state.running;
     if (isRunning === undefined) {
-      console.log(
-        'Could not get running status from history, manually querying',
-      );
+      debug('Could not get running status from history, manually querying');
       return axiosInstance
         .get('experiments/' + route.params.id)
         .then((resp) => {
-          console.log(resp);
           return getComponentAsync(resp.data.running);
         });
     } else {

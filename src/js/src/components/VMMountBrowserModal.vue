@@ -263,7 +263,6 @@
       },
 
       handleUpload(file) {
-        console.log(file);
         let formData = new FormData();
         formData.append('file', file);
         this.currentUploadFileName = file.name;

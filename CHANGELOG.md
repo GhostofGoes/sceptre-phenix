@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: The browser console no longer fills with debug output (API responses, uploaded file objects, pipeline layout steps, websocket chatter). Leftover debug logging was removed, development-only diagnostics now appear only in development builds, real failures log as warnings or errors, and lint rejects new `console.log` calls.
 - **Web UI**: Empty tables say why they are empty (still loading, failed to load, nothing matches the search, or nothing exists yet) instead of "Your search turned up empty!".
 - **Web UI**: Paginate toggles sit above their tables instead of below them.
 - **Web UI**: The Console page no longer says console access is not configured while the console is starting, and names the real reason when it cannot start.

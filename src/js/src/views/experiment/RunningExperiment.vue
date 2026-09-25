@@ -1449,6 +1449,7 @@
 
 <script>
   import { BSlider, BSliderTick } from 'buefy';
+  import { debug } from '@/utils/debug.js';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import { tagCount } from '@/utils/tagCount';
   import { addWsHandler, removeWsHandler, sendWsMsg } from '@/utils/websocket';
@@ -2557,7 +2558,7 @@
                 )
                 .then((response) => {
                   if (response.status == 204) {
-                    console.log('create snapshot for vm ' + vmName);
+                    debug('create snapshot for vm ' + vmName);
                   }
                 })
                 .catch((err) => {
@@ -2592,7 +2593,7 @@
               )
               .then((response) => {
                 if (response.status == 204) {
-                  console.log('restore  snapshot for vm ' + name);
+                  debug('restore snapshot for vm ' + name);
                 }
               })
               .catch((err) => {
@@ -2693,7 +2694,7 @@
               axiosInstance
                 .post(url, body, { timeout: 0 })
                 .then((response) => {
-                  console.log(
+                  debug(
                     'backing image for vm ' +
                       name +
                       ' returned status ' +
@@ -3505,8 +3506,6 @@
                 .then((response) => {
                   let vms = this.experiment.vms;
 
-                  console.log(response);
-
                   for (let i = 0; i < vms.length; i++) {
                     if (vms[i].name == response.data.name) {
                       vms[i] = response.data;
@@ -3555,7 +3554,6 @@
                 )
                 .then((response) => {
                   let vms = this.experiment.vms;
-                  console.log(response);
 
                   for (let i = 0; i < vms.length; i++) {
                     if (vms[i].name == response.data.name) {
@@ -3648,7 +3646,7 @@
               apps,
           )
           .then((response) => {
-            console.log('triggering ' + apps + ': ' + response);
+            debug('triggered ' + apps + ': status ' + response.status);
           })
           .catch((err) => {
             useErrorNotification(err);
@@ -3817,7 +3815,6 @@
       },
 
       downloadFile(exp_name, name, path) {
-        console.log('attempting to download file');
         const store = usePhenixStore();
         const basePath = import.meta.env.BASE_URL;
 

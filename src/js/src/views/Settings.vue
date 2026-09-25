@@ -108,21 +108,15 @@
 
     methods: {
       getSettings() {
-        console.log('getting settings');
         axiosInstance.get('settings').then((response) => {
           const state = response.data;
-          console.log(state);
           this.settings_obj = state;
         });
-      },
-      printSettings() {
-        console.log(this.settings_obj);
       },
       sendSettingsToServer() {
         axiosInstance
           .post('settings', this.settings_obj, { timeout: 0 })
-          .then((resp) => {
-            console.log(resp);
+          .then((_) => {
             this.$buefy.toast.open({
               message: 'Settings updated',
               type: 'is-success',

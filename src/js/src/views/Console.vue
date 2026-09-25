@@ -62,7 +62,7 @@
               break;
             default:
               this.message = 'Could not start the console.';
-              console.log(err.message, err.response?.data);
+              console.warn('failed to start the console', err);
           }
         });
     },

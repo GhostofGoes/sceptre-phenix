@@ -277,7 +277,6 @@
         this.error.msg = null;
       },
       changeKeybinding() {
-        console.log(this.editor.vim);
         let user = localStorage.getItem('user');
         localStorage.setItem(user + '.vimMode', this.editor.vim);
       },
@@ -440,7 +439,6 @@
                 this.resetEditor(`config ${name} has been edited`);
               })
               .catch((err) => {
-                console.log(err);
                 const resp = err.response.data;
                 // useErrorNotification(err);
                 if (resp.metadata && resp.metadata.validation) {
@@ -481,8 +479,6 @@
             );
           })
           .catch((err) => {
-            console.log(err);
-
             if (
               err.response.data.metadata &&
               err.response.data.metadata.validation

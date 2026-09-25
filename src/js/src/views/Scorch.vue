@@ -475,7 +475,7 @@
             }
 
             // TODO: do something with error message in `msg.result`
-            console.log(msg.result.error);
+            console.error(msg.result.error);
 
             break;
           }

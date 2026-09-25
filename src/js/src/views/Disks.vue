@@ -389,7 +389,6 @@
         this.loader.load();
       },
       rowClick(row) {
-        console.log(row);
         this.detailsModal.disk = row;
         this.detailsModal.active = true;
       },
@@ -426,7 +425,6 @@
         }
       },
       actionWrapper(httpPath, dialog = null, method = 'post') {
-        console.log(dialog);
         if (dialog != null) {
           dialog.startLoading();
         }
@@ -537,7 +535,6 @@
         });
       },
       deleteDisk(path) {
-        console.log(path);
         this.$buefy.dialog.confirm({
           message:
             'Are you sure you want to delete this disk? <b class="has-text-danger">If this disk backs others, they will become invalid.</b>',
@@ -564,7 +561,6 @@
         let formData = new FormData();
         formData.append('file', file);
         this.currentUploadProgress = 0;
-        console.log(file.name);
         axiosInstance
           .post(`disks`, formData, {
             headers: { 'Content-Type': 'multipart/form-data' },

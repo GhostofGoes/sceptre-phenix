@@ -193,7 +193,6 @@ class Pipeline {
       }
       let parents = this.findParents(i);
       let children = this.findChildren(i);
-      console.log(parents, children);
       let startx = Math.max(...parents.map((item) => this.nodes[item].x));
       let endx = Math.min(...children.map((item) => this.nodes[item].x));
       node.x = (startx + endx) / 2;
@@ -312,7 +311,6 @@ class Pipeline {
     while (queue.length > 0) {
       let first = queue.pop();
       visited[first] = true;
-      console.log(first);
       result.push(first);
       let children = this.findChildren(first);
       for (let i = 0; i < children.length; i++) {

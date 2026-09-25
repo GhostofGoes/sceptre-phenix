@@ -1,5 +1,6 @@
 /// <reference types="vite/types/importMeta.d.ts" />
 import { usePhenixStore } from '@/store.js';
+import { debug } from '@/utils/debug.js';
 import { ToastProgrammatic as Toast } from 'buefy';
 
 let globalWs: WebSocket = null;
@@ -45,7 +46,7 @@ export function connectWebsocket(): void {
   globalWs.onmessage = globalWsMessageHandler;
 
   globalWs.onopen = () => {
-    console.log('connected websocket');
+    debug('connected websocket');
     numFailedConnects = 0;
 
     if (errorToast !== null) {
@@ -72,9 +73,7 @@ export function connectWebsocket(): void {
     }
 
     const delay = reconnectDelayMs();
-    console.log(
-      `next websocket reconnect attempt in ${Math.round(delay / 1000)}s`,
-    );
+    debug(`next websocket reconnect attempt in ${Math.round(delay / 1000)}s`);
     numFailedConnects += 1;
     reconnectTimer = setTimeout(connectWebsocket, delay);
   };
@@ -86,7 +85,7 @@ export function connectWebsocket(): void {
 
 export function disconnectWebsocket(): void {
   shouldBeConnected = false;
-  console.log('disconnected websocket');
+  debug('disconnected websocket');
 
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
@@ -110,19 +109,19 @@ export function sendWsMsg(payload: object): void {
   if (globalWs !== null) {
     // socket exists but is still CONNECTING (or closing) — queue and let onopen
     // flush it rather than calling send() in an invalid state.
-    console.warn('websocket not open, queueing message');
+    debug('websocket not open, queueing message');
     pendingMessages.push(data);
     return;
   }
 
   if (shouldBeConnected) {
-    console.warn('websocket is null, connecting before send');
+    debug('websocket is null, connecting before send');
     pendingMessages.push(data);
     connectWebsocket();
     return;
   }
 
-  console.log('not connected to send websocket message');
+  console.warn('not connected to send websocket message');
 }
 
 export function addWsHandler(f: (msg: object) => void): void {
@@ -144,10 +143,7 @@ function globalWsMessageHandler(event: MessageEvent): void {
       // logging every message retains large payloads (screenshots) in the
       // devtools console, so only do it in development builds
       if (import.meta.env.DEV) {
-        console.debug(
-          'websocket msg (' + wsListeners.length + ' listeners):\n',
-          msg,
-        );
+        debug('websocket msg (' + wsListeners.length + ' listeners):\n', msg);
       }
 
       // dispatch to listeners; one failing listener must not block the rest

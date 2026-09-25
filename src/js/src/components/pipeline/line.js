@@ -29,9 +29,6 @@ export class EdgeService {
 
   drawHEdge(start, end) {
     if (end.x > start.x + this.xstep) {
-      if (!start) {
-        // console.log(start, end);
-      }
       // let start = start.x + 10;
       let number = parseInt((end.x - start.x) / this.xstep);
 
@@ -106,7 +103,6 @@ class DefaultStyleService extends EdgeService {
         ${lt} \
         l ${20} 0
         `;
-      // console.log(d)
       return d;
     }
   }

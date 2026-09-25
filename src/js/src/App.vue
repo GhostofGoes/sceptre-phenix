@@ -25,7 +25,7 @@
       store.features = data.features;
     })
     .catch((err) => {
-      console.log(err);
+      console.warn('failed to get enabled features', err);
     });
 
   onMounted(() => {

@@ -29,7 +29,7 @@ component.
 
         this.version = formatVersion(version);
       } catch (err) {
-        console.log(`ERROR getting version: ${err}`);
+        console.warn('failed to get the phenix version', err);
       }
     },
 

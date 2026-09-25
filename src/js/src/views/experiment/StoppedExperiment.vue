@@ -666,6 +666,7 @@
 
 <script>
   import { debounce } from 'lodash-es';
+  import { debug } from '@/utils/debug.js';
   import { tagCount } from '@/utils/tagCount';
   import { usePhenixStore } from '@/store';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
@@ -1134,7 +1135,7 @@
               .post('experiments/' + this.$route.params.id + '/start')
               .then(
                 () => {
-                  console.log(
+                  debug(
                     'the ' + this.$route.params.id + ' experiment was started.',
                   );
                   this.$router.replace('/experiments/');
@@ -1696,7 +1697,6 @@
       },
 
       downloadFile(exp_name, name, path) {
-        console.log('attempting to download file');
         const store = usePhenixStore();
         const basePath = import.meta.env.BASE_URL;
 

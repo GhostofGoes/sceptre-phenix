@@ -128,7 +128,6 @@
         };
       },
       handleClick() {
-        // console.log("click", this.node);
         this.nodeClass = 'pipeline-node-selected';
         if (this.status != 'start' && this.status != 'end') {
           this.$emit('click', this.index, this.node);

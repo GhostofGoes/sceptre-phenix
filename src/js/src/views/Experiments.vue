@@ -367,6 +367,7 @@
 
 <script>
   import { formattingMixin } from '@/utils/formattingMixin.js';
+  import { debug } from '@/utils/debug.js';
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
@@ -404,7 +405,7 @@
           this.options = resp.data;
         })
         .catch((err) => {
-          console.log(err);
+          console.warn('failed to get experiment options', err);
         });
     },
 
@@ -656,10 +657,10 @@
             axiosInstance
               .post('experiments/' + name + '/start')
               .then((_) => {
-                console.log('experiment started');
+                debug('experiment ' + name + ' started');
               })
               .catch((err) => {
-                console.log('experiment start fail', err);
+                console.warn('experiment ' + name + ' failed to start', err);
                 for (let i = 0; i < this.experiments.length; i++) {
                   if (this.experiments[i].name == name) {
                     this.experiments[i].status = 'stopped';
@@ -698,8 +699,8 @@
           onConfirm: () => {
             axiosInstance
               .post('experiments/' + name + '/stop')
-              .then((response) => {
-                console.log('experiment stopped: ' + response);
+              .then((_) => {
+                debug('experiment ' + name + ' stopped');
               })
               .catch((err) => {
                 useErrorNotification(err);

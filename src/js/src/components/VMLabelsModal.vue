@@ -192,7 +192,6 @@
         let update = { tag_update_mode: 'SET', tags: finalTags };
 
         if (isEqual(finalTags, this.tags)) {
-          console.log('No change made. Closing');
           this.$emit('close');
           return;
         }
