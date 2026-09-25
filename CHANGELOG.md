@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets and marks Vite's hashed assets as immutable so browsers cache them.
+- **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets, marks Vite's hashed assets as immutable, and sends content-hash ETags so other static files (noVNC, xterm.js, the topology builder) are revalidated instead of re-downloaded.
 - **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
 
 ## [1.0.0]

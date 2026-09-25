@@ -3,7 +3,9 @@ package web
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io"
 	"io/fs"
 	"net/http"
@@ -44,20 +46,28 @@ var compressibleExts = map[string]bool{ //nolint:gochecknoglobals // lookup tabl
 	".xml":  true,
 }
 
-type gzipKey struct {
+type assetKey struct {
 	name    string
 	size    int64
 	modTime time.Time
 }
 
+type cachedAsset struct {
+	etag string
+	gz   []byte // nil unless the file is compressible
+}
+
 // StaticHandler serves files from assets, gzip-compressing text assets for
-// clients that accept it (the UI's JavaScript compresses roughly 4x). The
-// compressed bytes are cached per file; the size and modification time in the
-// key keep the cache correct when serving unbundled assets from disk.
+// clients that accept it (the UI's JavaScript compresses roughly 4x). Every
+// file gets a content-hash ETag so browsers can revalidate with a 304: embedded
+// files have a zero modification time, so there is no Last-Modified to fall
+// back on. The ETag and compressed bytes are cached per file; the size and
+// modification time in the key keep the cache correct when serving unbundled
+// assets from disk.
 func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 	var (
 		files = http.FileServer(assets)
-		cache sync.Map // gzipKey -> []byte
+		cache sync.Map // assetKey -> cachedAsset
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,16 +76,10 @@ func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 		}
 
 		name := path.Clean("/" + r.URL.Path)
-		if !compressibleExts[path.Ext(name)] {
-			files.ServeHTTP(w, r)
-			return
-		}
+		compressible := compressibleExts[path.Ext(name)]
 
-		w.Header().Add("Vary", "Accept-Encoding")
-
-		if !acceptsGzip(r) {
-			files.ServeHTTP(w, r)
-			return
+		if compressible {
+			w.Header().Add("Vary", "Accept-Encoding")
 		}
 
 		f, err := assets.Open(name)
@@ -91,24 +95,50 @@ func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 			return
 		}
 
-		key := gzipKey{name: name, size: fi.Size(), modTime: fi.ModTime()}
+		key := assetKey{name: name, size: fi.Size(), modTime: fi.ModTime()}
 
-		var gz []byte
+		var asset cachedAsset
 		if cached, ok := cache.Load(key); ok {
-			gz, _ = cached.([]byte)
+			asset, _ = cached.(cachedAsset)
 		} else {
-			gz, err = gzipFile(f)
+			asset, err = loadAsset(f, compressible)
 			if err != nil {
 				files.ServeHTTP(w, r)
 				return
 			}
 
-			cache.Store(key, gz)
+			cache.Store(key, asset)
 		}
 
+		if asset.gz == nil || !acceptsGzip(r) {
+			w.Header().Set("ETag", `"`+asset.etag+`"`)
+			files.ServeHTTP(w, r)
+
+			return
+		}
+
+		w.Header().Set("ETag", `"`+asset.etag+`-gz"`)
 		w.Header().Set("Content-Encoding", "gzip")
-		http.ServeContent(w, r, name, fi.ModTime(), bytes.NewReader(gz))
+		http.ServeContent(w, r, name, fi.ModTime(), bytes.NewReader(asset.gz))
 	})
+}
+
+func loadAsset(r io.Reader, compressible bool) (cachedAsset, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return cachedAsset{}, err
+	}
+
+	sum := sha256.Sum256(raw)
+	asset := cachedAsset{etag: hex.EncodeToString(sum[:16]), gz: nil}
+
+	if compressible {
+		if asset.gz, err = gzipBytes(raw); err != nil {
+			return cachedAsset{}, err
+		}
+	}
+
+	return asset, nil
 }
 
 func acceptsGzip(r *http.Request) bool {
@@ -133,7 +163,7 @@ func acceptsGzip(r *http.Request) bool {
 	return false
 }
 
-func gzipFile(r io.Reader) ([]byte, error) {
+func gzipBytes(raw []byte) ([]byte, error) {
 	var buf bytes.Buffer
 
 	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
@@ -141,7 +171,7 @@ func gzipFile(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 
-	if _, err := io.Copy(zw, r); err != nil {
+	if _, err := zw.Write(raw); err != nil {
 		return nil, err
 	}
 

@@ -21,9 +21,19 @@ func testAssets() http.FileSystem {
 func get(t *testing.T, h http.Handler, target, acceptEncoding string) *http.Response {
 	t.Helper()
 
+	return getIfNoneMatch(t, h, target, acceptEncoding, "")
+}
+
+func getIfNoneMatch(t *testing.T, h http.Handler, target, acceptEncoding, etag string) *http.Response {
+	t.Helper()
+
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	if acceptEncoding != "" {
 		req.Header.Set("Accept-Encoding", acceptEncoding)
+	}
+
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
 
 	rec := httptest.NewRecorder()
@@ -103,6 +113,40 @@ func TestStaticHandlerPlain(t *testing.T) {
 
 			if got := resp.Header.Get("Cache-Control"); got != "" {
 				t.Errorf("Cache-Control = %q, want none for non-hashed assets", got)
+			}
+		})
+	}
+}
+
+func TestStaticHandlerETag(t *testing.T) {
+	h := StaticHandler(testAssets(), false)
+
+	cases := map[string]struct {
+		target, acceptEncoding, suffix string
+	}{
+		"gzipped text": {"/assets/index-abc123.js", "gzip", `-gz"`},
+		"plain text":   {"/assets/index-abc123.js", "", `"`},
+		"binary file":  {"/assets/logo-abc123.png", "gzip", `"`},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := get(t, h, c.target, c.acceptEncoding)
+			resp.Body.Close()
+
+			etag := resp.Header.Get("ETag")
+			if !strings.HasPrefix(etag, `"`) || !strings.HasSuffix(etag, c.suffix) ||
+				(c.suffix == `"` && strings.HasSuffix(etag, `-gz"`)) {
+				t.Fatalf("ETag = %q, want a quoted hash ending in %s", etag, c.suffix)
+			}
+
+			// embedded files have no modification time, so the ETag is the
+			// only way a browser can revalidate them
+			resp = getIfNoneMatch(t, h, c.target, c.acceptEncoding, etag)
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusNotModified {
+				t.Errorf("revalidation status = %d, want 304", resp.StatusCode)
 			}
 		})
 	}
