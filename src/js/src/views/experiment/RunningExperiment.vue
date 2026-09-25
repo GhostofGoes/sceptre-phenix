@@ -965,10 +965,7 @@
             <div class="control is-flex">
               <b-switch
                 v-model="table.isPaginated"
-                @update:modelValue="
-                  updateExperiment();
-                  changePaginate();
-                "
+                @update:modelValue="updateExperiment()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
@@ -1278,10 +1275,7 @@
             <div class="control is-flex">
               <b-switch
                 v-model="filesTable.isPaginated"
-                @update:modelValue="
-                  updateFiles();
-                  changeFilesPaginate();
-                "
+                @update:modelValue="updateFiles()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
@@ -1502,7 +1496,6 @@
       this.features = usePhenixStore().features;
       addWsHandler(this.handleWs);
       this.loadColumnVisibility();
-      this.loadPaginationPreference();
       // not cached: a running experiment's VM states change too often for a
       // stale copy to help
       this.loader = createPageLoader({
@@ -1588,11 +1581,6 @@
     methods: {
       loadingText,
 
-      changePaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(user + '.lastPaginate', this.table.isPaginated);
-      },
-
       getUserStorageKey(storageKey) {
         var user = usePhenixStore().username;
         return user + '.' + storageKey;
@@ -1609,27 +1597,10 @@
         });
       },
 
-      loadPaginationPreference() {
-        var user = usePhenixStore().username;
-        let value = localStorage.getItem(user + '.lastPaginate');
-        if (value !== null) {
-          this.table.isPaginated = value == 'true';
-          this.filesTable.isPaginated = value == 'true';
-        }
-      },
-
       persistColumnVisibility(toggle) {
         localStorage.setItem(
           this.getUserStorageKey(toggle.storageKey),
           this.columnVisibility[toggle.key],
-        );
-      },
-
-      changeFilesPaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(
-          user + '.lastPaginate',
-          this.filesTable.isPaginated,
         );
       },
 

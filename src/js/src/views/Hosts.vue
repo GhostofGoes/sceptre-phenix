@@ -9,11 +9,7 @@ available for experiments, the number of VMs, and host uptime.
   <div class="content">
     <b-field v-if="paginationNeeded" grouped position="is-right">
       <div class="control is-flex">
-        <b-switch
-          v-model="table.isPaginated"
-          @update:modelValue="changePaginate()"
-          size="is-small"
-          type="is-light"
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
           >Paginate</b-switch
         >
       </div>
@@ -179,20 +175,9 @@ available for experiments, the number of VMs, and host uptime.
     },
 
     computed: {
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
       paginationNeeded() {
-        this.restorePaginate();
-
-        if (this.hosts.length <= 10) {
-          this.table.isPaginated = false;
-          return false;
-        } else {
-          return true;
-        }
+        return this.hosts.length > this.table.perPage;
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
     },
 
     data() {

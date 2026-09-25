@@ -209,11 +209,7 @@
       <div
         v-if="paginationNeeded"
         class="control is-flex is-align-items-center">
-        <b-switch
-          v-model="table.isPaginated"
-          @update:modelValue="changePaginate()"
-          size="is-small"
-          type="is-light"
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
           >Paginate</b-switch
         >
       </div>
@@ -336,7 +332,6 @@
         },
       });
       this.loader.start();
-      this.restorePaginate();
       addWsHandler(this.handleWs);
     },
 

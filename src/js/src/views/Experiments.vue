@@ -162,11 +162,7 @@
         <div
           v-if="paginationNeeded"
           class="control is-flex is-align-items-center">
-          <b-switch
-            v-model="table.isPaginated"
-            @update:modelValue="changePaginate()"
-            size="is-small"
-            type="is-light"
+          <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
             >Paginate</b-switch
           >
         </div>
@@ -445,20 +441,9 @@
         });
       },
 
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
       paginationNeeded() {
-        this.restorePaginate();
-
-        if (this.experiments.length <= 10) {
-          this.table.isPaginated = false;
-          return false;
-        } else {
-          return true;
-        }
+        return this.experiments.length > this.table.perPage;
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
 
       bridgeMode() {
         return this.options['bridge-mode'];

@@ -226,10 +226,7 @@
             <div class="control is-flex">
               <b-switch
                 v-model="table.isPaginated"
-                @update:modelValue="
-                  updateExperiment();
-                  changePaginate();
-                "
+                @update:modelValue="updateExperiment()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
@@ -557,10 +554,7 @@
             <div class="control is-flex">
               <b-switch
                 v-model="filesTable.isPaginated"
-                @update:modelValue="
-                  updateFiles();
-                  changeFilesPaginate();
-                "
+                @update:modelValue="updateFiles()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
@@ -781,39 +775,13 @@
         });
       },
 
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
       paginationNeeded() {
-        var user = usePhenixStore().username;
-
-        if (localStorage.getItem(user + '.lastPaginate')) {
-          this.table.isPaginated =
-            localStorage.getItem(user + '.lastPaginate') == 'true';
-        }
-
-        if (this.table.total <= this.table.perPage) {
-          return false;
-        } else {
-          return true;
-        }
+        return this.table.total > this.table.perPage;
       },
 
       filesPaginationNeeded() {
-        var user = usePhenixStore().username;
-
-        if (localStorage.getItem(user + '.lastPaginate')) {
-          this.filesTable.isPaginated =
-            localStorage.getItem(user + '.lastPaginate') == 'true';
-        }
-
-        if (this.filesTable.total <= this.filesTable.perPage) {
-          return false;
-        } else {
-          return true;
-        }
+        return this.filesTable.total > this.filesTable.perPage;
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
     },
 
     methods: {
@@ -855,19 +823,6 @@
         } else {
           return true;
         }
-      },
-
-      changePaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(user + '.lastPaginate', this.table.isPaginated);
-      },
-
-      changeFilesPaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(
-          user + '.lastPaginate',
-          this.filesTable.isPaginated,
-        );
       },
 
       onPageChange(page) {
