@@ -310,25 +310,39 @@
   import { roleAllowed } from '@/utils/rbac.js';
   import { createPageLoader } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
+  import { addWsHandler, removeWsHandler } from '@/utils/websocket';
 
   export default {
     setup() {
       return { ...useTable(), roleAllowed };
     },
     async created() {
+      this.rescan = false;
       this.loader = createPageLoader({
         key: 'disks',
-        fetch: pageFetchers.disks,
+        fetch: (signal) => pageFetchers.disks(signal, { rescan: this.rescan }),
         apply: (disks) => {
           this.disks = disks;
           this.loaded = true;
         },
+        // the header button has the server inspect every image again, not
+        // just the ones that changed
+        refresh: async () => {
+          this.rescan = true;
+          try {
+            return await this.loader.load();
+          } finally {
+            this.rescan = false;
+          }
+        },
       });
       this.loader.start();
       this.restorePaginate();
+      addWsHandler(this.handleWs);
     },
 
     beforeUnmount() {
+      removeWsHandler(this.handleWs);
       this.loader.stop();
     },
 
@@ -362,6 +376,12 @@
           delete: false,
           isWaiting: false,
         };
+      },
+      handleWs(msg) {
+        // the server saw images added, changed or removed
+        if (msg.resource.type === 'disks' && msg.resource.action === 'update') {
+          this.loader.load();
+        }
       },
       // closes any open dialog and reloads the list after a change
       updateDisks() {

@@ -22,7 +22,9 @@ export const pageFetchers = {
 
   configs: async (signal) => (await get('configs', signal)).configs ?? [],
 
-  disks: async (signal) => (await get('disks', signal)).disks ?? [],
+  // rescan: have the server inspect every image again, not only changed ones
+  disks: async (signal, { rescan = false } = {}) =>
+    (await get(rescan ? 'disks?refresh=true' : 'disks', signal)).disks ?? [],
 
   hosts: async (signal) => (await get('hosts', signal)).hosts ?? [],
 

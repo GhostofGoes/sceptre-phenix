@@ -439,6 +439,10 @@ func Start(opts ...ServerOption) error {
 
 	go SyncMinimegaLogs(context.Background(), o.minimegaLogs)
 
+	plog.Info(plog.TypeSystem, "starting disk image watcher")
+
+	WatchDisks(context.Background())
+
 	plog.Info(plog.TypeSystem, "using base path", "path", o.basePath)
 	plog.Info(plog.TypeSystem, "using JWT lifetime", "lifetime", o.jwtLifetime)
 

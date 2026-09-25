@@ -90,6 +90,10 @@ func (MMDiskFiles) GetImages(expName string) ([]Details, error) {
 	// Using a map here to weed out duplicates.
 	details := make(map[string]Details)
 
+	if LocalInspection() {
+		return getImagesLocal(expName, details)
+	}
+
 	// Add all the files from the minimega files directory
 	getAllFiles(details)
 
@@ -126,12 +130,88 @@ func (MMDiskFiles) GetImage(path string) (Details, error) {
 		path = mm.GetMMFullPath(path)
 	}
 
-	images := resolveImage(path)
+	var images []Details
+
+	if LocalInspection() {
+		entry, err := cachedChain(path)
+		if err != nil {
+			return Details{}, err
+		}
+
+		locked, _ := lockedInodes()
+		images = chainDetails(entry, locked)
+	} else {
+		images = resolveImage(path)
+	}
+
 	if len(images) == 0 {
 		return Details{}, fmt.Errorf("could not resolve file specified: %s", path)
 	}
 
 	return images[0], nil
+}
+
+// getImagesLocal is GetImages with images inspected by phenix itself (see
+// local.go): the files directory first, then images the experiments use.
+func getImagesLocal(expName string, details map[string]Details) ([]Details, error) {
+	dir := mm.GetMMFullPath("")
+
+	paths, err := imageFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var names []string
+	if len(expName) > 0 {
+		names = []string{expName}
+	} else {
+		experiments, err := experiment.List()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, exp := range experiments {
+			names = append(names, exp.Metadata.Name)
+		}
+	}
+
+	for _, name := range names {
+		exp, err := experiment.Get(name)
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve %v", name)
+		}
+
+		for _, node := range exp.Spec.Topology().Nodes() {
+			for _, drive := range node.Hardware().Drives() {
+				if path := drive.Image(); path != "" && knownImage(path) {
+					paths = append(paths, mm.GetMMFullPath(path))
+				}
+			}
+		}
+	}
+
+	resolveLocal(uniq(paths), details)
+
+	images := make([]Details, 0, len(details))
+	for _, image := range details {
+		images = append(images, image)
+	}
+
+	return images, nil
+}
+
+func uniq(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	out := paths[:0]
+
+	for _, path := range paths {
+		if !seen[path] {
+			seen[path] = true
+			out = append(out, path)
+		}
+	}
+
+	return out
 }
 
 // Get all image files from the minimega files directory.
