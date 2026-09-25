@@ -27,7 +27,9 @@
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            Your search turned up empty!
+            {{
+              loaded ? 'Your search turned up empty!' : 'Loading experiments…'
+            }}
           </div>
         </section>
       </template>
@@ -116,10 +118,6 @@
         </button>
       </b-table-column>
     </b-table>
-    <b-loading
-      :is-full-page="false"
-      v-model="isWaiting"
-      :can-cancel="false"></b-loading>
     <b-modal
       v-model="terminal.modal"
       :can-cancel="terminal.ro"
@@ -163,6 +161,7 @@
 
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
@@ -178,11 +177,22 @@
 
     async created() {
       addWsHandler(this.handle);
-      await this.updateExperiments();
+      this.loader = createPageLoader({
+        key: 'scorch',
+        fetch: (signal) => this.fetchExperiments(signal),
+        apply: (experiments) => {
+          this.experiments = experiments;
+          this.loaded = true;
+          // check for existing experiment terminals
+          experiments.forEach((exp) => this.getTerminals(exp.name));
+        },
+      });
+      this.loader.start();
     },
 
     beforeUnmount() {
       removeWsHandler(this.handle);
+      this.loader.stop();
     },
 
     computed: {
@@ -222,58 +232,40 @@
     },
 
     methods: {
-      async updateExperiments() {
-        axiosInstance
-          .get('experiments')
-          .then(async (resp) => {
-            const state = resp.data;
+      // experiments that have SCORCH configured, with their run state
+      async fetchExperiments(signal) {
+        const resp = await axiosInstance.get('experiments', { signal });
 
-            // fetch every experiment's apps concurrently rather than one
-            // request after another
-            const scorchExps = await Promise.all(
-              (state.experiments ?? []).map(async (exp) => {
-                let resp = await axiosInstance.get(
-                  `experiments/${exp.name}/apps`,
-                );
-                let apps = resp.data;
+        // fetch every experiment's apps concurrently rather than one
+        // request after another
+        const scorchExps = await Promise.all(
+          (resp.data.experiments ?? []).map(async (exp) => {
+            const apps = (
+              await axiosInstance.get(`experiments/${exp.name}/apps`, {
+                signal,
+              })
+            ).data;
 
-                // only do stuff with this exp if it has scorch configured
-                if (!('scorch' in apps)) {
-                  return null;
-                }
-
-                exp.scorch = { running: apps['scorch'] };
-
-                if (exp.scorch.running) {
-                  let resp = await axiosInstance.get(
-                    `experiments/${exp.name}/scorch/pipelines`,
-                    {
-                      headers: {
-                        Accept: 'application/json',
-                      },
-                    },
-                  );
-                  exp.scorch.run = resp.data.running;
-                }
-
-                return exp;
-              }),
-            );
-            this.experiments = scorchExps.filter((exp) => exp !== null);
-
-            for (let i in this.experiments) {
-              let exp = this.experiments[i];
-
-              // check for existing experiment terminals
-              this.getTerminals(exp.name);
+            // only do stuff with this exp if it has scorch configured
+            if (!('scorch' in apps)) {
+              return null;
             }
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          })
-          .finally(() => {
-            this.isWaiting = false;
-          });
+
+            exp.scorch = { running: apps['scorch'] };
+
+            if (exp.scorch.running) {
+              const pipelines = await axiosInstance.get(
+                `experiments/${exp.name}/scorch/pipelines`,
+                { signal, headers: { Accept: 'application/json' } },
+              );
+              exp.scorch.run = pipelines.data.running;
+            }
+
+            return exp;
+          }),
+        );
+
+        return scorchExps.filter((exp) => exp !== null);
       },
 
       expStatusDecorator(status) {
@@ -694,7 +686,7 @@
           ro: false,
         },
         searchName: '',
-        isWaiting: true,
+        loaded: false, // false until the first list arrives
       };
     },
   };

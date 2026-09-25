@@ -83,6 +83,7 @@
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import { usePhenixStore } from '@/store.js';
 
   import ScorchKey from '@/components/scorch/ScorchKey.vue';
@@ -98,11 +99,33 @@
 
     created() {
       addWsHandler(this.handle);
-      this.runsView(this.$route.params.id);
+      // not cached: run state is live
+      this.loader = createPageLoader({
+        fetch: async (signal) => {
+          const exp = this.$route.params.id;
+          const opts = { signal, headers: { Accept: 'application/json' } };
+          const [experiment, pipelines] = await Promise.all([
+            axiosInstance.get(`experiments/${exp}`, opts),
+            axiosInstance.get(`experiments/${exp}/scorch/pipelines`, opts),
+          ]);
+          return { experiment: experiment.data, pipelines: pipelines.data };
+        },
+        apply: ({ experiment, pipelines }) => {
+          this.exp = experiment;
+          this.runs = (pipelines.pipelines ?? []).map((p, i) => ({
+            name: p.name,
+            running: i == pipelines.running,
+            nodes: p.pipeline,
+            loop: 0,
+          }));
+        },
+      });
+      this.loader.start();
     },
 
     beforeUnmount() {
       removeWsHandler(this.handle);
+      this.loader.stop();
       // close the streaming output socket if the modal is still open
       this.exitOutput();
     },
@@ -119,53 +142,9 @@
         }
       },
 
-      runsView(exp) {
-        console.log('runs view', exp);
-        axiosInstance
-          .get(`experiments/${exp}`, {
-            headers: { Accept: 'application/json' },
-          })
-          .then((resp) => {
-            console.log('experiments/exp', resp);
-            this.exp = resp.data;
-
-            axiosInstance
-              .get(`experiments/${exp}/scorch/pipelines`, {
-                headers: { Accept: 'application/json' },
-              })
-              .then((resp) => {
-                console.log('experiments/exp/scorch/pipelines', resp);
-                this.runs = [];
-
-                console.log(resp);
-
-                let pipelines = resp.data.pipelines;
-                let runningID = resp.data.running;
-
-                if (pipelines === null) {
-                  return;
-                }
-
-                for (let i = 0; i < pipelines.length; i++) {
-                  let running = i == runningID;
-                  let name = pipelines[i].name;
-                  let nodes = pipelines[i].pipeline;
-
-                  this.runs.push({
-                    name,
-                    running,
-                    nodes,
-                    loop: 0,
-                  });
-                }
-              })
-              .catch((err) => {
-                useErrorNotification(err);
-              });
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          });
+      // reloads the experiment and its SCORCH runs
+      runsView() {
+        return this.loader.load();
       },
 
       componentDetail(comp) {
@@ -396,12 +375,12 @@
               case 'start': {
                 this.exitOutput();
                 this.resetTerminal(true);
-                this.runsView(this.exp.name);
+                this.runsView();
                 break;
               }
 
               case 'stop': {
-                this.runsView(this.exp.name);
+                this.runsView();
                 break;
               }
 

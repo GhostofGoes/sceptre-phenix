@@ -107,19 +107,14 @@ available for experiments, the number of VMs, and host uptime.
         >
       </div>
     </b-field>
-    <b-loading
-      :is-full-page="false"
-      v-model="isWaiting"
-      :can-cancel="false"></b-loading>
   </div>
 </template>
 
 <script>
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
   import { useTable } from '@/utils/useTable.js';
-  import { cachedPage, cachePage } from '@/utils/pageCache.js';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     mixins: [formattingMixin],
@@ -128,39 +123,27 @@ available for experiments, the number of VMs, and host uptime.
     },
     beforeUnmount() {
       clearInterval(this.update);
-      this.requests.abort();
+      this.loader.stop();
     },
 
     created() {
-      this.requests = new AbortController();
-      const cached = cachedPage('hosts');
-      if (cached) {
-        this.hosts = cached;
-        this.isWaiting = false;
-      }
-      this.updateHosts();
+      this.loader = createPageLoader({
+        key: 'hosts',
+        fetch: async (signal) =>
+          (await axiosInstance.get('hosts', { signal })).data.hosts ?? [],
+        apply: (hosts) => (this.hosts = hosts),
+      });
+      this.loader.start();
       this.periodicUpdateHosts();
     },
 
     methods: {
-      updateHosts() {
-        axiosInstance
-          .get('hosts', { signal: this.requests.signal })
-          .then((response) => {
-            this.hosts = response.data.hosts ?? [];
-            cachePage('hosts', this.hosts);
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            this.isWaiting = false;
-            useErrorNotification(err);
-          });
-      },
       periodicUpdateHosts() {
         this.update = setInterval(() => {
-          // skip polling while the browser tab is in the background
-          if (!document.hidden) {
-            this.updateHosts();
+          // skip polling while the browser tab is in the background, or
+          // while the last poll is still waiting on the server
+          if (!document.hidden && !this.loader.loading) {
+            this.loader.load();
           }
         }, 10000);
       },
@@ -205,7 +188,6 @@ available for experiments, the number of VMs, and host uptime.
     data() {
       return {
         hosts: [],
-        isWaiting: true,
       };
     },
   };

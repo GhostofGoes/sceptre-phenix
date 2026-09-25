@@ -15,7 +15,7 @@ vi.stubGlobal('sessionStorage', storage());
 test('logging out drops cached page data', () => {
   setActivePinia(createPinia());
   cachePage('hosts', [{ name: 'host1' }]);
-  expect(cachedPage('hosts')).toEqual([{ name: 'host1' }]);
+  expect(cachedPage('hosts').data).toEqual([{ name: 'host1' }]);
 
   usePhenixStore().logout();
   expect(cachedPage('hosts')).toBeUndefined();

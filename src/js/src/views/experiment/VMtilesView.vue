@@ -120,25 +120,29 @@ side will pass.
         </div>
       </div>
     </div>
-    <b-loading
-      :is-full-page="false"
-      v-model="isWaiting"
-      :can-cancel="false"></b-loading>
   </div>
 </template>
 
 <script>
   import { chunk, sortBy } from 'lodash-es';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import axiosInstance from '@/utils/axios.js';
   import { usePhenixStore } from '@/store';
   export default {
     beforeUnmount() {
       clearInterval(this.update);
+      this.loader.stop();
     },
 
     created() {
-      this.updateVms();
+      this.loader = createPageLoader({
+        key: 'vmtiles',
+        fetch: async (signal) =>
+          (await axiosInstance.get('vms?screenshot=500', { signal })).data
+            .vms ?? [],
+        apply: (vms) => (this.vms = vms),
+      });
+      this.loader.start();
       this.periodicUpdateVms();
     },
 
@@ -206,25 +210,12 @@ side will pass.
     },
 
     methods: {
-      updateVms() {
-        axiosInstance
-          .get('vms?screenshot=500')
-          .then((response) => {
-            this.vms = response.data.vms;
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            this.isWaiting = false;
-            // TODO: do we want to include an error like this to a VM Viewer?
-            useErrorNotification(err);
-          });
-      },
-
       periodicUpdateVms() {
         this.update = setInterval(() => {
-          // skip polling (and its screenshots) while the tab is in the background
-          if (!document.hidden) {
-            this.updateVms();
+          // skip polling (and its screenshots) while the tab is in the
+          // background, or while the last poll is still waiting on the server
+          if (!document.hidden && !this.loader.loading) {
+            this.loader.load();
           }
         }, 30000);
       },
@@ -255,7 +246,6 @@ side will pass.
         vms: [],
         searchName: '',
         filtered: null,
-        isWaiting: true,
       };
     },
   };

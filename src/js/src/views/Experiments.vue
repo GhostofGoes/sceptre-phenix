@@ -138,7 +138,7 @@
         </footer>
       </div>
     </b-modal>
-    <template v-if="experiments.length == 0">
+    <template v-if="loaded && experiments.length == 0">
       <section class="hero is-bold is-large">
         <div class="hero-body">
           <div class="container" style="text-align: center">
@@ -200,7 +200,11 @@
           <template #empty>
             <section class="section">
               <div class="content has-text-white has-text-centered">
-                Your search turned up empty!
+                {{
+                  loaded
+                    ? 'Your search turned up empty!'
+                    : 'Loading experiments…'
+                }}
               </div>
             </section>
           </template>
@@ -373,6 +377,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     mixins: [formattingMixin],
@@ -383,11 +388,22 @@
 
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      this.updateExperiments();
+      this.loader = createPageLoader({
+        key: 'experiments',
+        fetch: async (signal) =>
+          (await axiosInstance.get('experiments', { signal })).data
+            .experiments ?? [],
+        apply: (experiments) => {
+          this.experiments = experiments;
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
       axiosInstance
         .get('/options')
         .then((resp) => {
@@ -586,18 +602,6 @@
             break;
           }
         }
-      },
-
-      updateExperiments() {
-        axiosInstance
-          .get('experiments')
-          .then((response) => {
-            this.experiments = response.data.experiments;
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          });
       },
 
       updateTopologies() {
@@ -980,7 +984,8 @@
         isMenuActive: false,
         action: null,
         rowName: null,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
+        loaded: false, // false until the first list arrives
         options: {},
       };
     },

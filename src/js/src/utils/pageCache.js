@@ -3,12 +3,13 @@
 // Cleared on logout so one user never sees another's data.
 const cache = new Map();
 
+// Returns { data, at } (at: when it was loaded, in ms) or undefined.
 export function cachedPage(key) {
   return cache.get(key);
 }
 
 export function cachePage(key, data) {
-  cache.set(key, data);
+  cache.set(key, { data, at: Date.now() });
 }
 
 export function clearPageCache() {

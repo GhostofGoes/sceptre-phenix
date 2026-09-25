@@ -1459,6 +1459,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import { partitionSnapshotVMNames } from '@/utils/vmSnapshot.js';
   import {
     applyStopCaptureUpdate,
@@ -1493,6 +1494,8 @@
         this.socket.close();
         this.socket = null;
       }
+
+      this.loader.stop();
     },
 
     async created() {
@@ -1500,7 +1503,27 @@
       addWsHandler(this.handleWs);
       this.loadColumnVisibility();
       this.loadPaginationPreference();
-      this.updateExperiment();
+      // not cached: a running experiment's VM states change too often for a
+      // stale copy to help
+      this.loader = createPageLoader({
+        fetch: async (signal) =>
+          (
+            await axiosInstance.get('experiments/' + this.$route.params.id, {
+              signal,
+            })
+          ).data,
+        apply: (experiment) => {
+          this.experiment = experiment;
+          this.search.vms = experiment.vms.map((vm) => {
+            return vm.name;
+          });
+          this.table.total = experiment.vm_count;
+
+          // the VM table itself arrives over the websocket
+          this.updateTable();
+        },
+      });
+      this.loader.start();
 
       try {
         await axiosInstance.get(`experiments/${this.$route.params.id}/netflow`);
@@ -2279,22 +2302,8 @@
       },
 
       async updateExperiment() {
-        try {
-          let resp = await axiosInstance.get(
-            'experiments/' + this.$route.params.id,
-          );
-          this.experiment = resp.data;
-          this.search.vms = resp.data.vms.map((vm) => {
-            return vm.name;
-          });
-          this.table.total = resp.data.vm_count;
-
-          this.updateTable();
-        } catch (err) {
-          useErrorNotification(err);
-        } finally {
-          this.isWaiting = false;
-        }
+        await this.loader.load();
+        this.isWaiting = false;
       },
 
       updateDisks(diskType = '') {
@@ -4077,7 +4086,7 @@
         files: [],
         disks: [],
         vlan: null,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
         showModifyStateBar: false,
         checkAll: false,
         vmSelectedArray: [],

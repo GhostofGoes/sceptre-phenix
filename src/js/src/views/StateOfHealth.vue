@@ -728,6 +728,7 @@
 
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { usePhenixStore } from '@/store.js';
 
@@ -739,13 +740,28 @@
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.simulation?.stop();
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      await this.updateNetwork();
-      this.generateGraph();
-      this.generateChord();
+      this.statusFilter = '';
+      // not cached: the graph is redrawn from scratch on every load anyway
+      this.loader = createPageLoader({
+        fetch: async (signal) => {
+          let url = 'experiments/' + this.$route.params.id + '/soh';
+          if (this.statusFilter) {
+            url = url + '?statusFilter=' + this.statusFilter;
+          }
+          return (await axiosInstance.get(url, { signal })).data;
+        },
+        apply: (state) => {
+          this.applyNetwork(state);
+          this.generateGraph();
+          this.generateChord();
+        },
+      });
+      await this.loader.start();
     },
 
     methods: {
@@ -858,45 +874,36 @@
         }
       },
 
+      // reloads the network, then redraws the graph and chord diagram
       async updateNetwork(filter = '') {
-        let url = 'experiments/' + this.$route.params.id + '/soh';
+        this.statusFilter = filter;
+        await this.loader.load();
+      },
 
-        if (filter) {
-          url = url + '?statusFilter=' + filter;
+      applyNetwork(state) {
+        this.running = state.started;
+        this.sohInitialized = state.soh_initialized;
+        this.sohRunning = state.soh_running;
+
+        this.nodes = state.nodes;
+        this.edges = state.edges;
+
+        if (state.host_flows != null) {
+          this.volume = Object.assign(state.host_flows, {
+            names: state.hosts,
+          });
+          this.flows = true;
         }
 
-        try {
-          let resp = await axiosInstance.get(url);
-          let state = resp.data;
-
-          this.running = state.started;
-          this.sohInitialized = state.soh_initialized;
-          this.sohRunning = state.soh_running;
-
-          this.nodes = state.nodes;
-          this.edges = state.edges;
-
-          if (state.host_flows != null) {
-            this.volume = Object.assign(state.host_flows, {
-              names: state.hosts,
-            });
-            this.flows = true;
+        if (this.nodes) {
+          const detailsNode = this.nodes.find(
+            (n) => n.label === this.detailsModal.vm,
+          );
+          if (detailsNode) {
+            this.detailsModal.status = detailsNode.status;
+            this.detailsModal.soh = detailsNode.soh;
+            this.detailsModal.tags = detailsNode.tags;
           }
-
-          if (this.nodes) {
-            const detailsNode = this.nodes.find(
-              (n) => n.label === this.detailsModal.vm,
-            );
-            if (detailsNode) {
-              this.detailsModal.status = detailsNode.status;
-              this.detailsModal.soh = detailsNode.soh;
-              this.detailsModal.tags = detailsNode.tags;
-            }
-          }
-        } catch (err) {
-          useErrorNotification(err);
-        } finally {
-          this.isWaiting = false;
         }
       },
 
@@ -1325,8 +1332,6 @@
       async resetNetwork() {
         this.radioButton = '';
         await this.updateNetwork();
-        this.generateGraph();
-        this.generateChord();
       },
 
       resetDetailsModal() {
@@ -1459,8 +1464,6 @@
       radioButton: async function (filter) {
         if (filter != '') {
           await this.updateNetwork(filter);
-          this.generateGraph();
-          this.generateChord();
         }
       },
     },

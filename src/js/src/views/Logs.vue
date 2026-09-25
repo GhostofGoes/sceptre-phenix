@@ -120,7 +120,6 @@
       </b-field>
     </b-field>
     <div style="position: relative; background: #484848">
-      <b-loading :is-full-page="false" v-model="isLoading"></b-loading>
       <div class="columns row mb-0 has-text-weight-bold mx-0">
         <div class="log-column level-column">Level</div>
         <div class="log-column ts-column">Timestamp</div>
@@ -128,6 +127,7 @@
         <div class="log-column column is-rest">Message</div>
       </div>
 
+      <div v-if="!loaded" class="has-text-centered p-4">Loading logs…</div>
       <RecycleScroller
         ref="logScroller"
         :items="filteredLogs"
@@ -185,9 +185,8 @@
   import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
   import axiosInstance from '@/utils/axios.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
-  import { cachedPage, cachePage } from '@/utils/pageCache.js';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   const KNOWN_LEVELS = [
     // in-order
@@ -237,8 +236,35 @@
       this.startDate = new Date(
         Date.now() - this.dateModes[this.dateFilter] * 1000,
       );
-      this.requests = new AbortController();
-      this.getLogs(cachedPage('logs'));
+      this.loader = createPageLoader({
+        // only the default view is reopened, so only it is worth keeping;
+        // streamed entries are pushed onto the cached array too
+        key: () =>
+          this.endNow && this.dateFilter === DEFAULT_DATE_FILTER
+            ? 'logs'
+            : null,
+        fetch: async (signal) => {
+          // a refresh of a relative range ("Last 10 Minutes") moves it to now
+          if (this.endNow && this.dateModes[this.dateFilter] !== null) {
+            this.startDate = new Date(
+              Date.now() - this.dateModes[this.dateFilter] * 1000,
+            );
+          }
+          const query =
+            `logs?start=${this.startDate.toISOString()}` +
+            (this.endNow ? '' : `&end=${this.endDate.toISOString()}`);
+          return (await axiosInstance.get(query, { signal })).data ?? [];
+        },
+        apply: (logs) => {
+          this.logs = markRaw(logs);
+          this.loaded = true;
+          this.$nextTick(() => {
+            // the scroller is gone if the user left the page mid-request
+            this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
+          });
+        },
+      });
+      this.loader.start();
 
       addWsHandler(this.handleWs);
     },
@@ -246,7 +272,7 @@
     beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.applySearch.cancel();
-      this.requests.abort();
+      this.loader.stop();
     },
 
     watch: {
@@ -317,39 +343,11 @@
     },
 
     methods: {
-      // cached: logs to show while they reload, instead of a spinner
-      getLogs(cached) {
-        if (cached) {
-          this.logs = cached;
-          this.logsVersion++;
-          this.$nextTick(() =>
-            this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER),
-          );
-        } else {
-          this.isLoading = true;
-        }
-        let query =
-          `logs?start=${this.startDate.toISOString()}` +
-          (this.endNow ? '' : `&end=${this.endDate.toISOString()}`);
-        axiosInstance
-          .get(query, { signal: this.requests.signal })
-          .then((response) => {
-            this.logs = markRaw(response.data ?? []);
-            // only the default view is reopened, so only it is worth keeping;
-            // streamed entries are pushed onto this same array
-            if (this.endNow && this.dateFilter === DEFAULT_DATE_FILTER) {
-              cachePage('logs', this.logs);
-            }
-            this.$nextTick(() => {
-              // the scroller is gone if the user left the page mid-request
-              this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
-              this.isLoading = false;
-            });
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isLoading = false;
-          });
+      // loads a newly chosen date range, dropping the old range's logs
+      getLogs() {
+        this.logs = markRaw([]);
+        this.loaded = false;
+        this.loader.load();
       },
       // triggers getLogs call when date dropdown closes
       dateDropdownChange(n) {
@@ -372,7 +370,7 @@
         this.$refs.dateDropdown.isActive = false;
       },
       handleWs(msg) {
-        if (msg.resource.type == 'log' && this.endNow && !this.isLoading) {
+        if (msg.resource.type == 'log' && this.endNow) {
           this.logs.push(msg.result);
           this.logsVersion++;
         }
@@ -404,7 +402,7 @@
         typeFilter: [],
         searchInput: '', // bound to the search box; applied to searchFilter debounced
         searchFilter: '',
-        isLoading: false,
+        loaded: false, // false until the first logs arrive
       };
     },
   };

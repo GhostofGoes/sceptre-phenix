@@ -168,7 +168,7 @@
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            Your search turned up empty!
+            {{ loaded ? 'Your search turned up empty!' : 'Loading configs…' }}
           </div>
         </section>
       </template>
@@ -274,6 +274,7 @@
   import FileSaver from 'file-saver';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     emits: ['edit', 'create'],
@@ -283,7 +284,8 @@
     data() {
       return {
         configs: [],
-        isWaiting: false,
+        loaded: false, // false until the first list arrives
+        isWaiting: false, // set while a change is being saved
 
         //filters
         filterKind: null,
@@ -315,7 +317,19 @@
       };
     },
     created() {
-      this.updateConfigs();
+      this.loader = createPageLoader({
+        key: 'configs',
+        fetch: async (signal) =>
+          (await axiosInstance.get('configs', { signal })).data.configs ?? [],
+        apply: (configs) => {
+          this.configs = configs;
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
+    },
+    beforeUnmount() {
+      this.loader.stop();
     },
     computed: {
       paginationNeeded() {
@@ -350,17 +364,7 @@
     },
     methods: {
       updateConfigs() {
-        this.isWaiting = true;
-        axiosInstance
-          .get('configs')
-          .then((response) => {
-            const state = response.data;
-            this.configs = state.configs === null ? [] : state.configs;
-            this.isWaiting = false;
-          })
-          .catch(() => {
-            this.isWaiting = false;
-          });
+        this.loader.load();
       },
       isBuilderTopology(cfg) {
         if (cfg.kind == 'Topology') {

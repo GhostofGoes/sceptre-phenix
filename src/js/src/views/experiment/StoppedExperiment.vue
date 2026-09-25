@@ -676,6 +676,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     mixins: [formattingMixin],
@@ -684,11 +685,52 @@
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      this.updateExperiment();
+      this.loader = createPageLoader({
+        fetch: async (signal) => {
+          let params = '?show_dnb=true&filter=' + this.searchName;
+          params = params + '&sortCol=' + this.table.sortColumn;
+          params = params + '&sortDir=' + this.table.defaultSortDirection;
+
+          if (this.table.isPaginated) {
+            params = params + '&pageNum=' + this.table.currentPage;
+            params = params + '&perPage=' + this.table.perPage;
+          }
+
+          const resp = await axiosInstance.get(
+            'experiments/' + this.$route.params.id + params,
+            { signal },
+          );
+          return resp.data;
+        },
+        apply: (experiment) => {
+          this.experiment = experiment;
+          this.table.total = this.experiment.vms.length;
+
+          this.vlanModal.vlans = this.experiment.vlans.map((vlan) => {
+            return vlan;
+          });
+
+          // Only add successful searches to the search history
+          if (this.table.total > 0) {
+            if (this.searchHistory > this.searchHistoryLength) {
+              this.searchHistory.pop();
+            }
+            this.searchHistory.push(this.searchName.trim());
+            this.searchHistory = this.getUniqueItems(this.searchHistory);
+          }
+        },
+        refresh: () => {
+          this.updateLists();
+          return this.loader.load();
+        },
+      });
+      this.loader.start();
+      this.updateLists();
     },
 
     computed: {
@@ -898,63 +940,30 @@
         }
       },
 
-      updateExperiment() {
-        let params = '?show_dnb=true&filter=' + this.searchName;
-        params = params + '&sortCol=' + this.table.sortColumn;
-        params = params + '&sortDir=' + this.table.defaultSortDirection;
+      // reloads the VM table for the current search, sort and page
+      async updateExperiment() {
+        await this.loader.load();
+        this.isWaiting = false;
+      },
 
-        if (this.table.isPaginated) {
-          params = params + '&pageNum=' + this.table.currentPage;
-          params = params + '&perPage=' + this.table.perPage;
+      // the host and disk choices for editing VMs; loaded on open and on
+      // refresh rather than with every search, since listing disks is slow
+      updateLists() {
+        if (roleAllowed('hosts', 'list')) {
+          this.updateHosts();
         }
-
-        axiosInstance
-          .get('experiments/' + this.$route.params.id + params)
-          .then(
-            (response) => {
-              this.experiment = response.data;
-              this.table.total = this.experiment.vms.length;
-
-              this.vlanModal.vlans = this.experiment.vlans.map((vlan) => {
-                return vlan;
-              });
-
-              // Only add successful searches to the search history
-              if (this.table.total > 0) {
-                if (this.searchHistory > this.searchHistoryLength) {
-                  this.searchHistory.pop();
-                }
-                this.searchHistory.push(this.searchName.trim());
-                this.searchHistory = this.getUniqueItems(this.searchHistory);
-              }
-
-              if (roleAllowed('hosts', 'list')) {
-                this.updateHosts();
-              }
-              if (roleAllowed('disks', 'list')) {
-                this.updateDisks();
-              }
-            },
-            (err) => {
-              useErrorNotification(err);
-            },
-          )
-          .finally(() => {
-            this.isWaiting = false;
-          });
+        if (roleAllowed('disks', 'list')) {
+          this.updateDisks();
+        }
       },
 
       updateHosts() {
         axiosInstance.get('hosts').then(
           (response) => {
-            for (let i = 0; i < response.data.hosts.length; i++) {
-              if (response.data.hosts[i].schedulable) {
-                this.hosts.push(response.data.hosts[i].name);
-              }
-
-              this.hosts.sort();
-              this.isWaiting = false;
-            }
+            this.hosts = response.data.hosts
+              .filter((host) => host.schedulable)
+              .map((host) => host.name)
+              .sort();
           },
           (err) => {
             useErrorNotification(err);
@@ -963,22 +972,15 @@
       },
 
       updateDisks() {
-        this.isWaiting = true;
-
         axiosInstance.get('disks' + '?expName=' + this.$route.params.id).then(
           (response) => {
-            this.isWaiting = false;
-
-            for (let i = 0; i < response.data.disks.length; i++) {
-              this.disks.push(response.data.disks[i].fullPath);
-            }
-
-            this.disks.sort((a, b) =>
-              this.getBaseName(a).localeCompare(this.getBaseName(b)),
-            );
+            this.disks = response.data.disks
+              .map((disk) => disk.fullPath)
+              .sort((a, b) =>
+                this.getBaseName(a).localeCompare(this.getBaseName(b)),
+              );
           },
           (err) => {
-            this.isWaiting = false;
             useErrorNotification(err);
           },
         );
@@ -1769,7 +1771,7 @@
         filtered: null,
         algorithm: null,
         dnb: false,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
         searchHistory: [],
         searchHistoryLength: 10,
         checkAll: false,

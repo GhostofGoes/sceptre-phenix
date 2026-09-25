@@ -222,11 +222,6 @@
           </button>
         </p>
       </b-field>
-      <b-tooltip label="Refresh List" type="is-light is-left">
-        <button class="button is-light" @click="updateDisks()">
-          <b-icon icon="refresh"></b-icon>
-        </button>
-      </b-tooltip>
       <b-tooltip
         v-if="roleAllowed('disks', 'upload')"
         label="Upload a disk"
@@ -255,14 +250,13 @@
       :pagination-simple="table.isPaginationSimple"
       :pagination-size="table.paginationSize"
       :default-sort-direction="table.defaultSortDirection"
-      :loading="isWaiting"
       sortable
       hoverable
       default-sort="name">
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            No Disks Found
+            {{ loaded ? 'No Disks Found' : 'Loading disks…' }}
           </div>
         </section>
       </template>
@@ -314,20 +308,28 @@
   import { usePhenixStore } from '@/store.js';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
-  import { cachedPage, cachePage } from '@/utils/pageCache.js';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     setup() {
       return { ...useTable(), roleAllowed };
     },
     async created() {
-      this.requests = new AbortController();
-      this.updateDisks(cachedPage('disks'));
+      this.loader = createPageLoader({
+        key: 'disks',
+        fetch: async (signal) =>
+          (await axiosInstance.get('disks', { signal })).data.disks ?? [],
+        apply: (disks) => {
+          this.disks = disks;
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
       this.restorePaginate();
     },
 
     beforeUnmount() {
-      this.requests.abort();
+      this.loader.stop();
     },
 
     computed: {
@@ -348,7 +350,6 @@
 
     methods: {
       resetData() {
-        this.disks = [];
         this.detailsModal.active = false;
         this.rebaseModal = {
           active: false,
@@ -362,25 +363,10 @@
           isWaiting: false,
         };
       },
-      // cached: disks to show while the list reloads, instead of a spinner
-      updateDisks(cached) {
+      // closes any open dialog and reloads the list after a change
+      updateDisks() {
         this.resetData();
-        if (cached) {
-          this.disks = cached;
-        } else {
-          this.isWaiting = true;
-        }
-        axiosInstance
-          .get('disks', { signal: this.requests.signal })
-          .then((response) => {
-            this.disks = response.data.disks ?? [];
-            cachePage('disks', this.disks);
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            this.isWaiting = false;
-            useErrorNotification(err);
-          });
+        this.loader.load();
       },
       rowClick(row) {
         console.log(row);
@@ -602,7 +588,7 @@
         currentUploadProgress: null,
         disks: [],
         filterString: '',
-        isWaiting: false,
+        loaded: false, // false until the first list arrives
         detailsModal: {
           active: false,
           disk: {},

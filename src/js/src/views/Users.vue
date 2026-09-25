@@ -303,6 +303,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
 
   export default {
     setup() {
@@ -310,10 +311,36 @@
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
     async created() {
       addWsHandler(this.handleWs);
-      this.updateUsers();
+      this.loader = createPageLoader({
+        key: 'users',
+        fetch: async (signal) => {
+          // roles are only used for the role dropdown when creating/editing
+          const [users, roles] = await Promise.all([
+            axiosInstance.get('users', { signal }),
+            roleAllowed('roles', 'list')
+              ? axiosInstance.get('roles', { signal }).catch((err) => {
+                  // the user list is still worth showing without roles
+                  useErrorNotification(err);
+                  return null;
+                })
+              : null,
+          ]);
+          users.data.users.forEach((u) => (u.role_name = u.role.name));
+          return {
+            users: users.data.users,
+            roleNames: roles ? roles.data.roles.map((r) => r.name) : [],
+          };
+        },
+        apply: ({ users, roleNames }) => {
+          this.users = users;
+          this.roleNames = roleNames;
+        },
+      });
+      this.loader.start();
       this.getPasswordRequirements();
     },
     computed: {
@@ -404,36 +431,6 @@
           }
         }
       },
-      updateUsers() {
-        axiosInstance
-          .get('users')
-          .then((response) => {
-            var state = response.data;
-            state.users.forEach((u) => (u.role_name = u.role.name));
-            this.users = state.users;
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isWaiting = false;
-          });
-
-        // this is only used when creating/editing a user for the role dropdown
-        if (roleAllowed('roles', 'list')) {
-          axiosInstance
-            .get('roles')
-            .then((response) => {
-              const state = response.data;
-              this.roleNames = state.roles.map((r) => r.name);
-              this.isWaiting = false;
-            })
-            .catch((err) => {
-              useErrorNotification(err);
-              this.isWaiting = false;
-            });
-        }
-      },
-
       createUser() {
         for (let i = 0; i < this.users.length; i++) {
           if (this.users[i].username == this.user.username) {
@@ -772,7 +769,7 @@
         isEditActive: false,
         isNewTokenActive: false,
         isProxyTokenCopied: false,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
 
         passwordReqs: {
           number_req: false,
