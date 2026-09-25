@@ -222,7 +222,10 @@ side will pass.
 
       periodicUpdateVms() {
         this.update = setInterval(() => {
-          this.updateVms();
+          // skip polling (and its screenshots) while the tab is in the background
+          if (!document.hidden) {
+            this.updateVms();
+          }
         }, 30000);
       },
 

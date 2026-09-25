@@ -16,6 +16,8 @@ export default [
       '**/coverage/**',
       'e2e/test-results/**',
       'e2e/playwright-report/**',
+      'perf/lighthouse-results/**',
+      'perf/.lighthouseci/**',
     ],
   },
   js.configs.recommended,
@@ -69,6 +71,16 @@ export default [
   {
     // Playwright e2e specs/helpers run under Node with CommonJS require().
     files: ['e2e/**/*.js'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+  {
+    // size-limit and Lighthouse CI configs are CommonJS run under Node.
+    files: ['perf/**/*.cjs'],
     languageOptions: {
       sourceType: 'commonjs',
       globals: {

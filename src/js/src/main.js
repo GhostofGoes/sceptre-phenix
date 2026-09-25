@@ -2,7 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 
 import './assets/main.scss';
-import Buefy from 'buefy';
+import { installBuefy } from './utils/buefy.js';
 
 /* import the fontawesome core */
 import { library } from '@fortawesome/fontawesome-svg-core';
@@ -38,6 +38,7 @@ library.add(
 
 import App from './App.vue';
 import router from './router.js';
+import { lazyRouteLoaders, schedulePrefetch } from './utils/prefetch.js';
 
 const app = createApp(App);
 
@@ -48,10 +49,16 @@ app.component('font-awesome-layers-text', FontAwesomeLayersText);
 const pinia = createPinia();
 app.use(pinia);
 app.use(router);
-app.use(Buefy, {
-  defaultIconComponent: 'font-awesome-icon',
-  defaultIconPack: 'fas',
-  defaultProgrammaticPromise: true,
-});
+installBuefy(app);
 
 app.mount('#app');
+
+router.isReady().then(() => {
+  schedulePrefetch([
+    ...lazyRouteLoaders(router.getRoutes()),
+    // loaded by pages rather than routes
+    () => import('@/components/configs/ConfigsEditor.vue'),
+    () => import('@/views/experiment/RunningExperiment.vue'),
+    () => import('@/views/experiment/StoppedExperiment.vue'),
+  ]);
+});

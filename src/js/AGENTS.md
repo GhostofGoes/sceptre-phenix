@@ -22,13 +22,15 @@ nvm use
 npm ci
 ```
 
-| Purpose                  | Command                         |
-| ------------------------ | ------------------------------- |
-| Development server       | `npm run dev`                   |
-| Focused Vitest           | `npm test -- test/rbac.test.js` |
-| All Vitest               | `npm test`                      |
-| Production build         | `npm run build`                 |
-| Format, then review diff | `npm run format`                |
+| Purpose                  | Command                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| Development server       | `npm run dev`                                            |
+| Focused Vitest           | `npm test -- test/rbac.test.js`                          |
+| All Vitest               | `npm test`                                               |
+| Production build         | `npm run build`                                          |
+| Format, then review diff | `npm run format`                                         |
+| Bundle size budgets      | `cd perf && npm ci && npm run size` (after a build)      |
+| Lighthouse audits        | `cd perf && npm run lighthouse` (needs a running server) |
 
 The development server needs a backend on `localhost:3000`.
 
@@ -59,9 +61,18 @@ minimega, VM images, and a topology (`E2E_LIFECYCLE=1`). Auth suites require a
 matching `VITE_AUTH` build and signing key. See `e2e/README.md`; report missing
 prerequisites instead of silently skipping checks.
 
+## Performance
+
+`perf/` holds size-limit budgets and Lighthouse CI assertions; see
+`perf/README.md`. Register new Buefy components in `src/utils/buefy.js` (or locally in
+the one view that uses a heavy one) rather than installing all of Buefy, keep
+long-lived third-party objects (xterm, d3, editors) out of deep reactivity with
+`markRaw`, and clean up intervals, sockets, and listeners in `beforeUnmount`.
+
 ## CI
 
 `.github/workflows/frontend.yml` runs Vitest and builds the UI, then builds and
-starts a real backend for Playwright smoke tests. Keep Node versions, npm cache
+starts a real backend for Playwright smoke tests. Its `perf` job checks bundle
+budgets and runs Lighthouse CI against a real backend. Keep Node versions, npm cache
 lockfiles, auth build mode, backend startup, and path filters aligned with local
 commands.

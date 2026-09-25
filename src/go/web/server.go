@@ -142,26 +142,26 @@ func Start(opts ...ServerOption) error {
 	plog.Info(plog.TypeSystem, "setting up assets")
 
 	router.PathPrefix("/docs/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/novnc/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/xterm.js/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/assets/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, true),
 	)
 
 	router.PathPrefix("/grapheditor/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
-	router.Handle("/favicon.ico", http.FileServer(assets))
+	router.Handle("/favicon.ico", StaticHandler(assets, false))
 
 	router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		plog.Warn(
@@ -172,6 +172,10 @@ func Start(opts ...ServerOption) error {
 			"method",
 			r.Method,
 		)
+
+		// index.html names the current build's hashed chunks, so browsers must
+		// revalidate it rather than reuse a stale copy
+		w.Header().Set("Cache-Control", "no-cache")
 
 		if o.unbundled {
 			http.ServeFile(w, r, "web/public/index.html")
@@ -402,6 +406,10 @@ func Start(opts ...ServerOption) error {
 
 	addRoutesToRouter(api, workflowRoutes...)
 	addRoutesToRouter(api, optionRoutes...)
+
+	// outermost, so the other middleware (full logging in particular) sees the
+	// uncompressed response
+	api.Use(CompressResponses)
 
 	if o.allowCORS {
 		plog.Info(plog.TypeSystem, "CORS is enabled on HTTP API endpoints")
