@@ -666,7 +666,6 @@
 
 <script>
   import { debounce } from 'lodash-es';
-  import { debug } from '@/utils/debug.js';
   import { tagCount } from '@/utils/tagCount';
   import { usePhenixStore } from '@/store';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
@@ -1135,9 +1134,6 @@
               .post('experiments/' + this.$route.params.id + '/start')
               .then(
                 () => {
-                  debug(
-                    'the ' + this.$route.params.id + ' experiment was started.',
-                  );
                   this.$router.replace('/experiments/');
                 },
                 (err) => {

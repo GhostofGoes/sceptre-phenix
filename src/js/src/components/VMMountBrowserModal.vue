@@ -290,7 +290,6 @@
       },
 
       errorDialog(msg) {
-        console.error(msg);
         this.$buefy.toast.open({
           message: msg,
           type: 'is-danger',

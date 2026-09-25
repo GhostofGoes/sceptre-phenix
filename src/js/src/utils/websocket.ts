@@ -77,10 +77,6 @@ export function connectWebsocket(): void {
     numFailedConnects += 1;
     reconnectTimer = setTimeout(connectWebsocket, delay);
   };
-
-  globalWs.onerror = (event) => {
-    console.warn('websocket error: ', event);
-  };
 }
 
 export function disconnectWebsocket(): void {

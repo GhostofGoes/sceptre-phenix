@@ -367,7 +367,6 @@
 
 <script>
   import { formattingMixin } from '@/utils/formattingMixin.js';
-  import { debug } from '@/utils/debug.js';
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
@@ -656,11 +655,7 @@
           onConfirm: () => {
             axiosInstance
               .post('experiments/' + name + '/start')
-              .then((_) => {
-                debug('experiment ' + name + ' started');
-              })
               .catch((err) => {
-                console.warn('experiment ' + name + ' failed to start', err);
                 for (let i = 0; i < this.experiments.length; i++) {
                   if (this.experiments[i].name == name) {
                     this.experiments[i].status = 'stopped';
@@ -697,15 +692,10 @@
           type: 'is-danger',
           hasIcon: true,
           onConfirm: () => {
-            axiosInstance
-              .post('experiments/' + name + '/stop')
-              .then((_) => {
-                debug('experiment ' + name + ' stopped');
-              })
-              .catch((err) => {
-                useErrorNotification(err);
-                this.isWaiting = false;
-              });
+            axiosInstance.post('experiments/' + name + '/stop').catch((err) => {
+              useErrorNotification(err);
+              this.isWaiting = false;
+            });
           },
         });
       },

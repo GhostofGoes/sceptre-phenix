@@ -1449,7 +1449,6 @@
 
 <script>
   import { BSlider, BSliderTick } from 'buefy';
-  import { debug } from '@/utils/debug.js';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import { tagCount } from '@/utils/tagCount';
   import { addWsHandler, removeWsHandler, sendWsMsg } from '@/utils/websocket';
@@ -2556,11 +2555,6 @@
                   { filename: time },
                   { timeout: 0 },
                 )
-                .then((response) => {
-                  if (response.status == 204) {
-                    debug('create snapshot for vm ' + vmName);
-                  }
-                })
                 .catch((err) => {
                   useErrorNotification(err);
                 });
@@ -2591,11 +2585,6 @@
                 {},
                 { timeout: 0 },
               )
-              .then((response) => {
-                if (response.status == 204) {
-                  debug('restore snapshot for vm ' + name);
-                }
-              })
               .catch((err) => {
                 useErrorNotification(err);
               });
@@ -2679,7 +2668,6 @@
             this.resetDiskImageModal();
             this.resetExpModal();
             let url = '';
-            let name = '';
             let body = '';
             vm.forEach((arg) => {
               url =
@@ -2689,21 +2677,10 @@
                 arg.name +
                 '/commit';
               body = { filename: arg.filename + '.qc2' };
-              name = arg.name;
 
-              axiosInstance
-                .post(url, body, { timeout: 0 })
-                .then((response) => {
-                  debug(
-                    'backing image for vm ' +
-                      name +
-                      ' returned status ' +
-                      response.status,
-                  );
-                })
-                .catch((err) => {
-                  useErrorNotification(err);
-                });
+              axiosInstance.post(url, body, { timeout: 0 }).catch((err) => {
+                useErrorNotification(err);
+              });
             });
           },
         });
@@ -3645,9 +3622,6 @@
               '?apps=' +
               apps,
           )
-          .then((response) => {
-            debug('triggered ' + apps + ': status ' + response.status);
-          })
           .catch((err) => {
             useErrorNotification(err);
             this.isWaiting = false;

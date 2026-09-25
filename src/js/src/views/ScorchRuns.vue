@@ -345,8 +345,7 @@
 
                 this.runs[runID] = run;
 
-                // TODO: do something with error message in `msg.result`
-                console.error(msg.result.error);
+                // TODO: show the error in `msg.result`; the phenix log has it
                 break;
               }
 
