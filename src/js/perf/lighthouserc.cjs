@@ -37,9 +37,9 @@ module.exports = {
         'largest-contentful-paint': ['error', { maxNumericValue: 2000 }],
         'total-blocking-time': ['error', { maxNumericValue: 200 }],
         'cumulative-layout-shift': ['error', { maxNumericValue: 0.1 }],
-        // static assets must be compressed and long-cached by the server;
-        // warn-only because REST responses are not compressed yet
-        'uses-text-compression': 'warn',
+        // static assets and API responses must be compressed, and static
+        // assets long-cached, by the server
+        'uses-text-compression': 'error',
         'uses-long-cache-ttl': 'error',
         'total-byte-weight': ['error', { maxNumericValue: 1000000 }],
         // transferred script bytes, including the route chunks the UI

@@ -221,6 +221,19 @@ func TestStaticHandlerMissing(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerRedirectNotCached(t *testing.T) {
+	resp := get(t, StaticHandler(testAssets(), true), "/assets", "gzip")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("Cache-Control"); got != "" {
+		t.Errorf("Cache-Control = %q, want none on a redirect", got)
+	}
+}
+
 func TestAcceptsGzip(t *testing.T) {
 	cases := map[string]bool{
 		"":                 false,

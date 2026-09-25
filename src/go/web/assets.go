@@ -71,10 +71,6 @@ func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if immutable {
-			w.Header().Set("Cache-Control", immutableCacheControl)
-		}
-
 		name := path.Clean("/" + r.URL.Path)
 		compressible := compressibleExts[path.Ext(name)]
 
@@ -135,6 +131,12 @@ func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 			}
 
 			cache.Store(key, asset)
+		}
+
+		// only here, once the file is known to exist: a cached 404 or redirect
+		// would outlive the deploy that adds the file
+		if immutable {
+			w.Header().Set("Cache-Control", immutableCacheControl)
 		}
 
 		if asset.gz == nil || !acceptsGzip(r) {

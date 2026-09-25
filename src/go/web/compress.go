@@ -42,7 +42,8 @@ var (
 // CompressResponses gzip-compresses JSON, YAML and plain-text API responses for
 // clients that accept it. Large list responses (VMs, disks, configs, logs) are
 // repetitive JSON that shrinks several fold, which matters on the slow links
-// the UI is often used over. Websocket upgrades and every other content type pass through as-is.
+// the UI is often used over. Websocket upgrades and every other content type
+// pass through as-is.
 func CompressResponses(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Accept-Encoding")
