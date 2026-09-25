@@ -27,9 +27,7 @@
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            {{
-              loaded ? 'Your search turned up empty!' : 'Loading experiments…'
-            }}
+            {{ emptyText }}
           </div>
         </section>
       </template>
@@ -161,7 +159,7 @@
 
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
@@ -197,6 +195,13 @@
     },
 
     computed: {
+      emptyText() {
+        if (!this.loaded) return loadingText('experiments');
+        if (this.experiments.length === 0) {
+          return 'No experiments found with SCORCH pipelines';
+        }
+        return 'No experiments with SCORCH pipelines match your search';
+      },
       filteredExperiments: function () {
         let experiments = this.experiments;
         let nameRegex = new RegExp(this.searchName, 'i');

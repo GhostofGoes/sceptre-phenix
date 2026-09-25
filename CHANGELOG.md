@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Empty tables say why they are empty (still loading, failed to load, nothing matches the search, or nothing exists yet) instead of "Your search turned up empty!".
+- **Web UI**: Paginate toggles sit above their tables instead of below them.
+- **Web UI**: The Console page no longer says console access is not configured while the console is starting, and names the real reason when it cannot start.
 - **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets, marks Vite's hashed assets as immutable, and sends content-hash ETags so other static files (noVNC, xterm.js, the topology builder) are revalidated instead of re-downloaded.
 - **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
 - **Web UI**: Reduced the JavaScript loaded on every page by about a quarter (602 kB to 441 kB, 180 kB to 142 kB gzipped) by registering only the Buefy components the UI uses, and cut bundled image weight from 1.6 MB to about 110 kB.

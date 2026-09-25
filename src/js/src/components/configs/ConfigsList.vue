@@ -62,6 +62,13 @@
     <div class="level-right">
       <div class="level-item">
         <b-field position="is-right" grouped>
+          <div
+            v-if="paginationNeeded"
+            class="control is-flex is-align-items-center">
+            <b-switch v-model="isPaginated" size="is-small" type="is-light"
+              >Paginate</b-switch
+            >
+          </div>
           <b-field
             v-if="
               selectedConfigs.length > 0 &&
@@ -168,7 +175,7 @@
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            {{ loaded ? 'Your search turned up empty!' : 'Loading configs…' }}
+            {{ emptyText }}
           </div>
         </section>
       </template>
@@ -256,14 +263,6 @@
         </b-tooltip>
       </b-table-column>
     </b-table>
-    <br />
-    <b-field v-if="paginationNeeded" grouped position="is-right">
-      <div class="control is-flex">
-        <b-switch v-model="isPaginated" size="is-small" type="is-light"
-          >Paginate</b-switch
-        >
-      </div>
-    </b-field>
   </div>
 </template>
 
@@ -274,7 +273,7 @@
   import FileSaver from 'file-saver';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
@@ -332,6 +331,11 @@
       this.loader.stop();
     },
     computed: {
+      emptyText() {
+        if (!this.loaded) return loadingText('configs');
+        if (this.configs.length === 0) return 'No configs found';
+        return 'No configs match your search';
+      },
       paginationNeeded() {
         return this.filteredConfigs.length > 10;
       },

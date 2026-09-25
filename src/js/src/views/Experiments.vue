@@ -159,6 +159,13 @@
     </template>
     <template v-else>
       <b-field position="is-right" grouped>
+        <div
+          v-if="paginationNeeded"
+          class="control is-flex is-align-items-center">
+          <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+            >Paginate</b-switch
+          >
+        </div>
         <b-field>
           <b-autocomplete
             v-model="searchName"
@@ -202,8 +209,8 @@
               <div class="content has-text-white has-text-centered">
                 {{
                   loaded
-                    ? 'Your search turned up empty!'
-                    : 'Loading experiments…'
+                    ? 'No experiments match your search'
+                    : loadingText('experiments')
                 }}
               </div>
             </section>
@@ -349,18 +356,6 @@
             </b-tooltip>
           </b-table-column>
         </b-table>
-        <br />
-        <b-field v-if="paginationNeeded" grouped position="is-right">
-          <div class="control is-flex">
-            <b-switch
-              v-model="table.isPaginated"
-              size="is-small"
-              type="is-light"
-              @input="changePaginate()"
-              >Paginate</b-switch
-            >
-          </div>
-        </b-field>
       </div>
     </template>
     <b-loading
@@ -377,7 +372,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
@@ -467,6 +462,8 @@
     },
 
     methods: {
+      loadingText,
+
       handleWs(msg) {
         // We only care about publishes pertaining to an experiment resource.
         if (msg.resource.type != 'experiment') {

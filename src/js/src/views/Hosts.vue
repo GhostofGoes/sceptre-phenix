@@ -7,6 +7,13 @@ available for experiments, the number of VMs, and host uptime.
 
 <template>
   <div class="content">
+    <b-field v-if="paginationNeeded" grouped position="is-right">
+      <div class="control is-flex">
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+          >Paginate</b-switch
+        >
+      </div>
+    </b-field>
     <b-table
       :data="hosts"
       :paginated="table.isPaginated"
@@ -16,6 +23,13 @@ available for experiments, the number of VMs, and host uptime.
       :pagination-size="table.paginationSize"
       :default-sort-direction="table.defaultSortDirection"
       default-sort="name">
+      <template #empty>
+        <section class="section">
+          <div class="content has-text-white has-text-centered">
+            {{ loaded ? 'No hosts found' : loadingText('hosts') }}
+          </div>
+        </section>
+      </template>
       <b-table-column field="name" label="Name" sortable v-slot="props">
         {{ hostName(props.row) }}
       </b-table-column>
@@ -95,25 +109,13 @@ available for experiments, the number of VMs, and host uptime.
         {{ formatUptime(props.row.uptime) }}
       </b-table-column>
     </b-table>
-    <br />
-    <b-field v-if="paginationNeeded" grouped position="is-right">
-      <div class="control is-flex">
-        <b-switch
-          v-model="table.isPaginated"
-          size="is-small"
-          type="is-light"
-          @input="changePaginate()"
-          >Paginate</b-switch
-        >
-      </div>
-    </b-field>
   </div>
 </template>
 
 <script>
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useTable } from '@/utils/useTable.js';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
@@ -130,13 +132,18 @@ available for experiments, the number of VMs, and host uptime.
       this.loader = createPageLoader({
         key: 'hosts',
         fetch: pageFetchers.hosts,
-        apply: (hosts) => (this.hosts = hosts),
+        apply: (hosts) => {
+          this.hosts = hosts;
+          this.loaded = true;
+        },
       });
       this.loader.start();
       this.periodicUpdateHosts();
     },
 
     methods: {
+      loadingText,
+
       periodicUpdateHosts() {
         this.update = setInterval(() => {
           // skip polling while the browser tab is in the background, or
@@ -187,6 +194,7 @@ available for experiments, the number of VMs, and host uptime.
     data() {
       return {
         hosts: [],
+        loaded: false,
       };
     },
   };

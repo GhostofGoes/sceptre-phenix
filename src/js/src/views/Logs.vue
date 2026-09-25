@@ -127,7 +127,16 @@
         <div class="log-column column is-rest">Message</div>
       </div>
 
-      <div v-if="!loaded" class="has-text-centered p-4">Loading logs…</div>
+      <div v-if="!loaded" class="has-text-centered p-4">
+        {{ loadingText('logs') }}
+      </div>
+      <div v-else-if="filteredLogs.length === 0" class="has-text-centered p-4">
+        {{
+          logs.length
+            ? 'No logs match your filters'
+            : 'No logs in this time range'
+        }}
+      </div>
       <RecycleScroller
         ref="logScroller"
         :items="filteredLogs"
@@ -186,7 +195,7 @@
 
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { DEFAULT_LOG_WINDOW, pageFetchers } from '@/utils/pageData.js';
 
   const KNOWN_LEVELS = [
@@ -345,6 +354,8 @@
     },
 
     methods: {
+      loadingText,
+
       isDefaultView() {
         return this.endNow && this.dateFilter === DEFAULT_DATE_FILTER;
       },

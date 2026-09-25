@@ -206,6 +206,13 @@
     </b-modal>
     <!-- CONTENT -->
     <b-field grouped position="is-right" style="margin: 12px 0px">
+      <div
+        v-if="paginationNeeded"
+        class="control is-flex is-align-items-center">
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+          >Paginate</b-switch
+        >
+      </div>
       <b-field>
         <b-autocomplete
           v-model="filterString"
@@ -256,7 +263,7 @@
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">
-            {{ loaded ? 'No Disks Found' : 'Loading disks…' }}
+            {{ emptyText }}
           </div>
         </section>
       </template>
@@ -287,18 +294,6 @@
         {{ props.row.size }}
       </b-table-column>
     </b-table>
-    <br />
-    <b-field v-if="paginationNeeded" grouped position="is-right">
-      <div class="control is-flex">
-        <b-switch
-          v-model="table.isPaginated"
-          size="is-small"
-          type="is-light"
-          @input="changePaginate()"
-          >Paginate</b-switch
-        >
-      </div>
-    </b-field>
   </div>
 </template>
 
@@ -308,7 +303,7 @@
   import { usePhenixStore } from '@/store.js';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
 
@@ -347,6 +342,11 @@
     },
 
     computed: {
+      emptyText() {
+        if (!this.loaded) return loadingText('disks');
+        if (this.disks.length === 0) return 'No disk images found';
+        return 'No disk images match your search';
+      },
       paginationNeeded() {
         return this.disks.length > this.table.perPage;
       },

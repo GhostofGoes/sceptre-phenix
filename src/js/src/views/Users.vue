@@ -194,6 +194,13 @@
     </b-modal>
     <!-- BODY -->
     <b-field grouped position="is-right">
+      <div
+        v-if="paginationNeeded"
+        class="control is-flex is-align-items-center">
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+          >Paginate</b-switch
+        >
+      </div>
       <p v-if="roleAllowed('users', 'create')" class="control">
         <b-tooltip label="create a new user" type="is-light is-left">
           <button class="button is-light" @click="isCreateActive = true">
@@ -212,6 +219,13 @@
         :pagination-size="table.paginationSize"
         :default-sort-direction="table.defaultSortDirection"
         default-sort="username">
+        <template #empty>
+          <section class="section">
+            <div class="content has-text-white has-text-centered">
+              {{ loaded ? 'No users found' : loadingText('users') }}
+            </div>
+          </section>
+        </template>
         <b-table-column field="username" label="User" sortable v-slot="props">
           <b-tooltip label="change user settings" type="is-dark">
             <div class="field">
@@ -275,18 +289,6 @@
           </b-tooltip>
         </b-table-column>
       </b-table>
-      <br />
-      <b-field v-if="paginationNeeded" grouped position="is-right">
-        <div class="control is-flex">
-          <b-switch
-            v-model="table.isPaginated"
-            size="is-small"
-            type="is-light"
-            @input="changePaginate()"
-            >Paginate</b-switch
-          >
-        </div>
-      </b-field>
     </div>
     <b-loading
       :is-full-page="false"
@@ -303,7 +305,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
@@ -322,6 +324,7 @@
         apply: ({ users, roleNames }) => {
           this.users = users;
           this.roleNames = roleNames;
+          this.loaded = true;
         },
       });
       this.loader.start();
@@ -345,6 +348,8 @@
     },
 
     methods: {
+      loadingText,
+
       handleWs(msg) {
         // We only care about publishes pertaining to a user resource.
         if (msg.resource.type != 'user') {
@@ -747,6 +752,7 @@
       return {
         roleNames: [],
         users: [],
+        loaded: false,
         user: {},
         userExists: false,
         isCreateActive: false,

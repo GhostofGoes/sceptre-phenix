@@ -961,6 +961,20 @@
     <div style="margin-top: -4em">
       <b-tabs v-model="activeTab">
         <b-tab-item label="VMs" icon="desktop">
+          <b-field v-if="paginationNeeded" grouped position="is-right">
+            <div class="control is-flex">
+              <b-switch
+                v-model="table.isPaginated"
+                @update:modelValue="
+                  updateExperiment();
+                  changePaginate();
+                "
+                size="is-small"
+                type="is-light"
+                >Paginate</b-switch
+              >
+            </div>
+          </b-field>
           <b-table
             :data="experiment.vms"
             :paginated="table.isPaginated"
@@ -978,7 +992,7 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  Your search turned up empty!
+                  {{ vmsEmptyText }}
                 </div>
               </section>
             </template>
@@ -1258,14 +1272,15 @@
               </b-tooltip>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="paginationNeeded" grouped position="is-right">
+        </b-tab-item>
+        <b-tab-item label="Files" icon="file-alt">
+          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
             <div class="control is-flex">
               <b-switch
-                v-model="table.isPaginated"
+                v-model="filesTable.isPaginated"
                 @update:modelValue="
-                  updateExperiment();
-                  changePaginate();
+                  updateFiles();
+                  changeFilesPaginate();
                 "
                 size="is-small"
                 type="is-light"
@@ -1273,8 +1288,6 @@
               >
             </div>
           </b-field>
-        </b-tab-item>
-        <b-tab-item label="Files" icon="file-alt">
           <b-table
             :data="files"
             :paginated="filesTable.isPaginated"
@@ -1292,7 +1305,7 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  No Files Are Available!
+                  {{ filesEmptyText }}
                 </div>
               </section>
             </template>
@@ -1362,21 +1375,6 @@
               </b-button>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
-            <div class="control is-flex">
-              <b-switch
-                v-model="filesTable.isPaginated"
-                @update:modelValue="
-                  updateFiles();
-                  changeFilesPaginate();
-                "
-                size="is-small"
-                type="is-light"
-                >Paginate</b-switch
-              >
-            </div>
-          </b-field>
         </b-tab-item>
         <b-tab-item label="VNC" icon="arrow-pointer">
           <b-field
@@ -1425,7 +1423,9 @@
                 >
               </div>
             </template>
-            <template v-else>Your search turned up empty!</template>
+            <template v-else>{{
+              experiment.name ? 'No VMs with a VNC console' : loadingText('VMs')
+            }}</template>
           </div>
         </b-tab-item>
         <b-tab-item label="Netflow" icon="circle-nodes" v-if="netflow.data">
@@ -1459,7 +1459,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { partitionSnapshotVMNames } from '@/utils/vmSnapshot.js';
   import {
     applyStopCaptureUpdate,
@@ -1532,6 +1532,20 @@
     },
 
     computed: {
+      vmsEmptyText() {
+        if (!this.experiment.name) return loadingText('VMs');
+        if (this.search.filter) return 'No VMs match your search';
+        return 'This experiment has no VMs';
+      },
+
+      filesEmptyText() {
+        if (!this.filesLoaded) return 'Loading files…';
+        if (this.search.filter || this.filesTable.category) {
+          return 'No files match your search';
+        }
+        return 'This experiment has no files yet';
+      },
+
       filteredData() {
         return this.search.vms.filter((vm) => {
           return (
@@ -1572,6 +1586,8 @@
     },
 
     methods: {
+      loadingText,
+
       changePaginate() {
         var user = usePhenixStore().username;
         localStorage.setItem(user + '.lastPaginate', this.table.isPaginated);
@@ -2377,6 +2393,9 @@
           .catch((err) => {
             useErrorNotification(err);
             this.isWaiting = false;
+          })
+          .finally(() => {
+            this.filesLoaded = true;
           });
       },
 
@@ -4084,6 +4103,7 @@
         apps: null,
         experiment: [],
         files: [],
+        filesLoaded: false,
         disks: [],
         vlan: null,
         isWaiting: false, // set while a change is being saved

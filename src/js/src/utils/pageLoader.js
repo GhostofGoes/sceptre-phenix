@@ -11,6 +11,12 @@ export const pageStatus = reactive({
   failed: false, // whether the latest load failed
 });
 
+// Placeholder for a table whose first load has not finished: it says so
+// when that load failed rather than claiming it is still loading.
+export function loadingText(what) {
+  return pageStatus.failed ? `Could not load ${what}` : `Loading ${what}…`;
+}
+
 // the loader that owns pageStatus; others must not touch it
 let owner = null;
 

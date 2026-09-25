@@ -222,6 +222,20 @@
     <div style="margin-top: -4em">
       <b-tabs v-model="activeTab">
         <b-tab-item label="VMs" icon="desktop">
+          <b-field v-if="paginationNeeded" grouped position="is-right">
+            <div class="control is-flex">
+              <b-switch
+                v-model="table.isPaginated"
+                @update:modelValue="
+                  updateExperiment();
+                  changePaginate();
+                "
+                size="is-small"
+                type="is-light"
+                >Paginate</b-switch
+              >
+            </div>
+          </b-field>
           <b-table
             :key="table.key"
             :data="experiment.vms"
@@ -241,7 +255,7 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  Your search turned up empty!
+                  {{ vmsEmptyText }}
                 </div>
               </section>
             </template>
@@ -537,14 +551,15 @@
               </template>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="paginationNeeded" grouped position="is-right">
+        </b-tab-item>
+        <b-tab-item label="Files" icon="file-alt">
+          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
             <div class="control is-flex">
               <b-switch
-                v-model="table.isPaginated"
+                v-model="filesTable.isPaginated"
                 @update:modelValue="
-                  updateExperiment();
-                  changePaginate();
+                  updateFiles();
+                  changeFilesPaginate();
                 "
                 size="is-small"
                 type="is-light"
@@ -552,8 +567,6 @@
               >
             </div>
           </b-field>
-        </b-tab-item>
-        <b-tab-item label="Files" icon="file-alt">
           <b-table
             :data="files"
             :paginated="filesTable.isPaginated && filesPaginationNeeded"
@@ -571,7 +584,7 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  No Files Are Available!
+                  {{ filesEmptyText }}
                 </div>
               </section>
             </template>
@@ -641,21 +654,6 @@
               </b-button>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
-            <div class="control is-flex">
-              <b-switch
-                v-model="filesTable.isPaginated"
-                @update:modelValue="
-                  updateFiles();
-                  changeFilesPaginate();
-                "
-                size="is-small"
-                type="is-light"
-                >Paginate</b-switch
-              >
-            </div>
-          </b-field>
         </b-tab-item>
       </b-tabs>
     </div>
@@ -676,7 +674,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
-  import { createPageLoader } from '@/utils/pageLoader.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
 
   export default {
     mixins: [formattingMixin],
@@ -734,6 +732,20 @@
     },
 
     computed: {
+      vmsEmptyText() {
+        if (!this.experiment.name) return loadingText('VMs');
+        if (this.searchName) return 'No VMs match your search';
+        return 'This experiment has no VMs';
+      },
+
+      filesEmptyText() {
+        if (!this.filesLoaded) return 'Loading files…';
+        if (this.searchName || this.filesTable.category) {
+          return 'No files match your search';
+        }
+        return 'This experiment has no files yet';
+      },
+
       vms: function () {
         let vms = this.experiment.vms;
 
@@ -1036,7 +1048,10 @@
             (err) => {
               useErrorNotification(err);
             },
-          );
+          )
+          .finally(() => {
+            this.filesLoaded = true;
+          });
       },
 
       viewFile(file) {
@@ -1765,6 +1780,7 @@
         schedules: ['isolate_experiment', 'round_robin'],
         experiment: [],
         files: [],
+        filesLoaded: false,
         hosts: [],
         disks: [],
         searchName: '',
