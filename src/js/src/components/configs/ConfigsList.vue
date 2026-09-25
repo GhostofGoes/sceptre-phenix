@@ -159,7 +159,7 @@
   <div style="margin-top: -1em">
     <b-table
       :data="filteredConfigs"
-      :paginated="isPaginated"
+      :paginated="isPaginated && paginationNeeded"
       per-page="10"
       pagination-simple="true"
       pagination-size="is-small"
@@ -271,12 +271,17 @@
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
+  import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
 
   export default {
     emits: ['edit', 'create'],
     setup() {
       return { roleAllowed };
     },
+    watch: {
+      isPaginated: savePaginate,
+    },
+
     data() {
       return {
         configs: [],
@@ -295,7 +300,7 @@
           'Role',
         ],
         //table
-        isPaginated: false,
+        isPaginated: loadPaginate(),
         perPage: 10,
         currentPage: 1,
         selectedConfigs: [],

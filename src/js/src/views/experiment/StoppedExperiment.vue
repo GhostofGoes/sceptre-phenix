@@ -669,6 +669,7 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
 
   export default {
     mixins: [formattingMixin],
@@ -1662,6 +1663,8 @@
     },
 
     watch: {
+      'table.isPaginated': savePaginate,
+      'filesTable.isPaginated': savePaginate,
       checkAll(newVal) {
         if (newVal) {
           var visibleItems = this.$refs['vmTable'].visibleData;
@@ -1698,7 +1701,7 @@
       return {
         table: {
           key: 0,
-          isPaginated: false,
+          isPaginated: loadPaginate(),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
@@ -1708,7 +1711,7 @@
           defaultSortDirection: 'asc',
         },
         filesTable: {
-          isPaginated: false,
+          isPaginated: loadPaginate(),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,

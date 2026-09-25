@@ -197,7 +197,7 @@
       <div>
         <b-table
           :data="filteredExperiments"
-          :paginated="table.isPaginated"
+          :paginated="table.isPaginated && paginationNeeded"
           :per-page="table.perPage"
           v-model:current-page="table.currentPage"
           :pagination-simple="table.isPaginationSimple"

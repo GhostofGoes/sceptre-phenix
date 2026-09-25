@@ -212,7 +212,7 @@
     <div>
       <b-table
         :data="users"
-        :paginated="table.isPaginated"
+        :paginated="table.isPaginated && paginationNeeded"
         :per-page="table.perPage"
         v-model:current-page="table.currentPage"
         :pagination-simple="table.isPaginationSimple"

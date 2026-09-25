@@ -1454,6 +1454,7 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
   import { partitionSnapshotVMNames } from '@/utils/vmSnapshot.js';
   import {
     applyStopCaptureUpdate,
@@ -3911,6 +3912,8 @@
     },
 
     watch: {
+      'table.isPaginated': savePaginate,
+      'filesTable.isPaginated': savePaginate,
       checkAll(newVal) {
         if (newVal) {
           var visibleItems = this.$refs['vmTable'].visibleData;
@@ -3954,7 +3957,7 @@
           filter: '',
         },
         table: {
-          isPaginated: false,
+          isPaginated: loadPaginate(),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
@@ -3964,7 +3967,7 @@
           paginationSize: 'is-small',
         },
         filesTable: {
-          isPaginated: false,
+          isPaginated: loadPaginate(),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
