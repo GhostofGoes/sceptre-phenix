@@ -48,7 +48,6 @@
           @click="$emit('edit', viewer.config)">
           Edit Config
         </button>
-        <!-- <button class="button is-info" @click="action( 'dl', { 'kind': viewer.kind, 'metadata': { 'name': viewer.name } } )"> -->
         <button class="button is-info" @click="download([viewer.config])">
           <b-icon icon="download"></b-icon>
         </button>
@@ -169,9 +168,6 @@
       v-model:checked-rows="selectedConfigs"
       :loading="isWaiting"
       ref="cfgTable">
-      <!-- docs currently wrong with checked rows, see: https://github.com/buefy/buefy/issues/4102 -->
-      <!-- <b-loading :is-full-page="false" v-model="isWaiting"></b-loading> -->
-
       <template #empty>
         <section class="section">
           <div class="content has-text-white has-text-centered">

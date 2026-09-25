@@ -99,7 +99,7 @@
             <span
               class="tag is-medium"
               :class="scorchStatusDecorator(props.row)">
-              <div class="field" @click="scorchControl(props.row, -1)">
+              <div class="field" @click="scorchControl(props.row)">
                 {{ scorchStatus(props.row) }}
               </div>
             </span>
@@ -182,8 +182,7 @@
         apply: (experiments) => {
           this.experiments = experiments;
           this.loaded = true;
-          // check for existing experiment terminals
-          experiments.forEach((exp) => this.getTerminals(exp.name));
+          this.getTerminals();
         },
       });
       this.loader.start();
@@ -203,22 +202,11 @@
         return 'No experiments with SCORCH pipelines match your search';
       },
       filteredExperiments: function () {
-        let experiments = this.experiments;
-        let nameRegex = new RegExp(this.searchName, 'i');
-        let data = [];
-
-        for (let i in experiments) {
-          let exp = experiments[i];
-          if (exp.name.match(nameRegex)) {
-            if (exp.start_time == '') {
-              exp.start_time = 'N/A';
-            }
-
-            data.push(exp);
-          }
-        }
-
-        return data;
+        // a plain substring match: the search box is not a regular expression
+        const search = this.searchName.toLowerCase();
+        return this.experiments.filter((exp) =>
+          exp.name.toLowerCase().includes(search),
+        );
       },
 
       filteredData() {
@@ -328,23 +316,29 @@
           : axiosInstance.post(`experiments/${exp.name}/scorch/pipelines/0`);
         request.catch(useErrorNotification);
       },
-      getTerminals(exp) {
-        axiosInstance
-          .get(`experiments/${exp}/scorch/terminals`, {
-            headers: { Accept: 'application/json' },
-          })
-          .then((resp) => {
-            if (resp.data.terminals) {
-              resp.data.terminals.forEach((t) => (this.terminals[t.exp] = t));
+      // Replaces the open terminals with the current ones, so terminals that
+      // exited while the page was not listening do not linger.
+      async getTerminals() {
+        const lists = await Promise.all(
+          this.experiments.map((exp) =>
+            axiosInstance
+              .get(`experiments/${exp.name}/scorch/terminals`, {
+                headers: { Accept: 'application/json' },
+              })
+              .then((resp) => resp.data.terminals ?? [])
+              .catch((err) => {
+                useErrorNotification(err);
+                return [];
+              }),
+          ),
+        );
 
-              for (let exp in this.terminals) {
-                this.experimentTerminal(exp, true);
-              }
-            }
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          });
+        const terminals = {};
+        lists.flat().forEach((t) => (terminals[t.exp] = t));
+        this.terminals = terminals;
+        this.experiments.forEach((exp) => {
+          exp.terminal = exp.name in terminals;
+        });
       },
 
       terminalName() {
@@ -375,10 +369,13 @@
         axiosInstance
           .post(this.terminal.exit, null, { baseURL: '' })
           .then(() => {
+            // read the experiment before resetTerminal clears it
+            const exp = this.terminal.exp;
             this.resetTerminal(true);
-            this.experimentTerminal(this.terminal.exp, false);
-            delete this.terminals[this.terminal.exp];
-          });
+            this.experimentTerminal(exp, false);
+            delete this.terminals[exp];
+          })
+          .catch(useErrorNotification);
       },
 
       experimentTerminal(exp, enabled) {
@@ -526,7 +523,8 @@
                     duration: 4000,
                   });
                 }
-              });
+              })
+              .catch(useErrorNotification);
 
             break;
           }
@@ -535,6 +533,7 @@
             for (let i = 0; i < exp.length; i++) {
               if (exp[i].name == msg.resource.name) {
                 exp.splice(i, 1);
+                delete this.terminals[msg.resource.name];
 
                 this.experiments = [...exp];
 
@@ -554,8 +553,13 @@
           case 'start': {
             for (let i = 0; i < exp.length; i++) {
               if (exp[i].name == msg.resource.name) {
-                exp[i] = msg.result;
-                exp[i].status = 'started';
+                // the published experiment has no SCORCH state; keep ours
+                exp[i] = {
+                  ...msg.result,
+                  status: 'started',
+                  scorch: exp[i].scorch,
+                  terminal: exp[i].terminal,
+                };
 
                 this.experiments = [...exp];
 
@@ -575,8 +579,13 @@
           case 'stop': {
             for (let i = 0; i < exp.length; i++) {
               if (exp[i].name == msg.resource.name) {
-                exp[i] = msg.result;
-                exp[i].status = 'stopped';
+                // stopping ends any SCORCH run and its terminals
+                exp[i] = {
+                  ...msg.result,
+                  status: 'stopped',
+                  scorch: { running: false },
+                  terminal: false,
+                };
 
                 this.experiments = [...exp];
                 delete this.terminals[msg.resource.name];
@@ -648,8 +657,7 @@
     data() {
       return {
         experiments: [], // experiments with scorch configured
-        running: {}, // current scorch status for each experiment
-        terminals: {}, // active terminals (TODO: for all experiments?)
+        terminals: {}, // open SCORCH terminals by experiment name
         terminal: {
           // terminal currently being viewed
           modal: false,

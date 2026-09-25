@@ -438,19 +438,7 @@
               .then(() => {
                 this.resetEditor(`config ${name} has been edited`);
               })
-              .catch((err) => {
-                const resp = err.response.data;
-                // useErrorNotification(err);
-                if (resp.metadata && resp.metadata.validation) {
-                  this.error.title = 'Validation Error';
-                  this.error.msg = resp.metadata.validation;
-                  this.error.modal = true;
-                } else {
-                  this.error.title = 'Validation Error';
-                  this.error.msg = resp.message;
-                  this.error.modal = true;
-                }
-              });
+              .catch((err) => this.showSaveError(err));
           },
         });
         this.isWaiting = false;
@@ -478,20 +466,22 @@
               `config ${config.kind}/${config.metadata.name} has been created`,
             );
           })
-          .catch((err) => {
-            if (
-              err.response.data.metadata &&
-              err.response.data.metadata.validation
-            ) {
-              this.error.title = 'Validation Error';
-              this.error.msg = err.response.data.metadata.validation;
-              this.error.modal = true;
-            } else {
-              useErrorNotification(err); // this may need to be updated
-            }
-          });
+          .catch((err) => this.showSaveError(err));
 
         this.isWaiting = false;
+      },
+      // Validation failures open the editor's error modal, which keeps the
+      // config open for fixing; other failures (permissions, network) use the
+      // usual error notification.
+      showSaveError(err) {
+        const validation = err.response?.data?.metadata?.validation;
+        if (validation) {
+          this.error.title = 'Validation Error';
+          this.error.msg = validation;
+          this.error.modal = true;
+        } else {
+          useErrorNotification(err);
+        }
       },
       isBuilderTopology(cfg) {
         if (cfg.kind == 'Topology') {
@@ -594,7 +584,6 @@
             config.kind !== this.pastConfigKind
           ) {
             this.debouncedUpdateConfigTemplate(config);
-            // this.updateConfigTemplate(config)
           }
 
           return config.kind;

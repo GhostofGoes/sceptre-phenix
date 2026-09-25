@@ -92,7 +92,7 @@
         </b-field>
 
         <hr />
-        <!-- <b-button @click="getSettings">Reset Form</b-button> -->
+        <b-button @click="getSettings">Reset Form</b-button>
         <b-button @click="sendSettingsToServer">Save Changes</b-button>
       </form>
     </div>

@@ -15,10 +15,6 @@
     </div>
     <hr />
     <scorch-key />
-    <b-loading
-      :is-full-page="false"
-      v-model="isWaiting"
-      :can-cancel="false"></b-loading>
     <b-modal
       v-model="terminal.modal"
       :can-cancel="terminal.ro"
@@ -132,7 +128,9 @@
 
     methods: {
       scorchControl(exp, runID) {
-        let run = this.runs[runID];
+        const run = this.runs?.[runID];
+        if (!run) return;
+
         const url = `experiments/${exp}/scorch/pipelines/${runID}`;
         const request = run.running
           ? axiosInstance.delete(url)
@@ -250,10 +248,16 @@
         let proto = window.location.protocol == 'https:' ? 'wss://' : 'ws://';
         let url = proto + window.location.host + path;
 
+        this.output.socket?.close();
+        this.output.msg = '';
         this.output.socket = new WebSocket(url);
 
         this.output.socket.onmessage = (event) => {
           this.output.msg += event.data;
+        };
+        this.output.socket.onerror = () => {
+          this.output.msg +=
+            '\n[output stream failed; close and reopen to retry]';
         };
       },
 
@@ -292,6 +296,7 @@
         // base path; clear baseURL so axios doesn't prepend it again
         axiosInstance
           .post(this.terminal.exit, null, { baseURL: '' })
+          .catch(useErrorNotification)
           .finally(() => {
             this.resetTerminal(true);
           });
@@ -304,7 +309,7 @@
         }
 
         this.output.title = '';
-        this.output.msg = [];
+        this.output.msg = '';
         this.output.modal = false;
       },
 
@@ -317,6 +322,15 @@
             let runID = tokens[1];
 
             if (!this.exp || this.exp.name !== expName) {
+              return;
+            }
+
+            // the first load is still in flight and will bring this state
+            if (this.runs === null) return;
+
+            // a run added since the page loaded: reload to pick it up
+            if (!this.runs[runID]) {
+              if (!this.loader.loading) this.runsView();
               return;
             }
 
@@ -420,7 +434,6 @@
           msg: '',
           socket: null,
         },
-        isWaiting: false,
       };
     },
   };

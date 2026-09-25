@@ -9,7 +9,11 @@ available for experiments, the number of VMs, and host uptime.
   <div class="content">
     <b-field v-if="paginationNeeded" grouped position="is-right">
       <div class="control is-flex">
-        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+        <b-switch
+          v-model="table.isPaginated"
+          @update:modelValue="changePaginate()"
+          size="is-small"
+          type="is-light"
           >Paginate</b-switch
         >
       </div>

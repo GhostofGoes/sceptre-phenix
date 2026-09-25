@@ -136,11 +136,9 @@ function globalWsMessageHandler(event: MessageEvent): void {
   event.data.split(/\r?\n/).forEach((data) => {
     if (data) {
       let msg = JSON.parse(data);
-      // logging every message retains large payloads (screenshots) in the
-      // devtools console, so only do it in development builds
-      if (import.meta.env.DEV) {
-        debug('websocket msg (' + wsListeners.length + ' listeners):\n', msg);
-      }
+      // debug() is development-only: logging every message retains large
+      // payloads (screenshots) in the devtools console
+      debug('websocket msg (' + wsListeners.length + ' listeners):\n', msg);
 
       // dispatch to listeners; one failing listener must not block the rest
       wsListeners.forEach((listener) => {

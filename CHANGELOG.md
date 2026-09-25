@@ -10,6 +10,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Fixed the Scorch page: the table no longer breaks when an experiment starts or stops, or when the search contains characters such as `(`. Exiting a terminal now clears its button, and terminals that closed while the page was away no longer linger. Request failures are reported.
+- **Web UI**: The SCORCH runs page no longer errors on run updates that arrive before it loads. It picks up runs added after loading, reports a failed terminal exit, and stops a component's previous output stream before starting another.
+- **Web UI**: Saving a config reports permission and network failures in the usual error notification instead of failing silently; validation errors still open the editor's error dialog.
+- **Web UI**: The paginate toggles on Disks, Experiments, Hosts and Users remember the choice again.
+- **Web UI**: The Settings page has a Reset Form button that discards unsaved changes.
 - **Web UI**: A failed SCORCH run now shows its error in a notification, and failures to start or stop a SCORCH run are reported instead of ignored. The server now sends the run's actual error, and humanized app errors no longer reach the UI as an empty object.
 - **Web UI**: Error notifications show their icon again.
 - **Web UI**: The browser console no longer fills with debug output (API responses, uploaded file objects, pipeline layout steps, websocket chatter). Leftover debug logging was removed, development-only diagnostics now appear only in development builds, real failures log as warnings or errors, and lint rejects new `console.log` calls.

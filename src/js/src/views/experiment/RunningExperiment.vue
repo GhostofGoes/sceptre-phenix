@@ -1988,11 +1988,6 @@
               }
 
               case 'committing': {
-                //this.$buefy.toast.open({
-                //     message: 'COMMITING',
-                //     duration: 200
-                //   });
-
                 for (let i = 0; i < vms.length; i++) {
                   if (vms[i].name == vm[1]) {
                     vms[i].busy = true;

@@ -4,24 +4,6 @@
 </template>
 
 <script>
-  // import ace from 'ace-builds/src-noconflict/ace';
-  //
-  // import themeDraculaUrl from 'ace-builds/src-noconflict/theme-dracula?url';
-  // ace.config.setModuleUrl('ace/theme/dracula', themeDraculaUrl);
-  //
-  // import keybindingVim from 'ace-builds/src-noconflict/keybinding-vim?url';
-  // ace.config.setModuleUrl('ace/keybinding/vim', keybindingVim);
-  // import 'ace-builds/src-noconflict/keybinding-vim';
-  //
-  // import 'ace-builds/src-noconflict/ext-language_tools';
-  // ace.require('ace/ext/language_tools');
-  //
-  // import modeJsonUrl from 'ace-builds/src-noconflict/mode-json?url';
-  // ace.config.setModuleUrl('ace/mode/json', modeJsonUrl);
-  //
-  // import modeYamlUrl from 'ace-builds/src-noconflict/mode-yaml?url';
-  // ace.config.setModuleUrl('ace/mode/yaml', modeYamlUrl);
-
   export default {
     props: {
       value: {
@@ -125,9 +107,6 @@
         }
       },
     },
-    // setup() {
-    //   this.ace.config.set('basePath', 'ace-builds/src-noconflict/');
-    // },
     beforeUnmount() {
       this.editor.destroy();
     },

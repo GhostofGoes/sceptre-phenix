@@ -29,7 +29,6 @@ export class EdgeService {
 
   drawHEdge(start, end) {
     if (end.x > start.x + this.xstep) {
-      // let start = start.x + 10;
       let number = parseInt((end.x - start.x) / this.xstep);
 
       let control1 = this.xstep / 2 + 40;

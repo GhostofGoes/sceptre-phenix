@@ -1,4 +1,3 @@
-// const data = require('./data.js')
 import { EdgeService } from '@/components/pipeline/line.js';
 
 class Pipeline {
@@ -155,7 +154,6 @@ class Pipeline {
         while (this.matrix[starty][startx]) {
           starty++;
         }
-        // starty-=1;
         list.forEach((it) => {
           this.matrix[starty][startx++] = it;
           this.solvedList[it] = true;

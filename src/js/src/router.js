@@ -210,9 +210,6 @@ router.beforeEach(async (to, _, next) => {
     store.next = to;
 
     if (import.meta.env.VITE_AUTH === 'proxy') {
-      // next(); //TODO
-      // return;
-
       axiosInstance
         .get('login')
         .then((response) => {
