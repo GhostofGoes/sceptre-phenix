@@ -52,7 +52,8 @@ export const pageFetchers = {
     return (await get(`logs?start=${start.toISOString()}`, signal)) ?? [];
   },
 
-  // experiments that have SCORCH configured, with their run state
+  // experiments that have SCORCH configured, with their run state and run
+  // names
   scorch: async (signal) => {
     const json = { headers: { Accept: 'application/json' } };
     const { experiments } = await get('experiments', signal);
@@ -68,16 +69,17 @@ export const pageFetchers = {
           return null;
         }
 
-        exp.scorch = { running: apps['scorch'] };
-
-        if (exp.scorch.running) {
-          const pipelines = await get(
-            `experiments/${exp.name}/scorch/pipelines`,
-            signal,
-            json,
-          );
-          exp.scorch.run = pipelines.running;
-        }
+        const pipelines = await get(
+          `experiments/${exp.name}/scorch/pipelines`,
+          signal,
+          json,
+        );
+        exp.scorch = {
+          running: apps['scorch'],
+          run: pipelines.running,
+          runs: (pipelines.pipelines ?? []).map((p) => p.name),
+          pending: false,
+        };
 
         return exp;
       }),

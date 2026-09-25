@@ -1,20 +1,52 @@
 <template>
   <div class="content">
-    <router-link class="button is-dark" :to="{ name: 'scorch' }">
-      <b-icon icon="arrow-left" />
-      <span>Back to SCORCH</span>
-    </router-link>
+    <div class="runs-header">
+      <router-link class="button is-dark" :to="{ name: 'scorch' }">
+        <b-icon icon="arrow-left" />
+        <span>Back to SCORCH</span>
+      </router-link>
+      <span class="runs-title">Experiment: {{ expName }}</span>
+      <div class="buttons">
+        <router-link
+          v-if="roleAllowed('experiments', 'get', expName)"
+          class="button is-dark"
+          :to="{ name: 'experiment', params: { id: expName } }">
+          <span>Go to experiment</span>
+          <b-icon icon="arrow-right" />
+        </router-link>
+        <button
+          v-if="roleAllowed('experiments/trigger', 'create', expName)"
+          class="button is-success"
+          :disabled="!canStartAll"
+          @click="startAll">
+          <b-icon icon="play" />
+          <span>Start all</span>
+        </button>
+        <button
+          v-if="roleAllowed('experiments/trigger', 'delete', expName)"
+          class="button is-danger"
+          :disabled="!canStopAll"
+          @click="stopAll">
+          <b-icon icon="stop" />
+          <span>Stop all</span>
+        </button>
+      </div>
+    </div>
     <div v-for="(run, id) in runs" :key="id">
       <hr />
       <scorch-run
-        :exp="exp.name"
+        :exp="expName"
         :run="id"
         :name="run.name"
         :loop="run.loop"
         :running="run.running"
+        :pending="run.pending || run.queued"
+        :has-cleanup="run.hasCleanup"
+        :can-clean-up="!anyBusy"
         :nodes="run.nodes"
         :viewer="componentDetail"
         :controller="scorchControl"
+        :cleaner="cleanupRun"
         :rewinder="loopHistory" />
     </div>
     <hr />
@@ -85,12 +117,21 @@
   import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
   import { usePhenixStore } from '@/store.js';
+  import { roleAllowed } from '@/utils/rbac.js';
 
   import ScorchKey from '@/components/scorch/ScorchKey.vue';
   import ScorchRun from '@/components/scorch/ScorchRun.vue';
   import Terminal from '@/components/MiniTerminal.vue';
 
+  // how long a run's button spins waiting for the server to report that the
+  // run started, in case that update never arrives
+  const PENDING_TIMEOUT_MS = 15000;
+
   export default {
+    setup() {
+      return { roleAllowed };
+    },
+
     components: {
       'scorch-key': ScorchKey,
       'scorch-run': ScorchRun,
@@ -99,22 +140,26 @@
 
     created() {
       addWsHandler(this.handle);
-      // not cached: run state is live
+      // cached per experiment, so returning to a pipeline shows it at once
+      // while a fresh copy loads
+      const exp = this.expName;
       this.loader = createPageLoader({
+        key: `scorchruns/${exp}`,
         fetch: async (signal) => {
-          const exp = this.$route.params.id;
           const opts = { signal, headers: { Accept: 'application/json' } };
-          const [experiment, pipelines] = await Promise.all([
-            axiosInstance.get(`experiments/${exp}`, opts),
-            axiosInstance.get(`experiments/${exp}/scorch/pipelines`, opts),
-          ]);
-          return { experiment: experiment.data, pipelines: pipelines.data };
+          const resp = await axiosInstance.get(
+            `experiments/${exp}/scorch/pipelines`,
+            opts,
+          );
+          return resp.data;
         },
-        apply: ({ experiment, pipelines }) => {
-          this.exp = experiment;
+        apply: (pipelines) => {
           this.runs = (pipelines.pipelines ?? []).map((p, i) => ({
             name: p.name,
             running: i == pipelines.running,
+            pending: false,
+            queued: false,
+            hasCleanup: p.hasCleanup ?? false,
             nodes: p.pipeline,
             loop: 0,
           }));
@@ -128,21 +173,108 @@
       this.loader.stop();
       // close the streaming output socket if the modal is still open
       this.exitOutput();
+      // drop the queue and the fallback timers
+      this.runs?.forEach((run) => {
+        this.settle(run);
+        run.queued = false;
+      });
+    },
+
+    computed: {
+      expName() {
+        return this.$route.params.id;
+      },
+
+      canStartAll() {
+        return (this.runs ?? []).some(
+          (run) => !run.running && !run.pending && !run.queued,
+        );
+      },
+
+      canStopAll() {
+        return (this.runs ?? []).some((run) => run.running || run.queued);
+      },
+
+      // SCORCH executes one run at a time per experiment
+      anyBusy() {
+        return (this.runs ?? []).some((run) => run.running || run.pending);
+      },
     },
 
     methods: {
       scorchControl(exp, runID) {
         const run = this.runs?.[runID];
-        if (!run) return;
+        if (!run || run.pending) return;
 
         const url = `experiments/${exp}/scorch/pipelines/${runID}`;
-        const request = run.running
-          ? axiosInstance.delete(url)
-          : axiosInstance.post(url);
-        request.catch(useErrorNotification);
+        this.request(
+          run,
+          run.running ? axiosInstance.delete(url) : axiosInstance.post(url),
+        );
       },
 
-      // reloads the experiment and its SCORCH runs
+      // runs only the run's cleanup stage
+      cleanupRun(exp, runID) {
+        const run = this.runs?.[runID];
+        if (!run || run.pending) return;
+
+        this.request(
+          run,
+          axiosInstance.post(
+            `experiments/${exp}/scorch/pipelines/${runID}/cleanup`,
+          ),
+        );
+      },
+
+      // The run's button spins until the server reports over the websocket
+      // that the run started or stopped, or, if that never comes, for
+      // PENDING_TIMEOUT_MS.
+      request(run, request) {
+        run.pending = true;
+        run.pendingTimer = setTimeout(() => {
+          run.pending = false;
+          this.startNext();
+        }, PENDING_TIMEOUT_MS);
+
+        request.catch((err) => {
+          this.settle(run);
+          useErrorNotification(err);
+        });
+      },
+
+      settle(run) {
+        clearTimeout(run.pendingTimer);
+        run.pending = false;
+      },
+
+      // Starts every run that is not running, one after another since SCORCH
+      // executes one run at a time; a run already running finishes first.
+      startAll() {
+        this.runs.forEach((run) => {
+          if (!run.running && !run.pending) run.queued = true;
+        });
+        this.startNext();
+      },
+
+      startNext() {
+        if (!this.runs || this.anyBusy) return;
+
+        const id = this.runs.findIndex((run) => run.queued);
+        if (id < 0) return;
+
+        this.runs[id].queued = false;
+        this.scorchControl(this.expName, id);
+      },
+
+      // stops the running runs and drops the ones still waiting to start
+      stopAll() {
+        this.runs.forEach((run, id) => {
+          run.queued = false;
+          if (run.running && !run.pending) this.scorchControl(this.expName, id);
+        });
+      },
+
+      // reloads the experiment's SCORCH runs
       runsView() {
         return this.loader.load();
       },
@@ -153,12 +285,12 @@
         }
 
         switch (comp.name) {
+          // the stage nodes have no output of their own
           case 'configure':
           case 'start':
           case 'stop':
-          case 'cleanup': {
+          case 'cleanup':
             break;
-          }
 
           case 'done': {
             if (comp.status === 'running') {
@@ -228,13 +360,9 @@
             headers: { Accept: 'application/json' },
           })
           .then((resp) => {
-            let run = this.runs[runID];
-
+            const run = this.runs[runID];
             run.loop = loopID;
             run.nodes = resp.data.pipeline ?? [];
-
-            // using `Vue.set` to force reactivity
-            this.runs[runID] = run;
           })
           .catch((err) => {
             useErrorNotification(err);
@@ -325,9 +453,7 @@
             let expName = tokens[0];
             let runID = tokens[1];
 
-            if (!this.exp || this.exp.name !== expName) {
-              return;
-            }
+            if (expName !== this.expName) return;
 
             // the first load is still in flight and will bring this state
             if (this.runs === null) return;
@@ -338,28 +464,26 @@
               return;
             }
 
+            const run = this.runs[runID];
+
             switch (msg.resource.action) {
               case 'start': {
-                let run = this.runs[runID];
                 run.running = true;
-
-                this.runs[runID] = run;
+                this.settle(run);
                 break;
               }
 
               case 'success': {
-                let run = this.runs[runID];
                 run.running = false;
-
-                this.runs[runID] = run;
+                this.settle(run);
+                this.startNext();
                 break;
               }
 
               case 'error': {
-                let run = this.runs[runID];
                 run.running = false;
-
-                this.runs[runID] = run;
+                this.settle(run);
+                this.startNext();
 
                 showError(
                   msg.result?.error ??
@@ -369,12 +493,9 @@
               }
 
               case 'pipeline-update': {
-                let loopID = parseInt(tokens[2]);
-                let run = this.runs[runID];
-
+                const loopID = parseInt(tokens[2]);
                 if (run.loop == loopID) {
                   run.nodes = msg.result.pipeline ?? [];
-                  this.runs[runID] = run;
                 }
 
                 break;
@@ -385,9 +506,7 @@
           }
 
           case 'experiment': {
-            if (!this.exp || this.exp.name !== msg.resource.name) {
-              return;
-            }
+            if (msg.resource.name !== this.expName) return;
 
             switch (msg.resource.action) {
               case 'start': {
@@ -421,7 +540,6 @@
 
     data() {
       return {
-        exp: null,
         runs: null,
         terminal: {
           // terminal currently being viewed
@@ -444,8 +562,30 @@
 </script>
 
 <style scoped>
-  div.autocomplete :deep(a.dropdown-item) {
-    color: #383838 !important;
+  /* back button left, experiment name centered, page actions right */
+  .runs-header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .runs-header > :first-child {
+    justify-self: start;
+  }
+
+  .runs-header .buttons {
+    justify-self: end;
+    margin-bottom: 0;
+  }
+
+  .runs-header .buttons .button {
+    margin-bottom: 0;
+  }
+
+  .runs-title {
+    font-weight: bold;
+    font-size: x-large;
   }
 
   .x-modal-dark {

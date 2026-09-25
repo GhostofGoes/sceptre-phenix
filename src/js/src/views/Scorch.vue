@@ -59,58 +59,74 @@
         sortable
         centered
         v-slot="props">
-        <template v-if="props.row.status == 'starting'">
-          <section>
-            <b-progress
-              size="is-medium"
-              type="is-warning"
-              show-value
-              :value="props.row.percent"
-              format="percent"></b-progress>
-          </section>
-        </template>
-        <template
-          v-else-if="
-            roleAllowed('experiments/start', 'update', props.row.name)
-          ">
-          <b-tooltip :label="expControlLabel(props.row)" type="is-dark">
-            <span
-              class="tag is-medium"
-              :class="expStatusDecorator(props.row.status)">
-              <div class="field" @click="expControl(props.row)">
-                {{ props.row.status }}
-              </div>
-            </span>
-          </b-tooltip>
-        </template>
-        <template v-else>
+        <section v-if="props.row.status == 'starting'">
+          <b-progress
+            size="is-medium"
+            type="is-warning"
+            show-value
+            :value="props.row.percent"
+            format="percent"></b-progress>
+        </section>
+        <div v-else class="status-cell">
           <span
             class="tag is-medium"
-            :class="statusDecorator(props.row.status)">
+            :class="expStatusDecorator(props.row.status)">
             {{ props.row.status }}
           </span>
-        </template>
+          <b-tooltip
+            v-if="roleAllowed('experiments/start', 'update', props.row.name)"
+            :label="expControlLabel(props.row)"
+            type="is-dark">
+            <button
+              class="button is-small is-white"
+              :class="{ 'is-loading': props.row.status == 'stopping' }"
+              :aria-label="expControlLabel(props.row)"
+              @click="expControl(props.row)">
+              <b-icon :icon="props.row.running ? 'stop' : 'play'" />
+            </button>
+          </b-tooltip>
+          <b-tooltip
+            v-if="roleAllowed('experiments', 'get', props.row.name)"
+            label="Go to experiment"
+            type="is-dark">
+            <router-link
+              class="button is-small is-white"
+              aria-label="Go to experiment"
+              :to="{ name: 'experiment', params: { id: props.row.name } }">
+              <b-icon icon="arrow-right" />
+            </router-link>
+          </b-tooltip>
+        </div>
       </b-table-column>
       <b-table-column label="Scorch Status" centered v-slot="props">
-        <template
-          v-if="roleAllowed('experiments/trigger', 'create', props.row.name)">
-          <b-tooltip :label="scorchControlLabel(props.row)" type="is-dark">
-            <span
-              class="tag is-medium"
-              :class="scorchStatusDecorator(props.row)">
-              <div class="field" @click="scorchControl(props.row)">
-                {{ scorchStatus(props.row) }}
-              </div>
-            </span>
+        <div class="status-cell">
+          <span class="tag is-medium" :class="scorchStatusDecorator(props.row)">
+            {{ scorchStatus(props.row) }}
+          </span>
+          <b-tooltip
+            v-if="scorchControlAllowed(props.row)"
+            :label="scorchControlLabel(props.row)"
+            type="is-dark">
+            <button
+              class="button is-small is-white"
+              :class="{ 'is-loading': props.row.scorch.pending }"
+              :disabled="props.row.scorch.pending"
+              :aria-label="scorchControlLabel(props.row)"
+              @click="scorchControl(props.row)">
+              <b-icon :icon="props.row.scorch.running ? 'stop' : 'play'" />
+            </button>
           </b-tooltip>
-        </template>
+        </div>
       </b-table-column>
       <b-table-column label="Terminal" centered v-slot="props">
         <button
-          v-if="roleAllowed('experiments', 'get', props.row.name)"
+          v-if="
+            props.row.terminal &&
+            roleAllowed('experiments', 'get', props.row.name)
+          "
           class="button is-small is-white"
-          @click="showExperimentTerminal(props.row.name)"
-          :disabled="!props.row.terminal">
+          aria-label="Open terminal"
+          @click="showExperimentTerminal(props.row.name)">
           <b-icon icon="terminal"></b-icon>
         </button>
       </b-table-column>
@@ -164,6 +180,10 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
 
+  // how long a SCORCH button spins waiting for the server to report that the
+  // run started or stopped, in case that update never arrives
+  const PENDING_TIMEOUT_MS = 15000;
+
   export default {
     setup() {
       const { table } = useTable();
@@ -190,6 +210,8 @@
     beforeUnmount() {
       removeWsHandler(this.handle);
       this.loader.stop();
+      // the rows live on in the page cache: stop their spinners
+      this.experiments.forEach((exp) => this.settle(exp));
     },
 
     computed: {
@@ -208,19 +230,9 @@
         );
       },
 
+      // the search box's suggestions
       filteredData() {
-        let names = this.experiments.map((exp) => {
-          return exp.name;
-        });
-
-        return names.filter((option) => {
-          return (
-            option
-              .toString()
-              .toLowerCase()
-              .indexOf(this.searchName.toLowerCase()) >= 0
-          );
-        });
+        return this.filteredExperiments.map((exp) => exp.name);
       },
     },
 
@@ -295,25 +307,61 @@
         return exp.scorch.running ? 'is-success' : 'is-danger';
       },
 
-      scorchControlLabel(exp) {
-        if (exp.scorch.running) {
-          return `cancel run ${exp.scorch.run}`;
-        }
-
-        return 'start run 0';
-      },
-
       scorchStatus(exp) {
         return exp.scorch.running ? 'running' : 'stopped';
       },
 
+      // a run's name, or its number when it has none
+      runName(exp, run) {
+        return exp.scorch.runs?.[run] || `run ${run}`;
+      },
+
+      scorchControlAllowed(exp) {
+        return roleAllowed(
+          'experiments/trigger',
+          exp.scorch.running ? 'delete' : 'create',
+          exp.name,
+        );
+      },
+
+      // the button stops the current run, or starts the first one
+      scorchControlLabel(exp) {
+        return exp.scorch.running
+          ? `Stop ${this.runName(exp, exp.scorch.run)}`
+          : `Start ${this.runName(exp, 0)}`;
+      },
+
       scorchControl(exp) {
-        const request = exp.scorch.running
-          ? axiosInstance.delete(
-              `experiments/${exp.name}/scorch/pipelines/${exp.scorch.run}`,
-            )
-          : axiosInstance.post(`experiments/${exp.name}/scorch/pipelines/0`);
-        request.catch(useErrorNotification);
+        const scorch = exp.scorch;
+        if (scorch.pending) return;
+
+        const url = `experiments/${exp.name}/scorch/pipelines`;
+        const request = scorch.running
+          ? axiosInstance.delete(`${url}/${scorch.run}`)
+          : axiosInstance.post(`${url}/0`);
+
+        // the button spins until the server reports over the websocket that
+        // the run started or stopped, or, if that never comes, for
+        // PENDING_TIMEOUT_MS
+        scorch.pending = true;
+        clearTimeout(scorch.pendingTimer);
+        scorch.pendingTimer = setTimeout(
+          () => (scorch.pending = false),
+          PENDING_TIMEOUT_MS,
+        );
+        request.catch((err) => {
+          this.settle(exp);
+          useErrorNotification(err);
+        });
+      },
+
+      settle(exp) {
+        clearTimeout(exp.scorch.pendingTimer);
+        exp.scorch.pending = false;
+      },
+
+      findExperiment(name) {
+        return this.experiments.find((exp) => exp.name == name);
       },
       // Replaces the open terminals with the current ones, so terminals that
       // exited while the page was not listening do not linger.
@@ -377,98 +425,74 @@
           .catch(useErrorNotification);
       },
 
-      experimentTerminal(exp, enabled) {
-        for (let i = 0; i < this.experiments.length; i++) {
-          if (this.experiments[i].name == exp) {
-            this.experiments[i].terminal = enabled;
-          }
-        }
+      experimentTerminal(name, enabled) {
+        const exp = this.findExperiment(name);
+        if (exp) exp.terminal = enabled;
       },
 
       showExperimentTerminal(exp) {
-        for (let e in this.terminals) {
-          if (e == exp) {
-            let comp = this.terminals[e];
-            let endpoint = `experiments/${comp.exp}/scorch/components/${comp.run}/${comp.loop}/${comp.stage}/${comp.name}`;
+        const comp = this.terminals[exp];
+        if (comp) {
+          const endpoint = `experiments/${comp.exp}/scorch/components/${comp.run}/${comp.loop}/${comp.stage}/${comp.name}`;
 
-            axiosInstance
-              .get(endpoint, {
-                headers: { Accept: 'application/json' },
-              })
-              .then((resp) => {
-                if (resp.data.terminal) {
-                  let t = resp.data.terminal;
+          axiosInstance
+            .get(endpoint, {
+              headers: { Accept: 'application/json' },
+            })
+            .then((resp) => {
+              if (resp.data.terminal) {
+                let t = resp.data.terminal;
 
-                  this.terminal.loc = t.loc;
-                  this.terminal.exit = t.exit;
-                  this.terminal.exp = t.exp;
-                  this.terminal.ro = t.readOnly;
-                  this.terminal.modal = true;
-                } else {
-                  // the component exited since the terminal was listed
-                  this.experimentTerminal(exp, false);
-                  delete this.terminals[exp];
-                  this.$buefy.toast.open({
-                    message: `The SCORCH terminal for ${exp} has closed`,
-                    type: 'is-info',
-                    duration: 4000,
-                  });
-                }
-              })
-              .catch((err) => {
-                useErrorNotification(err);
-              });
-          }
+                this.terminal.loc = t.loc;
+                this.terminal.exit = t.exit;
+                this.terminal.exp = t.exp;
+                this.terminal.ro = t.readOnly;
+                this.terminal.modal = true;
+              } else {
+                // the component exited since the terminal was listed
+                this.experimentTerminal(exp, false);
+                delete this.terminals[exp];
+                this.$buefy.toast.open({
+                  message: `The SCORCH terminal for ${exp} has closed`,
+                  type: 'is-info',
+                  duration: 4000,
+                });
+              }
+            })
+            .catch((err) => {
+              useErrorNotification(err);
+            });
         }
       },
+
       wsHandleScorch(msg) {
-        let tokens = msg.resource.name.split('/');
-
-        let expName = tokens[0];
-        let runID = tokens[1];
-
-        let exp = this.experiments;
+        const [expName, runID] = msg.resource.name.split('/');
+        const exp = this.findExperiment(expName);
 
         switch (msg.resource.action) {
           case 'start': {
-            //update experiment in list
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == expName) {
-                exp[i].scorch.running = true;
-                exp[i].scorch.run = runID;
-
-                this.experiments = [...exp];
-
-                break;
-              }
+            if (exp) {
+              exp.scorch.running = true;
+              exp.scorch.run = parseInt(runID);
+              this.settle(exp);
             }
 
             break;
           }
 
           case 'success': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == expName) {
-                exp[i].scorch.running = false;
-
-                this.experiments = [...exp];
-
-                break;
-              }
+            if (exp) {
+              exp.scorch.running = false;
+              this.settle(exp);
             }
 
             break;
           }
 
           case 'error': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == expName) {
-                exp[i].scorch.running = false;
-
-                this.experiments = [...exp];
-
-                break;
-              }
+            if (exp) {
+              exp.scorch.running = false;
+              this.settle(exp);
             }
 
             showError(
@@ -495,150 +519,127 @@
         }
       },
       wsHandleExperiment(msg) {
-        let exp = this.experiments;
+        const name = msg.resource.name;
+
+        if (msg.resource.action == 'create') {
+          this.addIfScorch(msg.result);
+          return;
+        }
+
+        const i = this.experiments.findIndex((exp) => exp.name == name);
+        if (i < 0) return;
+        const exp = this.experiments[i];
 
         switch (msg.resource.action) {
-          case 'create': {
-            // new experiment created -- check to see if it has Scorch configured
-            axiosInstance
-              .get('experiments/' + msg.resource.name + '/apps', {
-                headers: { Accept: 'application/json' },
-              })
-              .then((resp) => {
-                let apps = resp.data;
-
-                // if experiment has scorch configured, add it to the list of Scorch experiments
-                if ('scorch' in apps) {
-                  msg.result.status = 'stopped';
-                  msg.result.scorch = { running: false };
-
-                  exp.push(msg.result);
-
-                  this.experiments = [...exp];
-
-                  this.$buefy.toast.open({
-                    message: `The ${msg.resource.name} experiment has been created.`,
-                    type: 'is-success',
-                    duration: 4000,
-                  });
-                }
-              })
-              .catch(useErrorNotification);
-
-            break;
-          }
-
           case 'delete': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == msg.resource.name) {
-                exp.splice(i, 1);
-                delete this.terminals[msg.resource.name];
+            this.experiments.splice(i, 1);
+            delete this.terminals[name];
 
-                this.experiments = [...exp];
-
-                this.$buefy.toast.open({
-                  message: `The ${msg.resource.name} experiment has been deleted.`,
-                  type: 'is-success',
-                  duration: 4000,
-                });
-
-                break;
-              }
-            }
+            this.$buefy.toast.open({
+              message: `The ${name} experiment has been deleted.`,
+              type: 'is-success',
+              duration: 4000,
+            });
 
             break;
           }
 
           case 'start': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == msg.resource.name) {
-                // the published experiment has no SCORCH state; keep ours
-                exp[i] = {
-                  ...msg.result,
-                  status: 'started',
-                  scorch: exp[i].scorch,
-                  terminal: exp[i].terminal,
-                };
+            // the published experiment has no SCORCH state; keep ours
+            this.experiments[i] = {
+              ...msg.result,
+              status: 'started',
+              scorch: exp.scorch,
+              terminal: exp.terminal,
+            };
 
-                this.experiments = [...exp];
-
-                this.$buefy.toast.open({
-                  message: `The ${msg.resource.name} experiment has been started.`,
-                  type: 'is-success',
-                  duration: 4000,
-                });
-
-                break;
-              }
-            }
+            this.$buefy.toast.open({
+              message: `The ${name} experiment has been started.`,
+              type: 'is-success',
+              duration: 4000,
+            });
 
             break;
           }
 
           case 'stop': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == msg.resource.name) {
-                // stopping ends any SCORCH run and its terminals
-                exp[i] = {
-                  ...msg.result,
-                  status: 'stopped',
-                  scorch: { running: false },
-                  terminal: false,
-                };
+            // stopping ends any SCORCH run and its terminals
+            this.settle(exp);
+            this.experiments[i] = {
+              ...msg.result,
+              status: 'stopped',
+              scorch: { ...exp.scorch, running: false },
+              terminal: false,
+            };
+            delete this.terminals[name];
 
-                this.experiments = [...exp];
-                delete this.terminals[msg.resource.name];
-
-                this.$buefy.toast.open({
-                  message: `The ${msg.resource.name} experiment has been stopped.`,
-                  type: 'is-success',
-                  duration: 4000,
-                });
-
-                break;
-              }
-            }
+            this.$buefy.toast.open({
+              message: `The ${name} experiment has been stopped.`,
+              type: 'is-success',
+              duration: 4000,
+            });
 
             break;
           }
 
-          case 'starting': // fallthru to `stopping`
+          case 'starting':
           case 'stopping': {
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == msg.resource.name) {
-                exp[i].status = msg.resource.action;
-                exp[i].percent = 0;
+            exp.status = msg.resource.action;
+            exp.percent = 0;
 
-                this.experiments = [...exp];
-
-                this.$buefy.toast.open({
-                  message: `The ${msg.resource.name} experiment is being updated.`,
-                  type: 'is-warning',
-                });
-
-                break;
-              }
-            }
+            this.$buefy.toast.open({
+              message: `The ${name} experiment is being updated.`,
+              type: 'is-warning',
+            });
 
             break;
           }
+
           case 'progress': {
-            let percent = (msg.result.percent * 100).toFixed(0);
-
-            for (let i = 0; i < exp.length; i++) {
-              if (exp[i].name == msg.resource.name) {
-                exp[i].percent = parseInt(percent);
-
-                this.experiments = [...exp];
-
-                break;
-              }
-            }
-
+            exp.percent = Math.round(msg.result.percent * 100);
             break;
           }
         }
       },
+
+      // adds a newly created experiment if it has SCORCH configured
+      async addIfScorch(exp) {
+        const json = { headers: { Accept: 'application/json' } };
+
+        try {
+          const apps = (
+            await axiosInstance.get(`experiments/${exp.name}/apps`, json)
+          ).data;
+          if (!('scorch' in apps)) return;
+
+          const pipelines = (
+            await axiosInstance.get(
+              `experiments/${exp.name}/scorch/pipelines`,
+              json,
+            )
+          ).data;
+
+          this.experiments.push({
+            ...exp,
+            status: 'stopped',
+            scorch: {
+              running: false,
+              run: -1,
+              runs: (pipelines.pipelines ?? []).map((p) => p.name),
+              pending: false,
+            },
+          });
+
+          this.$buefy.toast.open({
+            message: `The ${exp.name} experiment has been created.`,
+            type: 'is-success',
+            duration: 4000,
+          });
+        } catch (err) {
+          useErrorNotification(err);
+        }
+      },
+
       handle(msg) {
         switch (msg.resource.type) {
           case 'apps/scorch': {
@@ -681,12 +682,8 @@
     white-space: nowrap;
   }
 
-  /* the name column fills the spare width; its sort arrow sits next to the
-     heading rather than at the far edge of the column */
-  :deep(th.sort-inline) {
-    width: 100%;
-  }
-
+  /* the name column's sort arrow sits next to its heading rather than at the
+     far edge of the column */
   :deep(th.sort-inline .th-wrap) {
     justify-content: flex-start;
   }
@@ -698,5 +695,12 @@
 
   :deep(th.sort-inline .sort-icon.icon.is-desc) {
     transform: rotate(180deg) !important;
+  }
+
+  /* a status tag with its buttons beside it */
+  .status-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
   }
 </style>
