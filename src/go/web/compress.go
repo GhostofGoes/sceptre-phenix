@@ -15,6 +15,9 @@ import (
 // as-is when the handler declares a Content-Length below it.
 const minCompressSize = 1024
 
+// sniffLen is how much of the body net/http reads to sniff its content type.
+const sniffLen = 512
+
 var (
 	// API responses worth compressing. Downloads (disks, captures, zips) are
 	// binary or already compressed and are streamed through untouched.
@@ -54,7 +57,7 @@ func CompressResponses(h http.Handler) http.Handler {
 			return
 		}
 
-		cw := &compressWriter{ResponseWriter: w, zw: nil, decided: false}
+		cw := &compressWriter{ResponseWriter: w, zw: nil, decided: false, code: 0, sniff: nil}
 		defer cw.close()
 
 		h.ServeHTTP(cw, r)
@@ -62,49 +65,60 @@ func CompressResponses(h http.Handler) http.Handler {
 }
 
 // compressWriter decides whether to compress when the handler writes its
-// header, since that is when Content-Type and Content-Length are known.
+// header, since that is when Content-Type and Content-Length are known. A
+// handler that never sets Content-Type has it sniffed, as net/http does, from
+// the first 512 bytes of the body: sniffing only the first Write would label a
+// template whose output starts with a newline as text/plain.
 type compressWriter struct {
 	http.ResponseWriter
 
 	zw      *gzip.Writer
 	decided bool
+	code    int    // status held back until the content type is known
+	sniff   []byte // body held back until the content type is known
 }
 
 func (cw *compressWriter) WriteHeader(code int) {
 	// informational (1xx) headers precede the real one
-	if !cw.decided && code >= http.StatusOK {
-		cw.decided = true
+	if cw.decided || code < http.StatusOK {
+		cw.ResponseWriter.WriteHeader(code)
 
-		if shouldCompress(code, cw.Header()) {
-			cw.Header().Set("Content-Encoding", "gzip")
-			cw.Header().Del("Content-Length")
-
-			zw, _ := gzipWriters.Get().(*gzip.Writer)
-			zw.Reset(cw.ResponseWriter)
-			cw.zw = zw
-		}
+		return
 	}
 
-	cw.ResponseWriter.WriteHeader(code)
+	if cw.Header().Get("Content-Type") == "" && bodyAllowed(code) {
+		cw.code = code
+
+		return
+	}
+
+	cw.decide(code)
 }
 
 func (cw *compressWriter) Write(b []byte) (int, error) {
 	if !cw.decided {
-		if cw.Header().Get("Content-Type") == "" {
-			cw.Header().Set("Content-Type", http.DetectContentType(b))
+		if cw.Header().Get("Content-Type") != "" {
+			cw.decide(cw.status())
+		} else {
+			cw.sniff = append(cw.sniff, b...)
+			if len(cw.sniff) < sniffLen {
+				return len(b), nil
+			}
+
+			if err := cw.flushSniffed(); err != nil {
+				return 0, err
+			}
+
+			return len(b), nil
 		}
-
-		cw.WriteHeader(http.StatusOK)
 	}
 
-	if cw.zw != nil {
-		return cw.zw.Write(b)
-	}
-
-	return cw.ResponseWriter.Write(b)
+	return cw.write(b)
 }
 
 func (cw *compressWriter) Flush() {
+	_ = cw.flushSniffed()
+
 	if cw.zw != nil {
 		_ = cw.zw.Flush()
 	}
@@ -128,6 +142,8 @@ func (cw *compressWriter) Unwrap() http.ResponseWriter {
 }
 
 func (cw *compressWriter) close() {
+	_ = cw.flushSniffed()
+
 	if cw.zw == nil {
 		return
 	}
@@ -136,6 +152,66 @@ func (cw *compressWriter) close() {
 	cw.zw.Reset(nil)
 	gzipWriters.Put(cw.zw)
 	cw.zw = nil
+}
+
+func (cw *compressWriter) status() int {
+	if cw.code != 0 {
+		return cw.code
+	}
+
+	return http.StatusOK
+}
+
+func (cw *compressWriter) decide(code int) {
+	cw.decided = true
+
+	if shouldCompress(code, cw.Header()) {
+		cw.Header().Set("Content-Encoding", "gzip")
+		cw.Header().Del("Content-Length")
+
+		zw, _ := gzipWriters.Get().(*gzip.Writer)
+		zw.Reset(cw.ResponseWriter)
+		cw.zw = zw
+	}
+
+	cw.ResponseWriter.WriteHeader(code)
+}
+
+// flushSniffed sends a held-back status and body, sniffing the content type
+// from whatever body there is.
+func (cw *compressWriter) flushSniffed() error {
+	if cw.decided || (cw.code == 0 && len(cw.sniff) == 0) {
+		return nil
+	}
+
+	if len(cw.sniff) > 0 && cw.Header().Get("Content-Type") == "" {
+		cw.Header().Set("Content-Type", http.DetectContentType(cw.sniff))
+	}
+
+	cw.decide(cw.status())
+
+	body := cw.sniff
+	cw.sniff = nil
+
+	if len(body) == 0 {
+		return nil
+	}
+
+	_, err := cw.write(body)
+
+	return err
+}
+
+func (cw *compressWriter) write(b []byte) (int, error) {
+	if cw.zw != nil {
+		return cw.zw.Write(b)
+	}
+
+	return cw.ResponseWriter.Write(b)
+}
+
+func bodyAllowed(code int) bool {
+	return code != http.StatusNoContent && code != http.StatusNotModified
 }
 
 func shouldCompress(code int, header http.Header) bool {

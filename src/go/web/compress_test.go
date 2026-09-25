@@ -152,3 +152,82 @@ func TestCompressResponsesFlushes(t *testing.T) {
 		t.Errorf("body = %q", got)
 	}
 }
+
+// A template whose output starts with a newline must still be served as HTML:
+// sniffing only the first write labels it text/plain, which browsers show as
+// source (this broke the VNC page).
+func TestCompressResponsesSniffsWholePrefix(t *testing.T) {
+	page := "<!DOCTYPE html>\n<html><head><title>vnc</title></head><body>" +
+		strings.Repeat("<p>x</p>", 200) + "</body></html>"
+
+	h := CompressResponses(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = io.WriteString(w, "\n")
+		_, _ = io.WriteString(w, page)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/vnc", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+
+	if got := readBody(t, resp); got != "\n"+page {
+		t.Fatalf("body changed: got %d bytes, want %d", len(got), len(page)+1)
+	}
+}
+
+func TestCompressResponsesHeldBackStatus(t *testing.T) {
+	cases := []struct {
+		name  string
+		code  int
+		body  string
+		flush bool
+	}{
+		{"short body", http.StatusCreated, "created", false},
+		{"no body", http.StatusAccepted, "", false},
+		{"no content", http.StatusNoContent, "", false},
+		{"flushed", http.StatusOK, "partial", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := CompressResponses(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+
+				if tc.flush {
+					w.(http.Flusher).Flush()
+				}
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			resp := rec.Result()
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.code {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.code)
+			}
+
+			if tc.flush && !rec.Flushed {
+				t.Fatal("Flush did not reach the client")
+			}
+
+			if got := readBody(t, resp); got != tc.body {
+				t.Fatalf("body = %q, want %q", got, tc.body)
+			}
+		})
+	}
+}
