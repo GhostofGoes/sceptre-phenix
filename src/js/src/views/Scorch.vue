@@ -158,7 +158,7 @@
   import Terminal from '@/components/MiniTerminal.vue';
 
   import axiosInstance from '@/utils/axios.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
@@ -321,13 +321,12 @@
       },
 
       scorchControl(exp) {
-        if (exp.scorch.running) {
-          axiosInstance.delete(
-            `experiments/${exp.name}/scorch/pipelines/${exp.scorch.run}`,
-          );
-        } else {
-          axiosInstance.post(`experiments/${exp.name}/scorch/pipelines/0`);
-        }
+        const request = exp.scorch.running
+          ? axiosInstance.delete(
+              `experiments/${exp.name}/scorch/pipelines/${exp.scorch.run}`,
+            )
+          : axiosInstance.post(`experiments/${exp.name}/scorch/pipelines/0`);
+        request.catch(useErrorNotification);
       },
       getTerminals(exp) {
         axiosInstance
@@ -410,9 +409,11 @@
                   this.terminal.ro = t.readOnly;
                   this.terminal.modal = true;
                 } else {
-                  // TODO: do we need to update this as an error? See similarly line 413ff.
+                  // the component exited since the terminal was listed
+                  this.experimentTerminal(exp, false);
+                  delete this.terminals[exp];
                   this.$buefy.toast.open({
-                    message: `Unable to get current terminal for ${exp} experiment`,
+                    message: `The SCORCH terminal for ${exp} has closed`,
                     type: 'is-info',
                     duration: 4000,
                   });
@@ -474,7 +475,10 @@
               }
             }
 
-            // TODO: show the error in `msg.result`; the phenix log has it
+            showError(
+              msg.result?.error ??
+                `SCORCH run ${runID} failed for experiment ${expName}`,
+            );
 
             break;
           }

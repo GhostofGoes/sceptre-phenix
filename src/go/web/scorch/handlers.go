@@ -745,9 +745,10 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 					Resource:   key,
 					State:      "error",
 					Error: fmt.Errorf(
-						"failed to execute Scorch run %d for experiment %s",
+						"failed to execute Scorch run %d for experiment %s: %w",
 						run,
 						name,
+						err,
 					),
 				})
 			}

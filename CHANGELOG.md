@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: A failed SCORCH run now shows its error in a notification, and failures to start or stop a SCORCH run are reported instead of ignored. The server now sends the run's actual error, and humanized app errors no longer reach the UI as an empty object.
+- **Web UI**: Error notifications show their icon again.
 - **Web UI**: The browser console no longer fills with debug output (API responses, uploaded file objects, pipeline layout steps, websocket chatter). Leftover debug logging was removed, development-only diagnostics now appear only in development builds, real failures log as warnings or errors, and lint rejects new `console.log` calls.
 - **Web UI**: Empty tables say why they are empty (still loading, failed to load, nothing matches the search, or nothing exists yet) instead of "Your search turned up empty!".
 - **Web UI**: Paginate toggles sit above their tables instead of below them.

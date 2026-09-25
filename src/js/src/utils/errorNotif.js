@@ -1,5 +1,5 @@
 import { usePhenixStore } from '@/store.js';
-import { NotificationProgrammatic as Notification } from 'buefy';
+import { openNotification } from '@/utils/notify.js';
 
 export async function useErrorNotification(error) {
   // requests are cancelled on purpose when the user leaves a page
@@ -32,9 +32,28 @@ export async function useErrorNotification(error) {
     message = `<b>Unknown Error Occurred: ${error.response.statusText}</b>`;
   }
 
-  // see: https://github.com/ntohq/buefy-next/issues/248
-  // TODO: icon not showing
-  new Notification().open({
+  showErrorNotification(message);
+}
+
+const escapeHTML = (text) =>
+  String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+// Shows an error that did not come from a request, such as one reported over
+// the websocket. title and detail are plain text.
+export function showError(title, detail) {
+  let message = `<h2><b>Error:</b> ${escapeHTML(title)}</h2>`;
+  if (detail) {
+    message += `<br><b>Cause:</b> ${escapeHTML(detail).replace(/\n/g, '<br>')}`;
+  }
+  showErrorNotification(message);
+}
+
+function showErrorNotification(message) {
+  openNotification({
     type: 'is-danger',
     hasIcon: true,
     position: 'is-top',

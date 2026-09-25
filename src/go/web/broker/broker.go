@@ -50,18 +50,7 @@ func Start() {
 			}
 
 			if trigger.State == triggerStateError {
-				var (
-					humanized *putil.HumanizedError
-					result    []byte
-				)
-
-				if errors.As(trigger.Error, &humanized) {
-					result, _ = json.Marshal(map[string]any{triggerStateError: humanized.Humanized()})
-				} else {
-					result, _ = json.Marshal(map[string]any{triggerStateError: trigger.Error.Error()})
-				}
-
-				broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: result}
+				broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: errorResult(trigger.Error)}
 			} else {
 				broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: nil}
 			}
@@ -128,4 +117,19 @@ func Start() {
 
 func Broadcast(policy *bt.RequestPolicy, resource *bt.Resource, msg json.RawMessage) {
 	broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: msg}
+}
+
+// errorResult is the result of an app error publication: the error's message,
+// humanized when it can be.
+func errorResult(err error) []byte {
+	msg := err.Error()
+
+	var humanized *putil.HumanizedError
+	if errors.As(err, &humanized) {
+		msg = humanized.Humanize()
+	}
+
+	result, _ := json.Marshal(map[string]string{triggerStateError: msg})
+
+	return result
 }

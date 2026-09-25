@@ -82,7 +82,7 @@
 <script>
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import axiosInstance from '@/utils/axios.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
   import { usePhenixStore } from '@/store.js';
 
@@ -133,13 +133,11 @@
     methods: {
       scorchControl(exp, runID) {
         let run = this.runs[runID];
-        if (run.running) {
-          axiosInstance.delete(`experiments/${exp}/scorch/pipelines/${runID}`);
-          // TODO: handle errors
-        } else {
-          axiosInstance.post(`experiments/${exp}/scorch/pipelines/${runID}`);
-          // TODO: handle errors
-        }
+        const url = `experiments/${exp}/scorch/pipelines/${runID}`;
+        const request = run.running
+          ? axiosInstance.delete(url)
+          : axiosInstance.post(url);
+        request.catch(useErrorNotification);
       },
 
       // reloads the experiment and its SCORCH runs
@@ -345,7 +343,10 @@
 
                 this.runs[runID] = run;
 
-                // TODO: show the error in `msg.result`; the phenix log has it
+                showError(
+                  msg.result?.error ??
+                    `SCORCH run ${runID} failed for experiment ${expName}`,
+                );
                 break;
               }
 
