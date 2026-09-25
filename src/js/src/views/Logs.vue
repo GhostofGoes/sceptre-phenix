@@ -304,7 +304,8 @@
           .then((response) => {
             this.logs = this.withIds(response.data ?? []);
             this.$nextTick(() => {
-              this.$refs.logScroller.scrollToPosition(Number.MAX_SAFE_INTEGER);
+              // the scroller is gone if the user left the page mid-request
+              this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
               this.isLoading = false;
             });
           })

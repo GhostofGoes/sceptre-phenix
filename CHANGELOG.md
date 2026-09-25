@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets and marks Vite's hashed assets as immutable so browsers cache them.
+- **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.

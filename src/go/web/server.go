@@ -142,23 +142,23 @@ func Start(opts ...ServerOption) error {
 	plog.Info(plog.TypeSystem, "setting up assets")
 
 	router.PathPrefix("/docs/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/novnc/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/xterm.js/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.PathPrefix("/assets/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, true),
 	)
 
 	router.PathPrefix("/grapheditor/").Handler(
-		http.FileServer(assets),
+		StaticHandler(assets, false),
 	)
 
 	router.Handle("/favicon.ico", http.FileServer(assets))
