@@ -112,10 +112,10 @@
         <b-input
           style="width: 360px"
           placeholder="Search log messages"
-          v-model="searchFilter"
+          v-model="searchInput"
           icon-right="times-circle"
           icon-right-clickable
-          @icon-right-click="searchFilter = ''">
+          @icon-right-click="searchInput = ''">
         </b-input>
       </b-field>
     </b-field>
@@ -178,6 +178,9 @@
 </template>
 
 <script>
+  import { markRaw } from 'vue';
+  import { BDatetimepicker } from 'buefy';
+  import { debounce } from 'lodash-es';
   import { RecycleScroller } from 'vue-virtual-scroller';
   import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
@@ -216,10 +219,15 @@
 
   export default {
     components: {
+      BDatetimepicker,
       RecycleScroller,
     },
 
     async created() {
+      this.filterCache = {}; // non-reactive: see filteredLogs
+      this.applySearch = debounce((value) => {
+        this.searchFilter = value;
+      }, 200);
       this.knownLevels = KNOWN_LEVELS;
       this.dateModes = DATE_MODES;
       this.knownTypes = KNOWN_TYPES;
@@ -234,40 +242,54 @@
 
     beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.applySearch.cancel();
+    },
+
+    watch: {
+      searchInput(value) {
+        this.applySearch(value);
+      },
     },
 
     computed: {
+      // Logs can hold a week of entries and stream in continuously, so the
+      // array is kept out of Vue's deep reactivity (logsVersion signals a
+      // change) and streamed entries are filtered incrementally instead of
+      // re-filtering every log on every message.
       filteredLogs: function () {
-        let logs = this.logs;
-        if (logs === null) return [];
+        this.logsVersion; // dependency: bumped when logs change
+        const logs = this.logs;
+        const key = [
+          this.levelFilter,
+          this.searchFilter.toLowerCase(),
+          this.typeFilter.join(','),
+        ].join('\n');
+        const cache = this.filterCache;
+        if (cache.logs !== logs || cache.key !== key) {
+          cache.logs = logs;
+          cache.key = key;
+          cache.count = 0;
+          cache.result = [];
+        }
 
-        let currentLevel = this.knownLevels.indexOf(this.levelFilter);
-        console.log(
-          `${new Date().toISOString()} start filter len=${logs.length}`,
-        );
-        logs = logs.filter((log) => {
-          if (this.knownLevels.indexOf(log.level) < currentLevel) {
-            return false;
+        const currentLevel = this.knownLevels.indexOf(this.levelFilter);
+        const search = this.searchFilter.toLowerCase();
+        const types = this.typeFilter;
+        const matches = [];
+        for (let i = cache.count; i < logs.length; i++) {
+          const log = logs[i];
+          if (this.knownLevels.indexOf(log.level) < currentLevel) continue;
+          if (search !== '' && !log.msg.toLowerCase().includes(search)) {
+            continue;
           }
-          if (
-            this.searchFilter !== '' &&
-            !log.msg.toLowerCase().includes(this.searchFilter.toLowerCase())
-          ) {
-            return false;
-          }
-          if (
-            this.typeFilter.length > 0 &&
-            !this.typeFilter.includes(log.type)
-          ) {
-            return false;
-          }
-
-          return true;
-        });
-        console.log(
-          `${new Date().toISOString()} finish filter len=${logs.length}`,
-        );
-        return logs;
+          if (types.length > 0 && !types.includes(log.type)) continue;
+          matches.push(log);
+        }
+        cache.count = logs.length;
+        if (matches.length > 0) {
+          cache.result = cache.result.concat(matches);
+        }
+        return cache.result;
       },
       dateDropdownLabel: function () {
         if (this.dateModes[this.dateFilter] === null) {
@@ -299,7 +321,7 @@
         axiosInstance
           .get(query)
           .then((response) => {
-            this.logs = response.data ?? [];
+            this.logs = markRaw(response.data ?? []);
             this.$nextTick(() => {
               // the scroller is gone if the user left the page mid-request
               this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
@@ -334,6 +356,7 @@
       handleWs(msg) {
         if (msg.resource.type == 'log' && this.endNow && !this.isLoading) {
           this.logs.push(msg.result);
+          this.logsVersion++;
         }
       },
       getIconForLevel(level) {
@@ -352,7 +375,8 @@
 
     data() {
       return {
-        logs: [], // the loaded logs; filtered in computed
+        logs: markRaw([]), // the loaded logs; filtered in computed
+        logsVersion: 0, // bumped on push since `logs` itself is not deeply reactive
         suppressWatch: false, // if true, watches won't trigger call
         startDate: new Date(),
         endDate: new Date(),
@@ -360,6 +384,7 @@
         dateFilter: 'Last 10 Minutes', // dropdown selection. A key of `dateModes`
         levelFilter: 'INFO',
         typeFilter: [],
+        searchInput: '', // bound to the search box; applied to searchFilter debounced
         searchFilter: '',
         isLoading: false,
       };

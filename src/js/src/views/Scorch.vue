@@ -185,10 +185,6 @@
       removeWsHandler(this.handle);
     },
 
-    mounted() {
-      this.updateExperiments();
-    },
-
     computed: {
       filteredExperiments: function () {
         let experiments = this.experiments;
@@ -231,18 +227,21 @@
           .get('experiments')
           .then(async (resp) => {
             const state = resp.data;
-            let experiments = [];
 
-            for (let i in state.experiments) {
-              let exp = state.experiments[i];
+            // fetch every experiment's apps concurrently rather than one
+            // request after another
+            const scorchExps = await Promise.all(
+              (state.experiments ?? []).map(async (exp) => {
+                let resp = await axiosInstance.get(
+                  `experiments/${exp.name}/apps`,
+                );
+                let apps = resp.data;
 
-              let resp = await axiosInstance.get(
-                `experiments/${exp.name}/apps`,
-              );
-              let apps = resp.data;
+                // only do stuff with this exp if it has scorch configured
+                if (!('scorch' in apps)) {
+                  return null;
+                }
 
-              // only do stuff with this exp if it has scorch configured
-              if ('scorch' in apps) {
                 exp.scorch = { running: apps['scorch'] };
 
                 if (exp.scorch.running) {
@@ -257,10 +256,10 @@
                   exp.scorch.run = resp.data.running;
                 }
 
-                experiments.push(exp);
-              }
-            }
-            this.experiments = [...experiments];
+                return exp;
+              }),
+            );
+            this.experiments = scorchExps.filter((exp) => exp !== null);
 
             for (let i in this.experiments) {
               let exp = this.experiments[i];

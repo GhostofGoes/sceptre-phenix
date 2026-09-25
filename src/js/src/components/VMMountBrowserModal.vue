@@ -143,6 +143,7 @@
     },
 
     beforeUnmount() {
+      window.removeEventListener('beforeunload', this.unmount);
       this.unmount();
     },
 
