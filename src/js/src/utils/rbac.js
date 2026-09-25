@@ -14,7 +14,10 @@ const matchOptions = {
   nonegate: true,
 };
 
+// results are cached per role object, so a new login (even with a role of
+// the same name but different policies) starts with an empty cache
 let cache = new Map();
+let cacheRole = null;
 // should match role.go#Allowed (with added caching)
 export function roleAllowed(resource, verb, ...names) {
   let phenixStore = usePhenixStore();
@@ -23,7 +26,12 @@ export function roleAllowed(resource, verb, ...names) {
     return false;
   }
 
-  let k = [role.name, resource, verb, names].join('$');
+  if (role !== cacheRole) {
+    cache = new Map();
+    cacheRole = role;
+  }
+
+  let k = [resource, verb, names].join('$');
   if (cache.has(k)) {
     return cache.get(k);
   }

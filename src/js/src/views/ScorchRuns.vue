@@ -103,6 +103,8 @@
 
     beforeUnmount() {
       removeWsHandler(this.handle);
+      // close the streaming output socket if the modal is still open
+      this.exitOutput();
     },
 
     methods: {

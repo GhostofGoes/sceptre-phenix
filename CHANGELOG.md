@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Web UI**: Bundle size budgets (size-limit) and Lighthouse CI audits run in CI; see `src/js/perf/README.md`.
 - **Topology Builder**:
   - **Topology Endpoints**: Added `POST /api/v1/builder/topologies` and `PUT /api/v1/builder/topologies/{name}` to create and save a topology and its diagram without touching an experiment; both refuse the write while an experiment built from that topology is running.
   - **Default Disk Images**: Added the `$DEFAULT_VM_IMAGE` and `$DEFAULT_ROUTER_IMAGE` experiment variables, which set the disk image new VM and router nodes are created with.
@@ -26,6 +27,14 @@ All notable changes to this project will be documented in this file.
 
 - **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets, marks Vite's hashed assets as immutable, and sends content-hash ETags so other static files (noVNC, xterm.js, the topology builder) are revalidated instead of re-downloaded.
 - **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
+- **Web UI**: Reduced the JavaScript loaded on every page by about a quarter (602 kB to 441 kB, 180 kB to 142 kB gzipped) by registering only the Buefy components the UI uses, and cut bundled image weight from 1.6 MB to about 110 kB.
+- **Web UI**: Running experiments no longer re-render the whole VM table for every VM screenshot update, and ignore screenshots from other experiments.
+- **Web UI**: The Logs page filters streamed log lines incrementally and debounces search, instead of re-filtering every loaded log on each message or keystroke.
+- **Web UI**: The Scorch page loads experiments' apps in parallel and only once.
+- **Web UI**: Fixed leaks when leaving pages: SCORCH terminals, SCORCH output sockets, State of Health graph simulations, and the VM file browser's unload listener are now cleaned up.
+- **Web UI**: Hosts and VM tiles pages no longer poll while the browser tab is hidden.
+- **Web UI**: Cached permission checks are reset when a different role logs in.
+- **Web UI**: Fixed a stopped experiment's schedule update throwing when a VM was not found.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.
