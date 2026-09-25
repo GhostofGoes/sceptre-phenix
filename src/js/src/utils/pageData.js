@@ -86,6 +86,8 @@ export const pageFetchers = {
     return scorchExps.filter((exp) => exp !== null);
   },
 
+  settings: async (signal) => await get('settings', signal),
+
   vmtiles: async (signal) =>
     (await get('vms?screenshot=500', signal)).vms ?? [],
 };
@@ -99,6 +101,7 @@ const PRELOADS = [
   ['logs', () => roleAllowed('logs', 'list')],
   ['hosts', () => roleAllowed('hosts', 'list')],
   ['scorch', () => roleAllowed('experiments', 'list')],
+  ['settings', () => roleAllowed('settings', 'edit')],
   // last: the server inspects every disk image, one at a time
   ['disks', () => roleAllowed('disks', 'list')],
 ];
