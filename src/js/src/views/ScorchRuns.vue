@@ -1,5 +1,9 @@
 <template>
   <div class="content">
+    <router-link class="button is-dark" :to="{ name: 'scorch' }">
+      <b-icon icon="arrow-left" />
+      <span>Back to SCORCH</span>
+    </router-link>
     <div v-for="(run, id) in runs" :key="id">
       <hr />
       <scorch-run

@@ -34,7 +34,7 @@
       <b-table-column
         field="name"
         label="Experiment"
-        width="400"
+        header-class="sort-inline"
         sortable
         v-slot="props">
         <template v-if="roleAllowed('experiments', 'get', props.row.name)">
@@ -56,7 +56,6 @@
       <b-table-column
         field="status"
         label="Experiment Status"
-        width="100"
         sortable
         centered
         v-slot="props">
@@ -92,7 +91,7 @@
           </span>
         </template>
       </b-table-column>
-      <b-table-column label="Scorch Status" width="100" centered v-slot="props">
+      <b-table-column label="Scorch Status" centered v-slot="props">
         <template
           v-if="roleAllowed('experiments/trigger', 'create', props.row.name)">
           <b-tooltip :label="scorchControlLabel(props.row)" type="is-dark">
@@ -106,7 +105,7 @@
           </b-tooltip>
         </template>
       </b-table-column>
-      <b-table-column label="Terminal" width="100" centered v-slot="props">
+      <b-table-column label="Terminal" centered v-slot="props">
         <button
           v-if="roleAllowed('experiments', 'get', props.row.name)"
           class="button is-small is-white"
@@ -675,5 +674,29 @@
 <style scoped>
   div.autocomplete :deep(a.dropdown-item) {
     color: #383838 !important;
+  }
+
+  /* headings stay on one line, wrapping only when the table runs out of room */
+  :deep(th) {
+    white-space: nowrap;
+  }
+
+  /* the name column fills the spare width; its sort arrow sits next to the
+     heading rather than at the far edge of the column */
+  :deep(th.sort-inline) {
+    width: 100%;
+  }
+
+  :deep(th.sort-inline .th-wrap) {
+    justify-content: flex-start;
+  }
+
+  :deep(th.sort-inline .sort-icon) {
+    position: static;
+    transform: none;
+  }
+
+  :deep(th.sort-inline .sort-icon.icon.is-desc) {
+    transform: rotate(180deg) !important;
   }
 </style>
