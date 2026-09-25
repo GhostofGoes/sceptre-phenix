@@ -850,7 +850,7 @@
             let vms = this.experiment.vms;
 
             for (let i = 0; i < msg.result.schedule.length; i++) {
-              for (let j = 0; i < vms.length; j++) {
+              for (let j = 0; j < vms.length; j++) {
                 if (vms[j].name == msg.result.schedule[i].vm) {
                   vms[j].host = msg.result.schedule[i].host;
                   break;

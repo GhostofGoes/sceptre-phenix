@@ -1448,6 +1448,7 @@
 </template>
 
 <script>
+  import { BSlider, BSliderTick } from 'buefy';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import { tagCount } from '@/utils/tagCount';
   import { addWsHandler, removeWsHandler, sendWsMsg } from '@/utils/websocket';
@@ -1470,6 +1471,7 @@
   import notRunningImg from '@/assets/imgs/not-running.png';
 
   export default {
+    components: { BSlider, BSliderTick },
     mixins: [formattingMixin],
     setup() {
       return { roleAllowed, tagCount };
@@ -1930,9 +1932,9 @@
                       type: 'is-success',
                       duration: 4000,
                     });
-                  }
 
-                  this.experiment.vms = [...vms];
+                    break;
+                  }
                 }
                 break;
               }
@@ -1961,10 +1963,8 @@
                       duration: 4000,
                     });
 
-                    this.experiment.vms = [...vms];
+                    break;
                   }
-
-                  break;
                 }
 
                 break;
@@ -2060,20 +2060,19 @@
           case 'experiment/vm/screenshot': {
             let vm = msg.resource.name.split('/');
             let vms = this.experiment.vms;
-            if (!vms) {
+            if (!vms || vm[0] != this.$route.params.id) {
               break;
             }
 
             switch (msg.resource.action) {
               case 'update': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].screenshot = msg.result.screenshot;
-                    break;
-                  }
+                // Screenshots arrive for every subscribed VM every few
+                // seconds: mutate the row in place instead of replacing the
+                // array, which would make b-table re-process every row.
+                const row = vms.find((v) => v.name == vm[1]);
+                if (row) {
+                  row.screenshot = msg.result.screenshot;
                 }
-
-                this.experiment.vms = [...vms];
 
                 break;
               }
@@ -3906,14 +3905,18 @@
 
           this.socket = new WebSocket(url);
           this.socket.addEventListener('message', (event) => {
+            // append once per frame: each append re-renders the whole
+            // (ever-growing) textarea
+            let flows = '';
             event.data.split(/\r?\n/).forEach((data) => {
               if (data) {
                 let msg = JSON.parse(data);
-                let flow = `${msg['src']}:${msg['sport']}\t\t-->\t${msg['dst']}:${msg['dport']}\t\t${msg['proto']}\t${msg['packets']}\t${msg['bytes']}\n`;
-
-                this.netflow.data += flow;
+                flows += `${msg['src']}:${msg['sport']}\t\t-->\t${msg['dst']}:${msg['dport']}\t\t${msg['proto']}\t${msg['packets']}\t${msg['bytes']}\n`;
               }
             });
+            if (flows) {
+              this.netflow.data += flows;
+            }
           });
         } else {
           axiosInstance

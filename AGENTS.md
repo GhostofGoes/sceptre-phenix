@@ -148,7 +148,7 @@ image, documentation, or topology details.
 ## CI and Release Safety
 
 GitHub Actions is path-scoped: `ci.yml` generates, lints, and tests Go;
-`frontend.yml` runs Vitest, builds UI/backend, and runs Playwright smoke tests;
+`frontend.yml` runs Vitest, builds UI/backend, runs Playwright smoke tests, and checks UI bundle budgets and Lighthouse audits;
 `examples.yml` checks Go/Python examples; `packages.yml` builds Docker, Debian,
 and Podman outputs. Update affected path filters, inputs, generated artifacts,
 tool versions, and local-equivalent commands together. Preserve least-privilege

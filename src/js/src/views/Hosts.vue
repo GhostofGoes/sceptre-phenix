@@ -154,7 +154,10 @@ available for experiments, the number of VMs, and host uptime.
       },
       periodicUpdateHosts() {
         this.update = setInterval(() => {
-          this.updateHosts();
+          // skip polling while the browser tab is in the background
+          if (!document.hidden) {
+            this.updateHosts();
+          }
         }, 10000);
       },
 

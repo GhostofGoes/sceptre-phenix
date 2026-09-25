@@ -713,17 +713,18 @@
 </template>
 <script>
   const SOH_STYLE_LABEL_KEY = '__sohStyle';
+  import { BColorpicker } from 'buefy';
   import { roleAllowed } from '@/utils/rbac.js';
   import * as d3 from 'd3';
   import VmLabelsModal from '@/components/VMLabelsModal.vue';
 
-  import Linux from '@/assets/imgs/linux.svg';
-  import CentOS from '@/assets/imgs/centos.svg';
-  import RedHat from '@/assets/imgs/redhat.svg';
-  import Windows from '@/assets/imgs/windows.svg';
-  import Router from '@/assets/imgs/router.svg';
-  import Firewall from '@/assets/imgs/firewall.svg';
-  import VLAN from '@/assets/imgs/vlan.svg';
+  import Linux from '@/assets/imgs/linux.png';
+  import CentOS from '@/assets/imgs/centos.png';
+  import RedHat from '@/assets/imgs/redhat.png';
+  import Windows from '@/assets/imgs/windows.png';
+  import Router from '@/assets/imgs/router.png';
+  import Firewall from '@/assets/imgs/firewall.png';
+  import VLAN from '@/assets/imgs/vlan.png';
 
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
@@ -731,11 +732,13 @@
   import { usePhenixStore } from '@/store.js';
 
   export default {
+    components: { BColorpicker },
     setup() {
       return { roleAllowed };
     },
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.simulation?.stop();
     },
 
     async created() {
@@ -948,14 +951,17 @@
         const width = 600;
         const height = 400;
 
-        const simulation = d3
+        // a previous graph's simulation keeps ticking on detached nodes
+        // unless stopped; kept off data() so it is not made reactive
+        this.simulation?.stop();
+        const simulation = (this.simulation = d3
           .forceSimulation(nodes)
           .force(
             'link',
             d3.forceLink(links).id((d) => d.id),
           )
           .force('charge', d3.forceManyBody())
-          .force('center', d3.forceCenter(width / 2, height / 2));
+          .force('center', d3.forceCenter(width / 2, height / 2)));
 
         d3.select('#graph').select('svg').remove();
 
