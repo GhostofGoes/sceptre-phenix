@@ -166,7 +166,7 @@
 
   export default {
     setup() {
-      const { table } = useTable({ persist: false });
+      const { table } = useTable();
       return { table, roleAllowed };
     },
     components: {

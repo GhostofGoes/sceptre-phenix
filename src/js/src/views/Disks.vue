@@ -309,7 +309,7 @@
 
   export default {
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable({ name: 'disks' }), roleAllowed };
     },
     async created() {
       this.rescan = false;

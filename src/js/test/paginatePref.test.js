@@ -17,31 +17,31 @@ describe('paginate preference', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('is off until someone turns it on', () => {
-    expect(loadPaginate()).toBe(false);
-    expect(useTable().table.isPaginated).toBe(false);
+    expect(loadPaginate('disks')).toBe(false);
+    expect(useTable({ name: 'disks' }).table.isPaginated).toBe(false);
   });
 
-  it('is remembered for every table, under one key for all users', async () => {
-    const { table } = useTable();
+  it('is remembered per table, under one key for all users', async () => {
+    const { table } = useTable({ name: 'disks' });
     table.isPaginated = true;
     await nextTick();
 
-    expect(localStorage.getItem('phenix.paginate')).toBe('true');
-    expect(useTable().table.isPaginated).toBe(true);
+    expect(localStorage.getItem('phenix.paginate.disks')).toBe('true');
+    expect(useTable({ name: 'disks' }).table.isPaginated).toBe(true);
+    expect(useTable({ name: 'hosts' }).table.isPaginated).toBe(false);
 
     table.isPaginated = false;
     await nextTick();
-    expect(useTable().table.isPaginated).toBe(false);
+    expect(useTable({ name: 'disks' }).table.isPaginated).toBe(false);
   });
 
-  it('leaves tables without a toggle unpaginated', async () => {
-    savePaginate(true);
-    const { table } = useTable({ persist: false });
+  it('leaves unnamed tables unpaginated and unsaved', async () => {
+    const { table } = useTable();
     expect(table.isPaginated).toBe(false);
 
-    table.isPaginated = false;
+    table.isPaginated = true;
     await nextTick();
-    expect(loadPaginate()).toBe(true);
+    expect(localStorage.getItem('phenix.paginate.undefined')).toBeNull();
   });
 
   it('starts unpaginated when storage is unavailable', () => {
@@ -54,7 +54,7 @@ describe('paginate preference', () => {
       },
     });
 
-    expect(loadPaginate()).toBe(false);
-    expect(() => savePaginate(true)).not.toThrow();
+    expect(loadPaginate('disks')).toBe(false);
+    expect(() => savePaginate('disks', true)).not.toThrow();
   });
 });

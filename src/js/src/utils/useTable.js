@@ -12,12 +12,13 @@ import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
 // Each call returns an independent table, so views with more than one table
 // (e.g. a VMs table and a files table) can call useTable() once per table.
 //
-// The Paginate toggle is remembered per browser (see paginatePref.js); pass
-// { persist: false } for a table without a toggle, which stays unpaginated.
+// Pass { name } to remember the table's Paginate toggle in this browser (see
+// paginatePref.js); a table without a name, and so without a toggle, stays
+// unpaginated.
 export function useTable(options = {}) {
-  const persist = options.persist ?? true;
+  const name = options.name;
   const table = reactive({
-    isPaginated: persist ? loadPaginate() : false,
+    isPaginated: name ? loadPaginate(name) : false,
     perPage: options.perPage ?? 10,
     currentPage: 1,
     isPaginationSimple: true,
@@ -25,8 +26,11 @@ export function useTable(options = {}) {
     defaultSortDirection: options.defaultSortDirection ?? 'asc',
   });
 
-  if (persist) {
-    watch(() => table.isPaginated, savePaginate);
+  if (name) {
+    watch(
+      () => table.isPaginated,
+      (on) => savePaginate(name, on),
+    );
   }
 
   return { table };

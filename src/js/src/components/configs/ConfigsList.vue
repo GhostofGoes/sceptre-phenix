@@ -279,7 +279,9 @@
       return { roleAllowed };
     },
     watch: {
-      isPaginated: savePaginate,
+      isPaginated(on) {
+        savePaginate('configs', on);
+      },
     },
 
     data() {
@@ -300,7 +302,7 @@
           'Role',
         ],
         //table
-        isPaginated: loadPaginate(),
+        isPaginated: loadPaginate('configs'),
         perPage: 10,
         currentPage: 1,
         selectedConfigs: [],

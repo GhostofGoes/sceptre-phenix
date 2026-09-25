@@ -121,7 +121,7 @@ available for experiments, the number of VMs, and host uptime.
   export default {
     mixins: [formattingMixin],
     setup() {
-      return useTable();
+      return useTable({ name: 'hosts' });
     },
     beforeUnmount() {
       clearInterval(this.update);

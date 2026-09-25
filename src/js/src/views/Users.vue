@@ -310,7 +310,7 @@
 
   export default {
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable({ name: 'users' }), roleAllowed };
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);

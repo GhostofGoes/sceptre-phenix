@@ -379,7 +379,7 @@
     mixins: [formattingMixin],
 
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable({ name: 'experiments' }), roleAllowed };
     },
 
     async beforeUnmount() {

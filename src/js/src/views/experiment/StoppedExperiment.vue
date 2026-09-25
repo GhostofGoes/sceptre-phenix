@@ -1663,8 +1663,12 @@
     },
 
     watch: {
-      'table.isPaginated': savePaginate,
-      'filesTable.isPaginated': savePaginate,
+      'table.isPaginated'(on) {
+        savePaginate('stopped-vms', on);
+      },
+      'filesTable.isPaginated'(on) {
+        savePaginate('stopped-files', on);
+      },
       checkAll(newVal) {
         if (newVal) {
           var visibleItems = this.$refs['vmTable'].visibleData;
@@ -1701,7 +1705,7 @@
       return {
         table: {
           key: 0,
-          isPaginated: loadPaginate(),
+          isPaginated: loadPaginate('stopped-vms'),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
@@ -1711,7 +1715,7 @@
           defaultSortDirection: 'asc',
         },
         filesTable: {
-          isPaginated: loadPaginate(),
+          isPaginated: loadPaginate('stopped-files'),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
