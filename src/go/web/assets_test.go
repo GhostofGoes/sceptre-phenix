@@ -15,6 +15,8 @@ func testAssets() http.FileSystem {
 	return http.FS(fstest.MapFS{
 		"assets/index-abc123.js": {Data: []byte(strings.Repeat("console.log('phenix');\n", 500))},
 		"assets/logo-abc123.png": {Data: []byte("\x89PNG not really")},
+		"docs/index.html":        {Data: []byte(strings.Repeat("<p>phenix docs</p>\n", 200))},
+		"novnc/app/readme.txt":   {Data: []byte("no index here")},
 	})
 }
 
@@ -149,6 +151,59 @@ func TestStaticHandlerETag(t *testing.T) {
 				t.Errorf("revalidation status = %d, want 304", resp.StatusCode)
 			}
 		})
+	}
+}
+
+func TestStaticHandlerDirectoryIndex(t *testing.T) {
+	h := StaticHandler(testAssets(), false)
+
+	resp := get(t, h, "/docs/", "gzip")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", got)
+	}
+
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", got)
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if plain, _ := io.ReadAll(zr); !strings.Contains(string(plain), "phenix docs") {
+		t.Error("directory URL did not serve its index.html")
+	}
+
+	resp = getIfNoneMatch(t, h, "/docs/", "gzip", resp.Header.Get("ETag"))
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotModified {
+		t.Errorf("revalidation status = %d, want 304", resp.StatusCode)
+	}
+
+	// FileServer behavior is kept for a missing trailing slash and for a
+	// directory without an index
+	resp = get(t, h, "/docs", "gzip")
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Errorf("/docs status = %d, want 301 redirect", resp.StatusCode)
+	}
+
+	resp = get(t, h, "/novnc/app/", "gzip")
+	listing, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(listing), "readme.txt") {
+		t.Errorf("/novnc/app/ = %d, want a directory listing", resp.StatusCode)
 	}
 }
 

@@ -161,7 +161,7 @@ func Start(opts ...ServerOption) error {
 		StaticHandler(assets, false),
 	)
 
-	router.Handle("/favicon.ico", http.FileServer(assets))
+	router.Handle("/favicon.ico", StaticHandler(assets, false))
 
 	router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		plog.Warn(

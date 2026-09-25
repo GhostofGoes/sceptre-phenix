@@ -44,6 +44,41 @@ describe('schedulePrefetch', () => {
     expect(load).toHaveBeenCalledOnce();
   });
 
+  test('without idle callbacks, waits for the page to finish loading', () => {
+    vi.useFakeTimers();
+    const load = vi.fn(() => Promise.resolve());
+    const win = {
+      document: { readyState: 'interactive' },
+      addEventListener: vi.fn(),
+      setTimeout: globalThis.setTimeout,
+    };
+    schedulePrefetch([load], win);
+    vi.runAllTimers();
+    expect(load).not.toHaveBeenCalled();
+
+    const [event, onLoad] = win.addEventListener.mock.calls[0];
+    expect(event).toBe('load');
+    onLoad();
+    vi.runAllTimers();
+    expect(load).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  test('without idle callbacks, starts soon if the page already loaded', () => {
+    vi.useFakeTimers();
+    const load = vi.fn(() => Promise.resolve());
+    const win = {
+      document: { readyState: 'complete' },
+      addEventListener: vi.fn(),
+      setTimeout: globalThis.setTimeout,
+    };
+    schedulePrefetch([load], win);
+    expect(win.addEventListener).not.toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(load).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
   test('skips prefetching when the user asked to save data', () => {
     const win = {
       navigator: { connection: { saveData: true } },
