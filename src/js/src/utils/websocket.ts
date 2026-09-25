@@ -130,17 +130,25 @@ export function addWsHandler(f: (msg: object) => void): void {
 }
 
 export function removeWsHandler(f: (msg: object) => void): void {
-  wsListeners.splice(wsListeners.indexOf(f), 1);
+  const i = wsListeners.indexOf(f);
+  // splice(-1, 1) would silently drop the most recently added listener
+  if (i >= 0) {
+    wsListeners.splice(i, 1);
+  }
 }
 
 function globalWsMessageHandler(event: MessageEvent): void {
   event.data.split(/\r?\n/).forEach((data) => {
     if (data) {
       let msg = JSON.parse(data);
-      console.debug(
-        'websocket msg (' + wsListeners.length + ' listeners):\n',
-        msg,
-      );
+      // logging every message retains large payloads (screenshots) in the
+      // devtools console, so only do it in development builds
+      if (import.meta.env.DEV) {
+        console.debug(
+          'websocket msg (' + wsListeners.length + ' listeners):\n',
+          msg,
+        );
+      }
 
       // dispatch to listeners; one failing listener must not block the rest
       wsListeners.forEach((listener) => {
