@@ -173,6 +173,10 @@ func Start(opts ...ServerOption) error {
 			r.Method,
 		)
 
+		// index.html names the current build's hashed chunks, so browsers must
+		// revalidate it rather than reuse a stale copy
+		w.Header().Set("Cache-Control", "no-cache")
+
 		if o.unbundled {
 			http.ServeFile(w, r, "web/public/index.html")
 		} else {
