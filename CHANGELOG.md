@@ -23,6 +23,8 @@ All notable changes to this project will be documented in this file.
 - **Web UI**: API responses (JSON, YAML, and plain text) are gzip-compressed for browsers that accept it, so large lists such as VMs, disks, and logs download faster on slow links.
 - **Web UI / Server**: Leaving a running experiment now stops the server from screenshotting its VMs every 5 seconds. Those screenshots kept minimega busy for the rest of the session, which made other pages, especially Hosts and Disks, wait on a loading spinner.
 - **Web UI**: Pages no longer hide behind a full-page spinner while their data loads. A status in the header shows when the page's data was last loaded, or that it is loading, and has a refresh button that reloads it without reloading the whole page. The Experiments, Configs, Disks, Hosts, Users, Logs, Scorch, and VM tiles pages show the data they last loaded straight away when you return to them. Pages cancel their requests when you leave. Hosts no longer spins forever when there are no hosts, Disks no longer spins forever after a failed load, and a stopped experiment's host and disk choices no longer repeat or reload with every search.
+- **Web UI**: After login, the UI loads the Experiments, Configs, Users, Logs, Hosts, Scorch, and Disks tabs in the background, two requests at a time, so they open with data already in place. A page's load keeps running when you leave it, for up to two minutes, so the data is ready when you return.
+- **CI**: The Frontend workflow cancels its superseded runs when new commits are pushed, like the other workflows. Closing or merging a pull request cancels the CI still running for it.
 
 ### Added
 

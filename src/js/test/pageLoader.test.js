@@ -1,5 +1,10 @@
 import { createPageLoader, pageStatus } from '@/utils/pageLoader.js';
-import { cachePage, clearPageCache } from '@/utils/pageCache.js';
+import {
+  BACKGROUND_TIMEOUT_MS,
+  cachedPage,
+  cachePage,
+  clearPageCache,
+} from '@/utils/pageCache.js';
 import { beforeEach, test, expect, vi } from 'vitest';
 
 vi.mock('@/utils/errorNotif.js', () => ({ useErrorNotification: vi.fn() }));
@@ -32,7 +37,7 @@ test('shows cached data at once and replaces it when fresh data arrives', async 
   loader.stop();
 });
 
-test('leaving the page cancels the request and clears the header', async () => {
+test('leaving a page lets its first load finish into the cache', async () => {
   const { fetch, calls } = manualFetch();
   const apply = vi.fn();
   const loader = createPageLoader({ key: 'disks', fetch, apply });
@@ -40,12 +45,75 @@ test('leaving the page cancels the request and clears the header', async () => {
   const done = loader.start();
   expect(pageStatus.refresh).not.toBeNull();
   loader.stop();
-  expect(calls[0].signal.aborted).toBe(true);
+  expect(calls[0].signal.aborted).toBe(false);
   expect(pageStatus.refresh).toBeNull();
 
   calls[0].resolve(['late']);
   expect(await done).toBe(false);
   expect(apply).not.toHaveBeenCalled();
+  expect(cachedPage('disks').data).toEqual(['late']);
+});
+
+test('revisiting a page joins its background load', async () => {
+  const { fetch, calls } = manualFetch();
+  const first = createPageLoader({ key: 'hosts', fetch, apply: () => {} });
+  first.start();
+  first.stop();
+
+  const apply = vi.fn();
+  const again = createPageLoader({ key: 'hosts', fetch, apply });
+  const done = again.start();
+  expect(calls).toHaveLength(1);
+
+  calls[0].resolve(['h1']);
+  expect(await done).toBe(true);
+  expect(apply).toHaveBeenCalledWith(['h1']);
+  again.stop();
+});
+
+test('leaving an uncached page cancels its request', async () => {
+  const { fetch, calls } = manualFetch();
+  const loader = createPageLoader({ fetch, apply: () => {} });
+
+  loader.start();
+  await Promise.resolve();
+  loader.stop();
+  expect(calls[0].signal.aborted).toBe(true);
+});
+
+test('a background load is abandoned after the time limit', async () => {
+  vi.useFakeTimers();
+  try {
+    const { fetch, calls } = manualFetch();
+    const loader = createPageLoader({ key: 'logs', fetch, apply: () => {} });
+    loader.start();
+    await Promise.resolve();
+    loader.stop();
+
+    vi.advanceTimersByTime(BACKGROUND_TIMEOUT_MS - 1);
+    expect(calls[0].signal.aborted).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(calls[0].signal.aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('an open page is never cut off by the background time limit', async () => {
+  vi.useFakeTimers();
+  try {
+    const { fetch, calls } = manualFetch();
+    const loader = createPageLoader({ key: 'scorch', fetch, apply: () => {} });
+    loader.start();
+    await Promise.resolve();
+
+    vi.advanceTimersByTime(BACKGROUND_TIMEOUT_MS * 2);
+    expect(calls[0].signal.aborted).toBe(false);
+    loader.stop(); // left after the limit: given up at once
+    expect(calls[0].signal.aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('a newer load supersedes an older one', async () => {

@@ -126,7 +126,7 @@ side will pass.
 <script>
   import { chunk, sortBy } from 'lodash-es';
   import { createPageLoader } from '@/utils/pageLoader.js';
-  import axiosInstance from '@/utils/axios.js';
+  import { pageFetchers } from '@/utils/pageData.js';
   import { usePhenixStore } from '@/store';
   export default {
     beforeUnmount() {
@@ -137,9 +137,7 @@ side will pass.
     created() {
       this.loader = createPageLoader({
         key: 'vmtiles',
-        fetch: async (signal) =>
-          (await axiosInstance.get('vms?screenshot=500', { signal })).data
-            .vms ?? [],
+        fetch: pageFetchers.vmtiles,
         apply: (vms) => (this.vms = vms),
       });
       this.loader.start();

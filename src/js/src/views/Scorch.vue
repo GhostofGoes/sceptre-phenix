@@ -162,6 +162,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
@@ -179,7 +180,7 @@
       addWsHandler(this.handle);
       this.loader = createPageLoader({
         key: 'scorch',
-        fetch: (signal) => this.fetchExperiments(signal),
+        fetch: pageFetchers.scorch,
         apply: (experiments) => {
           this.experiments = experiments;
           this.loaded = true;
@@ -232,42 +233,6 @@
     },
 
     methods: {
-      // experiments that have SCORCH configured, with their run state
-      async fetchExperiments(signal) {
-        const resp = await axiosInstance.get('experiments', { signal });
-
-        // fetch every experiment's apps concurrently rather than one
-        // request after another
-        const scorchExps = await Promise.all(
-          (resp.data.experiments ?? []).map(async (exp) => {
-            const apps = (
-              await axiosInstance.get(`experiments/${exp.name}/apps`, {
-                signal,
-              })
-            ).data;
-
-            // only do stuff with this exp if it has scorch configured
-            if (!('scorch' in apps)) {
-              return null;
-            }
-
-            exp.scorch = { running: apps['scorch'] };
-
-            if (exp.scorch.running) {
-              const pipelines = await axiosInstance.get(
-                `experiments/${exp.name}/scorch/pipelines`,
-                { signal, headers: { Accept: 'application/json' } },
-              );
-              exp.scorch.run = pipelines.data.running;
-            }
-
-            return exp;
-          }),
-        );
-
-        return scorchExps.filter((exp) => exp !== null);
-      },
-
       expStatusDecorator(status) {
         switch (status) {
           case 'started':

@@ -275,6 +275,7 @@
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     emits: ['edit', 'create'],
@@ -319,8 +320,7 @@
     created() {
       this.loader = createPageLoader({
         key: 'configs',
-        fetch: async (signal) =>
-          (await axiosInstance.get('configs', { signal })).data.configs ?? [],
+        fetch: pageFetchers.configs,
         apply: (configs) => {
           this.configs = configs;
           this.loaded = true;

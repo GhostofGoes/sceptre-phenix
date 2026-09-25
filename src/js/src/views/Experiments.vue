@@ -378,6 +378,7 @@
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     mixins: [formattingMixin],
@@ -395,9 +396,7 @@
       addWsHandler(this.handleWs);
       this.loader = createPageLoader({
         key: 'experiments',
-        fetch: async (signal) =>
-          (await axiosInstance.get('experiments', { signal })).data
-            .experiments ?? [],
+        fetch: pageFetchers.experiments,
         apply: (experiments) => {
           this.experiments = experiments;
           this.loaded = true;

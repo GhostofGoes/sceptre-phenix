@@ -304,6 +304,7 @@
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     setup() {
@@ -317,24 +318,7 @@
       addWsHandler(this.handleWs);
       this.loader = createPageLoader({
         key: 'users',
-        fetch: async (signal) => {
-          // roles are only used for the role dropdown when creating/editing
-          const [users, roles] = await Promise.all([
-            axiosInstance.get('users', { signal }),
-            roleAllowed('roles', 'list')
-              ? axiosInstance.get('roles', { signal }).catch((err) => {
-                  // the user list is still worth showing without roles
-                  useErrorNotification(err);
-                  return null;
-                })
-              : null,
-          ]);
-          users.data.users.forEach((u) => (u.role_name = u.role.name));
-          return {
-            users: users.data.users,
-            roleNames: roles ? roles.data.roles.map((r) => r.name) : [],
-          };
-        },
+        fetch: pageFetchers.users,
         apply: ({ users, roleNames }) => {
           this.users = users;
           this.roleNames = roleNames;

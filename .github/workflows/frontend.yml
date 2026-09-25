@@ -10,6 +10,8 @@ on:
       - 'Makefile'
       - '.github/workflows/frontend.yml'
   pull_request:
+    # closed: only to cancel this PR's runs (see concurrency); jobs skip it
+    types: [opened, synchronize, reopened, closed]
     paths:
       - 'src/js/**'
       - 'src/go/**'
@@ -24,8 +26,14 @@ env:
 permissions:
   contents: read
 
+# a newer commit (or closing the PR) cancels runs still going for this ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-js:
+    if: github.event.action != 'closed'
     name: Unit Tests (JS)
     runs-on: ubuntu-latest
     defaults:
@@ -46,6 +54,7 @@ jobs:
         run: npm test
 
   test-e2e:
+    if: github.event.action != 'closed'
     name: E2E Smoke (UI)
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +107,7 @@ jobs:
           path: src/js/e2e/test-results
 
   perf:
+    if: github.event.action != 'closed'
     name: UI Performance (bundle budgets, Lighthouse)
     runs-on: ubuntu-latest
     steps:

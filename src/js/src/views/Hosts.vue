@@ -111,10 +111,10 @@ available for experiments, the number of VMs, and host uptime.
 </template>
 
 <script>
-  import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useTable } from '@/utils/useTable.js';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     mixins: [formattingMixin],
@@ -129,8 +129,7 @@ available for experiments, the number of VMs, and host uptime.
     created() {
       this.loader = createPageLoader({
         key: 'hosts',
-        fetch: async (signal) =>
-          (await axiosInstance.get('hosts', { signal })).data.hosts ?? [],
+        fetch: pageFetchers.hosts,
         apply: (hosts) => (this.hosts = hosts),
       });
       this.loader.start();

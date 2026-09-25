@@ -309,6 +309,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     setup() {
@@ -317,8 +318,7 @@
     async created() {
       this.loader = createPageLoader({
         key: 'disks',
-        fetch: async (signal) =>
-          (await axiosInstance.get('disks', { signal })).data.disks ?? [],
+        fetch: pageFetchers.disks,
         apply: (disks) => {
           this.disks = disks;
           this.loaded = true;

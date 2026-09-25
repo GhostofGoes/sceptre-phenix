@@ -187,6 +187,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { createPageLoader } from '@/utils/pageLoader.js';
+  import { DEFAULT_LOG_WINDOW, pageFetchers } from '@/utils/pageData.js';
 
   const KNOWN_LEVELS = [
     // in-order
@@ -198,7 +199,7 @@
   const DEFAULT_DATE_FILTER = 'Last 10 Minutes';
   const DATE_MODES = {
     // date dropdown options. text => seconds to go back
-    'Last 10 Minutes': 10 * 60,
+    'Last 10 Minutes': DEFAULT_LOG_WINDOW,
     'Last 30 Minutes': 30 * 60,
     'Last 1 Hour': 60 * 60,
     'Last 6 Hours': 6 * 60 * 60,
@@ -239,11 +240,12 @@
       this.loader = createPageLoader({
         // only the default view is reopened, so only it is worth keeping;
         // streamed entries are pushed onto the cached array too
-        key: () =>
-          this.endNow && this.dateFilter === DEFAULT_DATE_FILTER
-            ? 'logs'
-            : null,
+        key: () => (this.isDefaultView() ? 'logs' : null),
         fetch: async (signal) => {
+          if (this.isDefaultView()) {
+            return pageFetchers.logs(signal);
+          }
+
           // a refresh of a relative range ("Last 10 Minutes") moves it to now
           if (this.endNow && this.dateModes[this.dateFilter] !== null) {
             this.startDate = new Date(
@@ -343,6 +345,9 @@
     },
 
     methods: {
+      isDefaultView() {
+        return this.endNow && this.dateFilter === DEFAULT_DATE_FILTER;
+      },
       // loads a newly chosen date range, dropping the old range's logs
       getLogs() {
         this.logs = markRaw([]);
