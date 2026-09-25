@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -113,12 +114,14 @@ func Start(opts ...ServerOption) error {
 	_ = ConfigureUsers(o.users)
 
 	var (
-		router = mux.NewRouter().StrictSlash(true)
-		assets http.FileSystem
+		router    = mux.NewRouter().StrictSlash(true)
+		assets    http.FileSystem
+		publicDir fs.FS // the same files as assets
 	)
 
 	if o.unbundled {
 		assets = http.Dir("web/public")
+		publicDir = os.DirFS("web/public")
 
 		plog.Info(plog.TypeSystem, "serving unbundled assets")
 	} else {
@@ -126,6 +129,10 @@ func Start(opts ...ServerOption) error {
 		assets, err = GetAssets()
 		if err != nil {
 			return err
+		}
+
+		if publicDir, err = fs.Sub(publicFS, "public"); err != nil {
+			return fmt.Errorf("opening embedded assets: %w", err)
 		}
 	}
 
@@ -157,6 +164,12 @@ func Start(opts ...ServerOption) error {
 		StaticHandler(assets, true),
 	)
 
+	grapheditor, err := fs.Sub(publicDir, "grapheditor")
+	if err != nil {
+		return fmt.Errorf("opening grapheditor assets: %w", err)
+	}
+
+	router.Handle("/grapheditor/builder.bundle.js", BuilderBundleHandler(grapheditor, o.unbundled))
 	router.PathPrefix("/grapheditor/").Handler(
 		StaticHandler(assets, false),
 	)
