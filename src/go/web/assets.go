@@ -90,9 +90,36 @@ func StaticHandler(assets http.FileSystem, immutable bool) http.Handler {
 		defer f.Close()
 
 		fi, err := f.Stat()
-		if err != nil || fi.IsDir() {
+		if err != nil {
 			files.ServeHTTP(w, r)
 			return
+		}
+
+		if fi.IsDir() {
+			// FileServer redirects directory URLs lacking the trailing slash and
+			// lists directories without an index; anything else is the index
+			if !strings.HasSuffix(r.URL.Path, "/") {
+				files.ServeHTTP(w, r)
+				return
+			}
+
+			name = path.Join(name, "index.html")
+			compressible = true
+
+			index, err := assets.Open(name)
+			if err != nil {
+				files.ServeHTTP(w, r)
+				return
+			}
+			defer index.Close()
+
+			if fi, err = index.Stat(); err != nil {
+				files.ServeHTTP(w, r)
+				return
+			}
+
+			f = index
+			w.Header().Add("Vary", "Accept-Encoding")
 		}
 
 		key := assetKey{name: name, size: fi.Size(), modTime: fi.ModTime()}

@@ -37,7 +37,15 @@ export function schedulePrefetch(loaders, win = globalThis) {
   const start = () => prefetchSequentially(loaders);
   if (typeof win.requestIdleCallback === 'function') {
     win.requestIdleCallback(start, { timeout: 2000 });
+    return;
+  }
+
+  // no idle callback (Safari): wait for the page itself to finish loading so
+  // prefetching never delays it
+  const afterLoad = () => win.setTimeout(start, 1000);
+  if (win.document?.readyState === 'complete') {
+    afterLoad();
   } else {
-    win.setTimeout(start, 1);
+    win.addEventListener('load', afterLoad, { once: true });
   }
 }
