@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
 
+### Fixed
+
+- **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets and marks Vite's hashed assets as immutable so browsers cache them.
+- **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
+
 ## [1.0.0]
 
 ### Changed
