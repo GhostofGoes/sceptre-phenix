@@ -1479,6 +1479,15 @@
 
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
+      // otherwise the server keeps screenshotting these VMs every few seconds,
+      // tying up minimega for every other page
+      sendWsMsg({
+        resource: {
+          type: 'experiment/vms',
+          name: this.experiment?.name ?? '',
+          action: 'unsubscribe',
+        },
+      });
 
       if (this.socket) {
         this.socket.close();

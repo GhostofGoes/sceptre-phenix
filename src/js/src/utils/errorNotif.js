@@ -2,6 +2,9 @@ import { usePhenixStore } from '@/store.js';
 import { NotificationProgrammatic as Notification } from 'buefy';
 
 export async function useErrorNotification(error) {
+  // requests are cancelled on purpose when the user leaves a page
+  if (error?.code === 'ERR_CANCELED') return;
+
   let message;
   console.warn('Error', error);
   if (!('response' in error)) {

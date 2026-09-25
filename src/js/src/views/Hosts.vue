@@ -119,6 +119,7 @@ available for experiments, the number of VMs, and host uptime.
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { useTable } from '@/utils/useTable.js';
+  import { cachedPage, cachePage } from '@/utils/pageCache.js';
 
   export default {
     mixins: [formattingMixin],
@@ -127,9 +128,16 @@ available for experiments, the number of VMs, and host uptime.
     },
     beforeUnmount() {
       clearInterval(this.update);
+      this.requests.abort();
     },
 
     created() {
+      this.requests = new AbortController();
+      const cached = cachedPage('hosts');
+      if (cached) {
+        this.hosts = cached;
+        this.isWaiting = false;
+      }
       this.updateHosts();
       this.periodicUpdateHosts();
     },
@@ -137,15 +145,11 @@ available for experiments, the number of VMs, and host uptime.
     methods: {
       updateHosts() {
         axiosInstance
-          .get('hosts')
+          .get('hosts', { signal: this.requests.signal })
           .then((response) => {
-            const state = response.data;
-            if (state.hosts.length === 0) {
-              this.isWaiting = true;
-            } else {
-              this.hosts = state.hosts;
-              this.isWaiting = false;
-            }
+            this.hosts = response.data.hosts ?? [];
+            cachePage('hosts', this.hosts);
+            this.isWaiting = false;
           })
           .catch((err) => {
             this.isWaiting = false;

@@ -166,6 +166,14 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 
 			switch req.Resource.Type {
 			case "experiment/vms":
+				// Sent when the client leaves the experiment's VM table. Without
+				// it the screenshot ticker keeps queuing minimega commands for
+				// VMs no longer on screen, delaying every other API request.
+				if req.Resource.Action == "unsubscribe" {
+					c.clearVMs()
+
+					continue
+				}
 			case "metadata/screenshot":
 				var payload map[string]string
 
@@ -594,6 +602,13 @@ func (c *Client) setScreenshotsTicker() {
 			c.updateScreenshots()
 		}
 	}
+}
+
+func (c *Client) clearVMs() {
+	c.vmMu.Lock()
+	defer c.vmMu.Unlock()
+
+	c.vms = nil
 }
 
 func (c *Client) updateScreenshots() {

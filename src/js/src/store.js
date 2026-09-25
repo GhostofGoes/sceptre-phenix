@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import router from '@/router';
+import { clearPageCache } from '@/utils/pageCache.js';
 
 export const usePhenixStore = defineStore('phenix', {
   state: () => ({
@@ -53,6 +54,7 @@ export const usePhenixStore = defineStore('phenix', {
       }
     },
     logout() {
+      clearPageCache();
       this.username = null;
       this.token = null;
       this.role = null;

@@ -21,6 +21,8 @@ All notable changes to this project will be documented in this file.
 - **Web UI**: Cached permission checks are reset when a different role logs in.
 - **Web UI**: Fixed a stopped experiment's schedule update throwing when a VM was not found.
 - **Web UI**: API responses (JSON, YAML, and plain text) are gzip-compressed for browsers that accept it, so large lists such as VMs, disks, and logs download faster on slow links.
+- **Web UI / Server**: Leaving a running experiment now stops the server from screenshotting its VMs every 5 seconds. Those screenshots kept minimega busy for the rest of the session, which made other pages, especially Hosts and Disks, wait on a loading spinner.
+- **Web UI**: The Hosts, Disks, and Logs pages show the data they last loaded while they refresh, instead of a spinner, and cancel their requests when you leave. Hosts no longer spins forever when there are no hosts, and Disks no longer spins forever after a failed load.
 
 ### Added
 

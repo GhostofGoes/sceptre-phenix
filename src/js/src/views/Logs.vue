@@ -187,6 +187,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
+  import { cachedPage, cachePage } from '@/utils/pageCache.js';
 
   const KNOWN_LEVELS = [
     // in-order
@@ -195,6 +196,7 @@
     'WARN',
     'ERROR',
   ];
+  const DEFAULT_DATE_FILTER = 'Last 10 Minutes';
   const DATE_MODES = {
     // date dropdown options. text => seconds to go back
     'Last 10 Minutes': 10 * 60,
@@ -235,7 +237,8 @@
       this.startDate = new Date(
         Date.now() - this.dateModes[this.dateFilter] * 1000,
       );
-      this.getLogs();
+      this.requests = new AbortController();
+      this.getLogs(cachedPage('logs'));
 
       addWsHandler(this.handleWs);
     },
@@ -243,6 +246,7 @@
     beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.applySearch.cancel();
+      this.requests.abort();
     },
 
     watch: {
@@ -313,15 +317,29 @@
     },
 
     methods: {
-      getLogs() {
-        this.isLoading = true;
+      // cached: logs to show while they reload, instead of a spinner
+      getLogs(cached) {
+        if (cached) {
+          this.logs = cached;
+          this.logsVersion++;
+          this.$nextTick(() =>
+            this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER),
+          );
+        } else {
+          this.isLoading = true;
+        }
         let query =
           `logs?start=${this.startDate.toISOString()}` +
           (this.endNow ? '' : `&end=${this.endDate.toISOString()}`);
         axiosInstance
-          .get(query)
+          .get(query, { signal: this.requests.signal })
           .then((response) => {
             this.logs = markRaw(response.data ?? []);
+            // only the default view is reopened, so only it is worth keeping;
+            // streamed entries are pushed onto this same array
+            if (this.endNow && this.dateFilter === DEFAULT_DATE_FILTER) {
+              cachePage('logs', this.logs);
+            }
             this.$nextTick(() => {
               // the scroller is gone if the user left the page mid-request
               this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
@@ -381,7 +399,7 @@
         startDate: new Date(),
         endDate: new Date(),
         endNow: true, // if true, ignore `endDate` and also append streaming logs
-        dateFilter: 'Last 10 Minutes', // dropdown selection. A key of `dateModes`
+        dateFilter: DEFAULT_DATE_FILTER, // dropdown selection. A key of `dateModes`
         levelFilter: 'INFO',
         typeFilter: [],
         searchInput: '', // bound to the search box; applied to searchFilter debounced

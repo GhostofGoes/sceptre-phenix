@@ -223,7 +223,7 @@
         </p>
       </b-field>
       <b-tooltip label="Refresh List" type="is-light is-left">
-        <button class="button is-light" @click="updateDisks">
+        <button class="button is-light" @click="updateDisks()">
           <b-icon icon="refresh"></b-icon>
         </button>
       </b-tooltip>
@@ -314,14 +314,20 @@
   import { usePhenixStore } from '@/store.js';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
+  import { cachedPage, cachePage } from '@/utils/pageCache.js';
 
   export default {
     setup() {
       return { ...useTable(), roleAllowed };
     },
     async created() {
-      this.updateDisks();
+      this.requests = new AbortController();
+      this.updateDisks(cachedPage('disks'));
       this.restorePaginate();
+    },
+
+    beforeUnmount() {
+      this.requests.abort();
     },
 
     computed: {
@@ -356,16 +362,23 @@
           isWaiting: false,
         };
       },
-      updateDisks() {
+      // cached: disks to show while the list reloads, instead of a spinner
+      updateDisks(cached) {
         this.resetData();
-        this.isWaiting = true;
+        if (cached) {
+          this.disks = cached;
+        } else {
+          this.isWaiting = true;
+        }
         axiosInstance
-          .get('disks')
+          .get('disks', { signal: this.requests.signal })
           .then((response) => {
             this.disks = response.data.disks ?? [];
+            cachePage('disks', this.disks);
             this.isWaiting = false;
           })
           .catch((err) => {
+            this.isWaiting = false;
             useErrorNotification(err);
           });
       },
