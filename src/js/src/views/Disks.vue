@@ -362,11 +362,7 @@
         axiosInstance
           .get('disks')
           .then((response) => {
-            const state = response.data;
-            console.log(state);
-            for (let i = 0; i < state.disks.length; i++) {
-              this.disks.push(state.disks[i]);
-            }
+            this.disks = response.data.disks ?? [];
             this.isWaiting = false;
           })
           .catch((err) => {

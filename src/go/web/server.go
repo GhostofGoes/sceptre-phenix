@@ -407,6 +407,10 @@ func Start(opts ...ServerOption) error {
 	addRoutesToRouter(api, workflowRoutes...)
 	addRoutesToRouter(api, optionRoutes...)
 
+	// outermost, so the other middleware (full logging in particular) sees the
+	// uncompressed response
+	api.Use(CompressResponses)
+
 	if o.allowCORS {
 		plog.Info(plog.TypeSystem, "CORS is enabled on HTTP API endpoints")
 		api.Use(middleware.AllowCORS)

@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - **Web UI**: Hosts and VM tiles pages no longer poll while the browser tab is hidden.
 - **Web UI**: Cached permission checks are reset when a different role logs in.
 - **Web UI**: Fixed a stopped experiment's schedule update throwing when a VM was not found.
+- **Web UI**: API responses (JSON, YAML, and plain text) are gzip-compressed for browsers that accept it, so large lists such as VMs, disks, and logs download faster on slow links.
 
 ### Added
 
