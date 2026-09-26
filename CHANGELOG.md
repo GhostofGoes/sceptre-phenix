@@ -6,10 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: The Configs table can sort by Name and Last Updated, sort arrows sit next to the column titles, and Last Updated also shows how long ago the config changed, for example "(3 hours ago)". The kind filter and search box are visibly separate.
+- **Web UI**: Leaving the config editor, or a new config, without changing anything no longer asks about discarding edits.
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
 
 ### Fixed
 
+- **Web UI**: Configs open for viewing and editing in well under a second instead of several. The viewer reuses the config data it already fetched (and fetches on hover), the editor reuses the viewer's copy, and the Ace editor loads in the background in one round of requests. Download buttons show a spinner at once.
+- **Web UI**: Viewing a Topology config with builder data no longer errors, an invalid upload now reports its error, and the config search treats characters such as `(` literally.
 - **Web UI**: The Builder tab opens several times faster on a remote server (about 3.4 s to 0.7 s over a 100 ms link). mxGraph's loader fetched each of its ~140 source files separately, so the page made 182 requests; the server now serves the builder's scripts as one bundle it builds from the same files, leaving 26 requests.
 - **Web UI**: Fixed the Scorch page: the table no longer breaks when an experiment starts or stops, or when the search contains characters such as `(`. Exiting a terminal now clears its button, and terminals that closed while the page was away no longer linger. Request failures are reported.
 - **Web UI**: The SCORCH runs page no longer errors on run updates that arrive before it loads. It picks up runs added after loading, reports a failed terminal exit, and stops a component's previous output stream before starting another.

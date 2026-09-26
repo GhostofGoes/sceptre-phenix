@@ -37,7 +37,7 @@
           <textarea
             class="textarea x-config-text has-fixed-size"
             rows="30"
-            v-model="viewer.obj"
+            :value="viewer.obj ?? 'Loading…'"
             readonly />
         </div>
       </section>
@@ -48,7 +48,10 @@
           @click="$emit('edit', viewer.config)">
           Edit Config
         </button>
-        <button class="button is-info" @click="download([viewer.config])">
+        <button
+          class="button is-info"
+          :class="{ 'is-loading': isDownloading(viewer.config) }"
+          @click="download([viewer.config])">
           <b-icon icon="download"></b-icon>
         </button>
         <button class="button is-dark" @click="resetViewer">Exit</button>
@@ -107,6 +110,8 @@
                 {{ k }}
               </option>
             </b-select>
+          </b-field>
+          <b-field>
             <b-autocomplete
               v-model="searchQuery"
               placeholder="Find a Config"
@@ -180,21 +185,25 @@
         field="kind"
         label="Kind"
         width="200"
+        header-class="sort-inline"
         sortable
         v-slot="props">
         {{ props.row.kind }}
       </b-table-column>
 
       <b-table-column
-        field="name"
+        field="metadata.name"
         label="Name"
         width="400"
+        header-class="sort-inline"
         sortable
         v-slot="props">
         <template v-if="roleAllowed('configs', 'get', props.row.metadata.name)">
           <b-tooltip label="view config" type="is-dark">
             <div class="field is-clickable">
-              <div @click="viewConfig(props.row)">
+              <div
+                @mouseenter="prefetchConfig(props.row)"
+                @click="viewConfig(props.row)">
                 {{ props.row.metadata.name }}
               </div>
             </div>
@@ -213,8 +222,17 @@
         </template>
       </b-table-column>
 
-      <b-table-column field="updated" label="Last Updated" v-slot="props">
+      <b-table-column
+        field="metadata.updated"
+        label="Last Updated"
+        header-class="sort-inline"
+        sortable
+        :custom-sort="sortByUpdated"
+        v-slot="props">
         {{ props.row.metadata.updated }}
+        <span v-if="props.row.metadata.updated" class="has-text-grey-lighter">
+          ({{ relativeTime(props.row.metadata.updated, now) }})
+        </span>
       </b-table-column>
 
       <b-table-column label="Actions" centered v-slot="props">
@@ -227,6 +245,7 @@
           <button
             v-if="roleAllowed('configs', 'update', props.row.metadata.name)"
             class="button is-light is-small action"
+            @mouseenter="prefetchConfig(props.row)"
             @click="$emit('edit', props.row)">
             <b-icon icon="edit"></b-icon>
           </button>
@@ -240,6 +259,7 @@
           <button
             v-if="roleAllowed('configs', 'get', props.row.metadata.name)"
             class="button is-light is-small action"
+            :class="{ 'is-loading': isDownloading(props.row) }"
             @click="download([props.row])">
             <b-icon icon="download"></b-icon>
           </button>
@@ -268,7 +288,14 @@
 
   import FileSaver from 'file-saver';
   import { roleAllowed } from '@/utils/rbac.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
+  import {
+    configKey,
+    forgetConfig,
+    fullConfig,
+    prefetchConfig,
+  } from '@/utils/configCache.js';
+  import { relativeTime } from '@/utils/relativeTime.js';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
   import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
@@ -317,9 +344,14 @@
           title: null,
           obj: null,
         },
+
+        downloading: new Set(), // configs being downloaded, by key
+        now: Date.now(), // for the Last Updated column's relative times
       };
     },
     created() {
+      // keeps the relative times current
+      this.clock = setInterval(() => (this.now = Date.now()), 30000);
       this.loader = createPageLoader({
         key: 'configs',
         fetch: pageFetchers.configs,
@@ -332,6 +364,7 @@
     },
     beforeUnmount() {
       this.loader.stop();
+      clearInterval(this.clock);
     },
     computed: {
       emptyText() {
@@ -342,34 +375,31 @@
       paginationNeeded() {
         return this.filteredConfigs.length > 10;
       },
-      filteredConfigs: function () {
-        let configs = this.configs;
-
-        if (this.filterKind) {
-          let filteredConfigs = [];
-
-          for (let i = 0; i < configs.length; i++) {
-            if (configs[i].kind == this.filterKind) {
-              filteredConfigs.push(configs[i]);
-            }
-          }
-
-          configs = filteredConfigs;
-        }
-
-        var name_re = new RegExp(this.searchQuery, 'i');
-        var data = [];
-
-        for (let i in configs) {
-          let cfg = configs[i];
-          if (cfg.metadata.name.match(name_re)) {
-            data.push(cfg);
-          }
-        }
-        return data;
+      filteredConfigs() {
+        // a plain substring match: the search box is not a regular expression
+        const search = this.searchQuery.toLowerCase();
+        return this.configs.filter(
+          (cfg) =>
+            (!this.filterKind || cfg.kind == this.filterKind) &&
+            cfg.metadata.name.toLowerCase().includes(search),
+        );
       },
     },
     methods: {
+      prefetchConfig,
+      relativeTime,
+
+      sortByUpdated(a, b, isAsc) {
+        const diff =
+          Date.parse(a.metadata.updated ?? 0) -
+          Date.parse(b.metadata.updated ?? 0);
+        return isAsc ? diff : -diff;
+      },
+
+      isDownloading(cfg) {
+        return cfg.kind !== null && this.downloading.has(configKey(cfg));
+      },
+
       updateConfigs() {
         this.loader.load();
       },
@@ -383,9 +413,9 @@
         return false;
       },
       download(configList) {
-        const configs = configList.map(
-          (conf) => `${conf.kind}/${conf.metadata.name}`,
-        );
+        const configs = configList.map(configKey);
+        // the button spins until the file is ready
+        configs.forEach((key) => this.downloading.add(key));
         axiosInstance
           .post('configs/download', JSON.stringify(configs), {
             headers: {
@@ -407,6 +437,9 @@
           })
           .catch((err) => {
             useErrorNotification(err);
+          })
+          .finally(() => {
+            configs.forEach((key) => this.downloading.delete(key));
           });
       },
       deleteConfigs(configList) {
@@ -440,6 +473,7 @@
                 .then(() => {
                   //delete from config list
                   let configsSet = new Set(configs);
+                  configList.forEach(forgetConfig);
                   this.configs = this.configs.filter((item) => {
                     const key = `${item.kind}/${item.metadata.name}`;
                     return !configsSet.has(key);
@@ -496,10 +530,9 @@
             this.updateConfigs();
           })
           .catch((err) => {
-            if (err.response?.data?.metadata?.validation) {
-              this.error.title = 'Validation Error';
-              this.error.msg = err.response.data.metadata.validation;
-              this.error.modal = true;
+            const validation = err.response?.data?.metadata?.validation;
+            if (validation) {
+              showError('Validation Error', validation);
             } else {
               useErrorNotification(err);
             }
@@ -513,48 +546,53 @@
       },
       resetViewer() {
         this.viewer.isActive = false;
-        ((this.viewer.config = {
-          kind: null,
-          metadata: { name: null },
-        }),
-          (this.viewer.title = null));
+        this.viewer.config = { kind: null, metadata: { name: null } };
+        this.viewer.title = null;
         this.viewer.obj = null;
       },
-      viewConfig(cfg) {
+      // Opens the viewer at once and fills it when the config arrives; the
+      // editor reuses the loaded config.
+      async viewConfig(cfg) {
         this.viewer.config = cfg;
-        this.viewer.title = cfg.kind + '/' + cfg.metadata.name;
+        this.viewer.title = configKey(cfg);
+        this.viewer.obj = null;
+        this.viewer.isActive = true;
 
-        this.isWaiting = true;
+        try {
+          const obj = await fullConfig(cfg);
+          // the viewer moved on to another config or closed meanwhile
+          if (this.viewer.config !== cfg) return;
 
-        axiosInstance
-          .get('configs/' + this.viewer.title, {
-            headers: { Accept: 'application/json' },
-          })
-          .then((response) => {
-            let obj = response.data;
+          // the builder's diagram is long and unreadable here
+          if (obj.metadata.annotations?.['builder-xml']) {
+            obj.metadata.annotations['builder-xml'] = '<SNIPPED>';
+          }
 
-            if ('annotations' in obj.metadata) {
-              if ('builder-xml' in obj.metadata.annotations) {
-                this.config.builderXML =
-                  obj.metadata.annotations['builder-xml'];
-                obj.metadata.annotations['builder-xml'] = '<SNIPPED>';
-              }
-            }
-
-            this.viewer.obj = YAML.dump(obj);
-            this.viewer.isActive = true;
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          })
-          .finally(() => {
-            this.isWaiting = false;
-          });
+          this.viewer.obj = YAML.dump(obj);
+        } catch (err) {
+          useErrorNotification(err);
+          if (this.viewer.config === cfg) this.resetViewer();
+        }
       },
     },
   };
 </script>
 <style scoped>
+  /* sort arrows sit next to their headings rather than at the far edge of
+     the column */
+  :deep(th.sort-inline .th-wrap) {
+    justify-content: flex-start;
+  }
+
+  :deep(th.sort-inline .sort-icon) {
+    position: static;
+    transform: none;
+  }
+
+  :deep(th.sort-inline .sort-icon.icon.is-desc) {
+    transform: rotate(180deg) !important;
+  }
+
   .x-modal-dark :deep(textarea) {
     background-color: #686868;
     color: whitesmoke;
