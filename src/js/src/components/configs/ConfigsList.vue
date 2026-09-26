@@ -141,6 +141,7 @@
               <button
                 class="button is-light"
                 id="main"
+                @mouseenter="loadEditor"
                 @click="$emit('create')">
                 <b-icon icon="plus"></b-icon>
               </button>
@@ -202,7 +203,7 @@
           <b-tooltip label="view config" type="is-dark">
             <div class="field is-clickable">
               <div
-                @mouseenter="prefetchConfig(props.row)"
+                @mouseenter="prepareOpen(props.row)"
                 @click="viewConfig(props.row)">
                 {{ props.row.metadata.name }}
               </div>
@@ -245,7 +246,7 @@
           <button
             v-if="roleAllowed('configs', 'update', props.row.metadata.name)"
             class="button is-light is-small action"
-            @mouseenter="prefetchConfig(props.row)"
+            @mouseenter="prepareOpen(props.row)"
             @click="$emit('edit', props.row)">
             <b-icon icon="edit"></b-icon>
           </button>
@@ -295,6 +296,7 @@
     fullConfig,
     prefetchConfig,
   } from '@/utils/configCache.js';
+  import { loadAce } from '@/utils/loadAce.js';
   import { relativeTime } from '@/utils/relativeTime.js';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
@@ -386,8 +388,19 @@
       },
     },
     methods: {
-      prefetchConfig,
       relativeTime,
+
+      // Starts loading what opening a config needs once the pointer is on its
+      // way: the config itself and, for the editor, Ace. Ace is not prefetched
+      // with the pages since it would add ~150 kB to every first visit.
+      prepareOpen(cfg) {
+        prefetchConfig(cfg);
+        this.loadEditor();
+      },
+      loadEditor() {
+        // the editor reports a failure when opened
+        loadAce().catch(() => {});
+      },
 
       sortByUpdated(a, b, isAsc) {
         const diff =
@@ -557,6 +570,7 @@
         this.viewer.title = configKey(cfg);
         this.viewer.obj = null;
         this.viewer.isActive = true;
+        this.loadEditor();
 
         try {
           const obj = await fullConfig(cfg);

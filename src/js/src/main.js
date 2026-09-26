@@ -38,7 +38,6 @@ library.add(
 
 import App from './App.vue';
 import router from './router.js';
-import { loadAce } from './utils/loadAce.js';
 import { lazyRouteLoaders, schedulePrefetch } from './utils/prefetch.js';
 
 const app = createApp(App);
@@ -59,7 +58,6 @@ router.isReady().then(() => {
     ...lazyRouteLoaders(router.getRoutes()),
     // loaded by pages rather than routes
     () => import('@/components/configs/ConfigsEditor.vue'),
-    loadAce,
     () => import('@/views/experiment/RunningExperiment.vue'),
     () => import('@/views/experiment/StoppedExperiment.vue'),
   ]);
