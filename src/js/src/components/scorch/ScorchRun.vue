@@ -18,6 +18,18 @@
           {{ status }}
         </span>
         <b-tooltip
+          v-if="clearable"
+          label="clear this run's status"
+          type="is-light is-left">
+          <button
+            class="button is-dark"
+            :disabled="!canClear"
+            @click="clearer(exp, run)">
+            <b-icon icon="eraser" />
+            <span>Clear</span>
+          </button>
+        </b-tooltip>
+        <b-tooltip
           v-if="hasCleanup"
           label="run only this run's cleanup stage"
           type="is-light is-left">
@@ -90,6 +102,16 @@
         type: Boolean,
         default: true,
       },
+      // whether to offer clearing the run's status, and whether it can be
+      // cleared now
+      clearable: {
+        type: Boolean,
+        default: false,
+      },
+      canClear: {
+        type: Boolean,
+        default: false,
+      },
       nodes: {
         type: Array,
         default: () => [],
@@ -101,6 +123,9 @@
         type: Function,
       },
       cleaner: {
+        type: Function,
+      },
+      clearer: {
         type: Function,
       },
       rewinder: {

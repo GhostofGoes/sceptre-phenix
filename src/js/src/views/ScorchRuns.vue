@@ -1,12 +1,11 @@
 <template>
   <div class="content">
     <div class="runs-header">
-      <router-link class="button is-dark" :to="{ name: 'scorch' }">
-        <b-icon icon="arrow-left" />
-        <span>Back to SCORCH</span>
-      </router-link>
-      <span class="runs-title">Experiment: {{ expName }}</span>
       <div class="buttons">
+        <router-link class="button is-dark" :to="{ name: 'scorch' }">
+          <b-icon icon="arrow-left" />
+          <span>Back to SCORCH</span>
+        </router-link>
         <router-link
           v-if="roleAllowed('experiments', 'get', expName)"
           class="button is-dark"
@@ -14,6 +13,9 @@
           <span>Go to experiment</span>
           <b-icon icon="arrow-right" />
         </router-link>
+      </div>
+      <span class="runs-title">Experiment: {{ expName }}</span>
+      <div class="buttons">
         <button
           v-if="roleAllowed('experiments/trigger', 'create', expName)"
           class="button is-success"
@@ -30,6 +32,18 @@
           <b-icon icon="stop" />
           <span>Stop all</span>
         </button>
+        <b-tooltip
+          v-if="roleAllowed('experiments/trigger', 'create', expName)"
+          label="clear the status of every run that is not running"
+          type="is-light is-left">
+          <button
+            class="button is-dark"
+            :disabled="!canClearAll"
+            @click="clearAll">
+            <b-icon icon="eraser" />
+            <span>Clear all</span>
+          </button>
+        </b-tooltip>
       </div>
     </div>
     <div v-for="(run, id) in runs" :key="id">
@@ -47,6 +61,9 @@
         :viewer="componentDetail"
         :controller="scorchControl"
         :cleaner="cleanupRun"
+        :clearer="clearRun"
+        :clearable="roleAllowed('experiments/trigger', 'create', expName)"
+        :can-clear="canClear(run)"
         :rewinder="loopHistory" />
     </div>
     <hr />
@@ -89,10 +106,30 @@
     </b-modal>
     <b-modal v-model="output.modal" @close="exitOutput" has-modal-card>
       <div class="modal-card" style="width: 50em">
-        <header class="modal-card-head x-modal-dark">
-          <p class="modal-card-title x-config-text">
-            {{ output.title }}
-          </p>
+        <header class="modal-card-head x-modal-dark output-head">
+          <p class="modal-card-title">{{ output.title }}</p>
+          <dl class="output-details">
+            <div>
+              <dt>Experiment:</dt>
+              <dd>{{ expName }}</dd>
+            </div>
+            <div>
+              <dt>Run:</dt>
+              <dd>{{ outputRun }}</dd>
+            </div>
+            <div v-if="output.comp?.stage">
+              <dt>Stage:</dt>
+              <dd>{{ output.comp.stage }}</dd>
+            </div>
+            <div v-if="outputStatus">
+              <dt>Status:</dt>
+              <dd>
+                <span class="tag" :class="outputStatus.tag">
+                  {{ outputStatus.label }}
+                </span>
+              </dd>
+            </div>
+          </dl>
         </header>
         <section class="modal-card-body x-modal-dark">
           <div class="control">
@@ -127,6 +164,21 @@
   // run started, in case that update never arrives
   const PENDING_TIMEOUT_MS = 15000;
 
+  // how the output window names a component's status
+  const STATUS_LABELS = {
+    start: { label: 'starting', tag: 'is-info' },
+    running: { label: 'running', tag: 'is-info' },
+    background: { label: 'running in background', tag: 'is-info' },
+    success: { label: 'completed', tag: 'is-success' },
+    failure: { label: 'failed', tag: 'is-danger' },
+    unstable: { label: 'unstable', tag: 'is-warning' },
+    paused: { label: 'paused', tag: 'is-warning' },
+  };
+
+  // whether any component of the pipeline has run
+  const hasStatus = (nodes) =>
+    (nodes ?? []).some((node) => node.status && node.status !== 'unknown');
+
   export default {
     setup() {
       return { roleAllowed };
@@ -159,6 +211,7 @@
             running: i == pipelines.running,
             pending: false,
             queued: false,
+            clearing: false,
             hasCleanup: p.hasCleanup ?? false,
             nodes: p.pipeline,
             loop: 0,
@@ -195,6 +248,35 @@
         return (this.runs ?? []).some((run) => run.running || run.queued);
       },
 
+      // the viewed output's run, by name
+      outputRun() {
+        const comp = this.output.comp;
+        if (!comp) return '';
+
+        const name = this.runs?.[comp.run]?.name || comp.run;
+        return comp.loop > 0 ? `${name} (loop ${comp.loop})` : `${name}`;
+      },
+
+      // the viewed component's current status, kept up to date by pipeline
+      // updates while the output is open
+      outputStatus() {
+        const comp = this.output.comp;
+        if (!comp) return null;
+
+        const run = this.runs?.[comp.run];
+        const node =
+          run?.loop === comp.loop
+            ? run.nodes?.find(
+                (n) => n.name === comp.name && n.stage === comp.stage,
+              )
+            : null;
+        return STATUS_LABELS[(node ?? comp).status] ?? null;
+      },
+
+      canClearAll() {
+        return (this.runs ?? []).some((run) => this.canClear(run));
+      },
+
       // SCORCH executes one run at a time per experiment
       anyBusy() {
         return (this.runs ?? []).some((run) => run.running || run.pending);
@@ -211,6 +293,42 @@
           run,
           run.running ? axiosInstance.delete(url) : axiosInstance.post(url),
         );
+      },
+
+      // a run can be cleared once it is idle and has a status to clear
+      canClear(run) {
+        return (
+          !run.running &&
+          !run.pending &&
+          !run.queued &&
+          !run.clearing &&
+          (run.loop > 0 || hasStatus(run.nodes))
+        );
+      },
+
+      // forgets the statuses of the run's components; the server sends the
+      // cleared pipeline for each loop over the websocket
+      async clearRun(exp, runID) {
+        const run = this.runs?.[runID];
+        if (!run || !this.canClear(run)) return;
+
+        run.clearing = true;
+        try {
+          await axiosInstance.post(
+            `experiments/${exp}/scorch/pipelines/${runID}/clear`,
+          );
+          if (run.loop > 0) this.loopView(exp, runID, 0);
+        } catch (err) {
+          useErrorNotification(err);
+        } finally {
+          run.clearing = false;
+        }
+      },
+
+      clearAll() {
+        this.runs.forEach((run, id) => {
+          if (this.canClear(run)) this.clearRun(this.expName, id);
+        });
       },
 
       // runs only the run's cleanup stage
@@ -294,7 +412,8 @@
 
           case 'done': {
             if (comp.status === 'running') {
-              this.output.title = `${comp.exp} - Run: ${comp.run}`;
+              this.output.title = 'Archiving artifacts';
+              this.output.comp = { ...comp, stage: null };
               this.output.msg =
                 'Artifacts generated by this run are being processed and archived.';
               this.output.modal = true;
@@ -323,12 +442,14 @@
                 headers: { Accept: 'application/json' },
               })
               .then((resp) => {
+                if (resp.data.output || resp.data.stream) {
+                  this.output.title = comp.name;
+                  this.output.comp = comp;
+                }
                 if (resp.data.output) {
-                  this.output.title = `${comp.exp} - Node: ${comp.name} - Run: ${comp.run} - Stage: ${comp.stage}`;
                   this.output.msg = resp.data.output;
                   this.output.modal = true;
                 } else if (resp.data.stream) {
-                  this.output.title = `${comp.exp} - Node: ${comp.name} - Run: ${comp.run} - Stage: ${comp.stage}`;
                   this.getOutputStream(resp.data.stream);
                   this.output.modal = true;
                 } else if (resp.data.terminal) {
@@ -441,6 +562,7 @@
         }
 
         this.output.title = '';
+        this.output.comp = null;
         this.output.msg = '';
         this.output.modal = false;
       },
@@ -553,6 +675,8 @@
           // output currently being viewed
           modal: false,
           title: '',
+          // the pipeline node whose output is shown
+          comp: null,
           msg: '',
           socket: null,
         },
@@ -562,7 +686,7 @@
 </script>
 
 <style scoped>
-  /* back button left, experiment name centered, page actions right */
+  /* navigation left, experiment name centered, page actions right */
   .runs-header {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
@@ -570,13 +694,13 @@
     gap: 1rem;
   }
 
-  .runs-header > :first-child {
-    justify-self: start;
-  }
-
   .runs-header .buttons {
     justify-self: end;
     margin-bottom: 0;
+  }
+
+  .runs-header > .buttons:first-child {
+    justify-self: start;
   }
 
   .runs-header .buttons .button {
@@ -599,6 +723,39 @@
   .x-modal-dark :deep(textarea) {
     background-color: #686868;
     color: whitesmoke;
+  }
+
+  /* the component name, with a line each for what it belongs to beneath */
+  .output-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .output-head .modal-card-title {
+    overflow-wrap: anywhere;
+  }
+
+  .output-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0;
+    color: whitesmoke;
+  }
+
+  .output-details div {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .output-details dt {
+    font-weight: bold;
+  }
+
+  .output-details dd {
+    margin: 0;
   }
 
   .x-config-text {

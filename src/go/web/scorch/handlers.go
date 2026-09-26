@@ -659,6 +659,69 @@ func GetPipeline(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// ClearPipeline - POST /experiments/{name}/scorch/pipelines/{run}/clear.
+//
+// Forgets the component statuses of a run that is not executing, for every
+// loop, so its pipeline shows as never run.
+func ClearPipeline(w http.ResponseWriter, r *http.Request) error {
+	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "ClearPipeline")
+
+	var (
+		ctx     = r.Context()
+		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+		vars    = mux.Vars(r)
+		name    = vars["name"]
+	)
+
+	run, err := strconv.Atoi(vars["run"])
+	if err != nil {
+		return weberror.NewWebError(err, "invalid run ID '%s' provided", vars["run"])
+	}
+
+	if !role.Allowed("experiments/trigger", "create", name) {
+		user, _ := ctx.Value(middleware.ContextKeyUser).(string)
+		err := weberror.NewWebError(
+			nil,
+			"clearing Scorch runs for experiment %s not allowed for %s",
+			name,
+			user,
+		)
+
+		return err.SetStatus(http.StatusForbidden)
+	}
+
+	exp, err := experiment.Get(name)
+	if err != nil {
+		return weberror.NewWebError(err, "unable to get experiment %s from store", name)
+	}
+
+	md, err := scorchmd.DecodeMetadata(exp)
+	if err != nil {
+		err := weberror.NewWebError(err, "unable to decode scorch metadata for experiment %s", name)
+
+		return err.SetStatus(http.StatusInternalServerError)
+	}
+
+	if run < 0 || run >= len(md.Runs) {
+		err := weberror.NewWebError(nil, "Scorch run %d not found for experiment %s", run, name)
+
+		return err.SetStatus(http.StatusNotFound)
+	}
+
+	if scorchexe.HasCanceler(name, run) {
+		err := weberror.NewWebError(nil, "Scorch run %d for experiment %s is executing", run, name)
+
+		return err.SetStatus(http.StatusConflict)
+	}
+
+	// rebuilding broadcasts each loop's cleared pipeline
+	DeletePipeline(name, run, -1, true)
+
+	w.WriteHeader(http.StatusNoContent)
+
+	return nil
+}
+
 // TODO: change this to `scorch/runs`
 
 // StartPipeline - POST /experiments/{name}/scorch/pipelines/{run}.

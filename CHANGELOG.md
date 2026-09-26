@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: The SCORCH pipelines page can clear the status of a run that is not running, with a Clear button per run and Clear all beside Stop all (`POST /experiments/{name}/scorch/pipelines/{run}/clear`). Go to experiment now sits next to Back to SCORCH.
+- **Web UI**: The SCORCH component output window shows the component name on its own line, with the experiment, run name, stage and live status beneath it, so long titles no longer get cut off.
 - **Web UI**: Disks has an upload dialog like Configs, with drag and drop and the accepted file types listed; unsupported files are rejected with an error.
 - **Web UI**: Hosts can sort by RAM Used, RAM Total and Uptime, the "# of VMs" column is now "VMs", and sort arrows sit beside headings instead of over them.
 - **Web UI**: The experiment page is cached, so it opens at once from any page, and shows "Loading experiment…" when nothing is cached yet.
