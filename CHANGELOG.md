@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **minimega**: Far fewer minimega commands, which run one at a time and so hold up every page:
+  - Listing VMs sends 3 commands instead of about 3 per VM: captures are listed once, the head node is looked up once per process, and a snapshot VM's backing disk is looked up once per launch.
+  - Identical VM listings made at the same time share one run.
+  - Starting an experiment reads the start script and launches VMs on their own connection, so the UI stays responsive and start progress updates during the launch.
+  - Waiting for miniccc, building the start schedule, the SOH DHCP wait, subnet captures and port forwards ask only for the columns they need. Host disk usage takes one command per host, and concurrent host listings share one run.
+  - Copying files from a node pauses between status checks instead of polling nonstop.
+- **Web UI**: The experiment list no longer asks minimega about VMs (`GET /experiments?vms=false`), and the SCORCH page reuses it instead of listing experiments again.
+- **Web UI**: VM screenshots are taken every 15 seconds instead of 5, only of running VMs, and not while the browser tab is hidden. Hosts refresh every 30 seconds and VM tiles every 60, and only while the page is visible and focused.
+- **Web UI**: Pages, buttons and menu items now follow the server's permission names (logs get, settings update, SCORCH start/stop, snapshots, port forwards, VM start/pause, run SOH, user roles, disk commit, config names as kind/name). Pages a role cannot use redirect to one it can. Permission checks are faster on large VM tables.
+- **Web UI**: The Tunneler page lists the builds the server actually has (`GET /downloads/tunneler`) and says when none are installed.
+- **Web UI**: The Netflow table sizes itself to the window so the footer stays on screen, and netflow search no longer shows "No results found". The experiment file viewer uses the dark theme and indents JSON.
 - **Web UI**: The experiment page's Netflow tab shows flows as a themed table (time, source, destination, protocol name, packets, bytes), newest first, scrolling within the window instead of a fixed white text box. The search box reads "Search netflow" on that tab and filters the flows.
 - **Web UI**: Deleting an experiment spins only that row's delete button and then removes the row, instead of covering the page with a spinner.
 - **Web UI**: State of Health has an "All" filter (the default), keeps the chosen filter when the graph reloads, shows its filters on one line each, says "Loading…" on the SOH button until the graph loads, and only shows the tab bar when there is a Network Volume tab to switch to. The no-match message says "your filter criteria" and no longer has a Refresh Network button.
@@ -31,6 +42,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: The running experiment's file viewer showed an empty box; JSON files on the stopped experiment showed "[object Object]".
+- **Web UI**: Experiment pages: VM events from another experiment with the same VM name no longer change rows; VM start/stop (including delayed starts) update rows; failed commits, snapshots and redeploys clear the busy state; trigger toasts appear; dates in snapshot and backing-image names are correct; "No" to replaying injects is respected; file pagination works; VM updates resume after a websocket reconnect; searching no longer reloads the whole experiment.
+- **Web UI**: The stopped experiment page pages VMs correctly, boot buttons check the right VM, the Experiments list shows delayed VM counts, the VM tiles clear button works, and the VM labels dialog closes after saving over HTTP/2.
+- **Server**: A websocket VM list request missing its sort or paging fields no longer crashes phenix; screenshot size is per client and validated; disconnected clients no longer leak goroutines; delayed-start events reach per-VM roles; VM start/stop events use `exp/vm` names; captures and SOH use the right permission checks; bad file paging values return 400.
 - **Web UI**: Stopping a netflow capture that the server had already stopped no longer shows "Error: not found"; the button resets and a message explains why. The netflow button can no longer be double-clicked into a second stop. The server's message now says no capture is running.
 - **Netflow**: A malformed netflow record no longer crashes phenix, and IPv6 addresses keep their host and port.
 - **Web UI**: The experiment page's search box, stop, SOH, SCORCH and column buttons no longer disappear for roles without file listing, and searching on the VNC tab searches VMs.

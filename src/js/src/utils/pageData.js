@@ -20,9 +20,34 @@ export const stoppedExperimentKey = (name) => `experiment/${name}/stopped`;
 const get = async (url, signal, config = {}) =>
   (await axiosInstance.get(url, { signal, ...config })).data;
 
+// An experiment list this recent is reused rather than asked for again.
+const EXPERIMENT_LIST_REUSE_MS = 5000;
+
+// The experiment list for pages built on it (SCORCH), sharing the Experiments
+// page's request or recent result: listing experiments has the server query
+// minimega for every running one.
+async function experimentList() {
+  const cached = cachedPage('experiments');
+  if (
+    cached &&
+    !isLoadingPage('experiments') &&
+    Date.now() - cached.at < EXPERIMENT_LIST_REUSE_MS
+  ) {
+    return cached.data;
+  }
+
+  const request = fetchIntoCache('experiments', pageFetchers.experiments);
+  try {
+    return await request.promise;
+  } finally {
+    request.release();
+  }
+}
+
 export const pageFetchers = {
   experiments: async (signal) =>
-    (await get('experiments', signal)).experiments ?? [],
+    // the list only shows VM counts, which need nothing from minimega
+    (await get('experiments?vms=false', signal)).experiments ?? [],
 
   configs: async (signal) => (await get('configs', signal)).configs ?? [],
 
@@ -60,12 +85,20 @@ export const pageFetchers = {
   // names
   scorch: async (signal) => {
     const json = { headers: { Accept: 'application/json' } };
-    const { experiments } = await get('experiments', signal);
+    const experiments = await experimentList();
 
     // fetch every experiment's apps concurrently rather than one request
     // after another
     const scorchExps = await Promise.all(
-      (experiments ?? []).map(async (exp) => {
+      experiments.map(async (exp) => {
+        // one forbidden experiment must not fail the whole list
+        if (
+          !roleAllowed('experiments/apps', 'get', exp.name) ||
+          !roleAllowed('experiments', 'get', exp.name)
+        ) {
+          return null;
+        }
+
         const apps = await get(`experiments/${exp.name}/apps`, signal);
 
         // only do stuff with this exp if it has scorch configured
@@ -78,14 +111,16 @@ export const pageFetchers = {
           signal,
           json,
         );
-        exp.scorch = {
-          running: apps['scorch'],
-          run: pipelines.running,
-          runs: (pipelines.pipelines ?? []).map((p) => p.name),
-          pending: false,
+        // a copy: the experiment objects are shared with the Experiments page
+        return {
+          ...exp,
+          scorch: {
+            running: apps['scorch'],
+            run: pipelines.running,
+            runs: (pipelines.pipelines ?? []).map((p) => p.name),
+            pending: false,
+          },
         };
-
-        return exp;
       }),
     );
 
@@ -104,10 +139,10 @@ const PRELOADS = [
   ['experiments', () => roleAllowed('experiments', 'list')],
   ['configs', () => roleAllowed('configs', 'list')],
   ['users', () => usePhenixStore().role?.name !== 'Disabled'],
-  ['logs', () => roleAllowed('logs', 'list')],
+  ['logs', () => roleAllowed('logs', 'get')],
   ['hosts', () => roleAllowed('hosts', 'list')],
   ['scorch', () => roleAllowed('experiments', 'list')],
-  ['settings', () => roleAllowed('settings', 'edit')],
+  ['settings', () => roleAllowed('settings', 'update')],
   // last: the server inspects every disk image, one at a time
   ['disks', () => roleAllowed('disks', 'list')],
 ];

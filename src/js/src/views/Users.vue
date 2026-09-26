@@ -100,7 +100,9 @@
               maxlength="32"
               v-model="user.new_password"></b-input>
           </b-field>
-          <b-field v-if="roleAllowed('users', 'create')" label="Role">
+          <b-field
+            v-if="roleAllowed('users/roles', 'patch', user.username)"
+            label="Role">
             <b-select v-model="user.role_name" expanded>
               <option v-for="(r, i) in roleNames" :key="i">
                 {{ r }}
@@ -112,7 +114,7 @@
             label="Resource Name(s)"
             grouped
             style="padding-bottom: 20px"
-            v-if="roleAllowed('users', 'create')">
+            v-if="roleAllowed('users/roles', 'patch', user.username)">
             <b-input
               type="text"
               v-model="user.resource_names"

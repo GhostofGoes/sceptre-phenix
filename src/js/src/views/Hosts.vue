@@ -137,6 +137,7 @@ available for experiments, the number of VMs, and host uptime.
   import { useTable } from '@/utils/useTable.js';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
+  import { inForeground } from '@/utils/foreground.js';
 
   export default {
     mixins: [formattingMixin],
@@ -166,12 +167,13 @@ available for experiments, the number of VMs, and host uptime.
 
       periodicUpdateHosts() {
         this.update = setInterval(() => {
-          // skip polling while the browser tab is in the background, or
-          // while the last poll is still waiting on the server
-          if (!document.hidden && !this.loader.loading) {
+          // every poll has the server ask minimega for host stats and disk
+          // usage: skip it unless the page is focused, and while the last
+          // poll is still waiting on the server
+          if (inForeground() && !this.loader.loading) {
             this.loader.load();
           }
-        }, 10000);
+        }, 30000);
       },
 
       decorator(sum, len) {

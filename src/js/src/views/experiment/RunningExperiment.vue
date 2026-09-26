@@ -34,7 +34,10 @@
               v-for="(snap, index) in expModal.snapshots"
               :key="index"
               class="vm-modal-list-row">
-              <b-tooltip label="restore this snapshot" type="is-light is-right">
+              <b-tooltip
+                v-if="roleAllowed('vms/snapshots', 'update', expModal.fullName)"
+                label="restore this snapshot"
+                type="is-light is-right">
                 <b-icon
                   class="is-clickable"
                   icon="play-circle"
@@ -52,11 +55,14 @@
               class="vm-modal-list-row">
               {{ forward.desc }} ({{ forward.owner }})
               <b-tooltip
-                v-if="forward.canDelete"
+                v-if="
+                  forward.canDelete &&
+                  roleAllowed('vms/forwards', 'delete', expModal.fullName)
+                "
                 label="delete this port forward"
                 type="is-light is-right">
                 <b-icon
-                  class="isClickable"
+                  class="is-clickable"
                   icon="trash"
                   size="is-small"
                   @click="
@@ -69,27 +75,31 @@
         <footer class="modal-card-foot buttons is-right">
           <div
             v-if="
+              !expModal.vm.running &&
               roleAllowed('vms/start', 'update', expModal.fullName) &&
               !showModifyStateBar
             ">
-            <template v-if="!expModal.vm.running">
-              <b-tooltip label="start" type="is-light">
-                <b-button
-                  class="button is-success"
-                  icon-left="play"
-                  @click="startVm(expModal.vm.name)">
-                </b-button>
-              </b-tooltip>
-            </template>
-            <template v-else>
-              <b-tooltip label="pause" type="is-light">
-                <b-button
-                  class="button is-warning"
-                  icon-left="pause"
-                  @click="pauseVm(expModal.vm.name)">
-                </b-button>
-              </b-tooltip>
-            </template>
+            <b-tooltip label="start" type="is-light">
+              <b-button
+                class="button is-success"
+                icon-left="play"
+                @click="startVm(expModal.vm.name)">
+              </b-button>
+            </b-tooltip>
+          </div>
+          <div
+            v-if="
+              expModal.vm.running &&
+              roleAllowed('vms/stop', 'update', expModal.fullName) &&
+              !showModifyStateBar
+            ">
+            <b-tooltip label="pause" type="is-light">
+              <b-button
+                class="button is-warning"
+                icon-left="pause"
+                @click="pauseVm(expModal.vm.name)">
+              </b-button>
+            </b-tooltip>
           </div>
           <div
             v-if="
@@ -159,7 +169,7 @@
           </div>
           <div
             v-if="
-              roleAllowed('vms/snapshot', 'create', expModal.fullName) &&
+              roleAllowed('vms/snapshots', 'create', expModal.fullName) &&
               !showModifyStateBar &&
               expModal.vm.running &&
               expModal.vm.snapshot
@@ -545,7 +555,7 @@
         <section class="modal-card-body x-modal-dark">
           <div class="control">
             <textarea
-              class="textarea x-config-text has-fixed-size"
+              class="textarea has-fixed-size file-viewer"
               rows="30"
               v-model="fileViewerModal.contents"
               readonly></textarea>
@@ -626,31 +636,34 @@
     <b-field position="is-right" grouped>
       <!-- Multi-VM options shown next to search -->
       <b-field v-if="isMultiVmSelected" position="is-center" grouped>
-        <template
+        <b-field
           v-if="
             vmSelectedArray.every((vm) =>
               roleAllowed('vms/start', 'update', experiment.name + '/' + vm),
             ) && !showModifyStateBar
           ">
-          <b-field>
-            <b-tooltip label="start" type="is-light">
-              <b-button
-                class="button is-success"
-                icon-left="play"
-                @click="processMultiVmAction(vmActions.start)">
-              </b-button>
-            </b-tooltip>
-          </b-field>
-          <b-field>
-            <b-tooltip label="pause" type="is-light">
-              <b-button
-                class="button is-warning"
-                icon-left="pause"
-                @click="processMultiVmAction(vmActions.pause)">
-              </b-button>
-            </b-tooltip>
-          </b-field>
-        </template>
+          <b-tooltip label="start" type="is-light">
+            <b-button
+              class="button is-success"
+              icon-left="play"
+              @click="processMultiVmAction(vmActions.start)">
+            </b-button>
+          </b-tooltip>
+        </b-field>
+        <b-field
+          v-if="
+            vmSelectedArray.every((vm) =>
+              roleAllowed('vms/stop', 'update', experiment.name + '/' + vm),
+            ) && !showModifyStateBar
+          ">
+          <b-tooltip label="pause" type="is-light">
+            <b-button
+              class="button is-warning"
+              icon-left="pause"
+              @click="processMultiVmAction(vmActions.pause)">
+            </b-button>
+          </b-tooltip>
+        </b-field>
         <b-field
           v-if="
             vmSelectedArray.every((vm) =>
@@ -688,7 +701,7 @@
             vmSelectedArray.every((vm) =>
               roleAllowed(
                 'vms/snapshots',
-                'update',
+                'create',
                 experiment.name + '/' + vm,
               ),
             ) && !showModifyStateBar
@@ -753,26 +766,6 @@
             </b-tooltip>
           </b-field>
 
-          <b-field>
-            <b-tooltip
-              v-if="
-                vmSelectedArray.every((vm) =>
-                  roleAllowed(
-                    'vms/restart',
-                    'update',
-                    experiment.name + '/' + vm,
-                  ),
-                )
-              "
-              label="restart"
-              type="is-light">
-              <b-button
-                class="button is-success"
-                icon-left="sync-alt"
-                @click="processMultiVmAction(vmActions.restart)">
-              </b-button>
-            </b-tooltip>
-          </b-field>
           <b-field>
             <b-tooltip
               v-if="
@@ -870,7 +863,10 @@
             :data="searchHistory"
             @typing="searchVMs"
             @select="(option) => searchVMs(option)">
-            <template #empty>No results found</template>
+            <!-- netflow is filtered in place; there is nothing to list here -->
+            <template v-if="activeTab != NETFLOW_TAB" #empty
+              >No results found</template
+            >
           </b-autocomplete>
           <p class="control">
             <button
@@ -969,7 +965,7 @@
             <div class="control is-flex">
               <b-switch
                 v-model="table.isPaginated"
-                @update:modelValue="updateExperiment()"
+                @update:modelValue="updateTable()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
@@ -1055,7 +1051,7 @@
                 <b-tooltip label="get info for the vm" type="is-dark">
                   <span
                     class="tag is-medium"
-                    :class="decorator(props.row.running, !props.row.busy)">
+                    :class="decorator(props.row.state, props.row.busy)">
                     <div class="field">
                       <div
                         @click="
@@ -1204,7 +1200,6 @@
                         vlanModal.active = true;
                         vlanModal.vmName = props.row.name;
                         vlanModal.vmFromNet = n;
-                        vlanModal.vmNet = props.row.networks;
                         vlanModal.vmNetIndex = index;
                       ">
                       {{ formatLowercase(n) }}
@@ -1280,7 +1275,10 @@
             </b-table-column>
           </b-table>
         </b-tab-item>
-        <b-tab-item label="Files" icon="file-alt">
+        <b-tab-item
+          label="Files"
+          icon="file-alt"
+          :visible="roleAllowed('experiments/files', 'list', experiment.name)">
           <b-field v-if="filesPaginationNeeded" grouped position="is-right">
             <div class="control is-flex">
               <b-switch
@@ -1422,16 +1420,14 @@
                     style="display: block" />
                 </a>
                 <a
-                  style="
-                    color: whitesmoke;
-                    display: block;
-                    background-color: grey;
-                    text-align: center;
-                    padding: 2px 0px;
+                  v-if="
+                    roleAllowed('vms', 'get', experiment.name + '/' + vm.name)
                   "
+                  class="vnc-tile-name"
                   @click="getInfo(vm)"
                   >{{ vm.name }}</a
                 >
+                <span v-else class="vnc-tile-name">{{ vm.name }}</span>
               </div>
             </template>
             <template v-else>{{
@@ -1456,7 +1452,10 @@
             <p class="netflow-summary">
               {{ netflowSummary }}
             </p>
-            <div class="netflow-view">
+            <div
+              ref="netflowView"
+              class="netflow-view"
+              :style="{ maxHeight: netflowMaxHeight }">
               <table class="table is-narrow is-fullwidth netflow-table">
                 <thead>
                   <tr>
@@ -1498,10 +1497,16 @@
 </template>
 
 <script>
+  import { fileText } from '@/utils/fileText.js';
   import { BSlider, BSliderTick } from 'buefy';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import { tagCount } from '@/utils/tagCount';
-  import { addWsHandler, removeWsHandler, sendWsMsg } from '@/utils/websocket';
+  import {
+    addWsHandler,
+    onWsReconnect,
+    removeWsHandler,
+    sendWsMsg,
+  } from '@/utils/websocket';
   import { usePhenixStore } from '@/store';
   import VMMountBrowserModal from '@/components/VMMountBrowserModal.vue';
   import { debounce } from 'lodash-es';
@@ -1509,7 +1514,7 @@
   import { roleAllowed } from '@/utils/rbac.js';
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { cachePage } from '@/utils/pageCache.js';
   import { experimentKey } from '@/utils/pageData.js';
@@ -1557,25 +1562,36 @@
     return markRaw({ id: ++netflowLineID, time: clockTime(), marker: text });
   }
 
+  const pad2 = (n) => String(n).padStart(2, '0');
+
+  // zero-padded parts of the current local time, for generated filenames
+  function timestampParts() {
+    const now = new Date();
+    return {
+      year: now.getFullYear(),
+      month: pad2(now.getMonth() + 1),
+      day: pad2(now.getDate()),
+      hours: pad2(now.getHours()),
+      minutes: pad2(now.getMinutes()),
+      seconds: pad2(now.getSeconds()),
+    };
+  }
+
   export default {
     components: { BSlider, BSliderTick },
     mixins: [formattingMixin],
     setup() {
-      return { roleAllowed, tagCount };
+      return { roleAllowed, tagCount, NETFLOW_TAB };
     },
 
     async beforeUnmount() {
+      this.unmounting = true;
+      window.removeEventListener('resize', this.fitNetflowView);
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
       removeWsHandler(this.handleWs);
+      this.offWsReconnect();
       clearTimeout(this.screenshotsTimer);
-      // otherwise the server keeps screenshotting these VMs every few seconds,
-      // tying up minimega for every other page
-      sendWsMsg({
-        resource: {
-          type: 'experiment/vms',
-          name: this.experiment?.name ?? '',
-          action: 'unsubscribe',
-        },
-      });
+      this.unsubscribeVms();
 
       if (this.socket) {
         this.socket.close();
@@ -1588,6 +1604,12 @@
     async created() {
       this.features = usePhenixStore().features;
       addWsHandler(this.handleWs);
+      window.addEventListener('resize', this.fitNetflowView);
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+      // the server drops VM subscriptions when the websocket reconnects
+      this.offWsReconnect = onWsReconnect(() => {
+        if (this.experiment.name) this.updateTable();
+      });
       this.loadColumnVisibility();
       // cached so the page opens at once; the header shows how old the copy
       // is while a fresh one loads
@@ -1605,13 +1627,24 @@
             this.$emit('running', false);
             return;
           }
-          this.experiment = experiment;
-          this.search.vms = experiment.vms.map((vm) => {
-            return vm.name;
-          });
-          this.table.total = experiment.vm_count;
+          // the VM table arrives over the websocket; once it has, a reload
+          // keeps it (and its screenshots, pagination, and filter)
+          if (this.vmsLoaded) {
+            this.experiment = { ...experiment, vms: this.experiment.vms };
+          } else {
+            const shots = new Map(
+              (this.experiment.vms ?? []).map((vm) => [vm.name, vm.screenshot]),
+            );
+            this.experiment = {
+              ...experiment,
+              vms: (experiment.vms ?? []).map((vm) => ({
+                ...vm,
+                screenshot: vm.screenshot || shots.get(vm.name),
+              })),
+            };
+            this.table.total = experiment.vm_count;
+          }
 
-          // the VM table itself arrives over the websocket
           this.updateTable();
         },
       });
@@ -1619,7 +1652,8 @@
 
       try {
         await axiosInstance.get(`experiments/${this.$route.params.id}/netflow`);
-        this.handleNetflow(true, false);
+        // the page may have been left while waiting
+        if (!this.unmounting) this.handleNetflow(true, false);
       } catch {}
     },
 
@@ -1670,14 +1704,6 @@
           return 'No files match your search';
         }
         return 'This experiment has no files yet';
-      },
-
-      filteredData() {
-        return this.search.vms.filter((vm) => {
-          return (
-            vm.toLowerCase().indexOf(this.search.filter.toLowerCase()) >= 0
-          );
-        });
       },
 
       vncWidth() {
@@ -1787,7 +1813,8 @@
         switch (this.activeTab) {
           case 0:
           case 2:
-            this.updateExperiment();
+            // before the first load, apply() lists the VMs with this filter
+            if (this.experiment.name) this.updateTable();
             break;
           case 1:
             this.updateFiles();
@@ -1795,11 +1822,6 @@
           // the netflow tab filters what it already has (netflowRows)
         }
       }, 250),
-
-      switchPagination(enabled) {
-        this.table.isPaginated = enabled;
-        this.updateTable();
-      },
 
       updateTable() {
         let number = this.table.currentPage;
@@ -1862,37 +1884,95 @@
         });
       },
 
-      handleWs(msg) {
-        switch (msg.resource.type) {
-          case 'experiment/' + this.$route.params.id: {
-            switch (msg.resource.action) {
-              case 'triggered': {
-                this.$buefy.toast.open({
-                  message: 'phēnix Apps ' + this.apps + ' have been triggered.',
-                  type: 'is-success',
-                  duration: 4000,
-                });
+      // the VM a per-VM event is about, or null when the event is for another
+      // experiment or the VM table has not loaded
+      eventVmName(msg) {
+        const [exp, name] = (msg.resource.name ?? '').split('/');
+        if (exp !== this.$route.params.id || !this.experiment.vms) return null;
+        return name ?? null;
+      },
 
-                this.apps = null;
+      findVm(name) {
+        return this.experiment.vms.find((vm) => vm.name == name);
+      },
 
-                break;
-              }
+      // swaps in the server's copy of a VM, keeping the screenshot shown when
+      // the copy has none
+      replaceVm(vm) {
+        const vms = this.experiment.vms;
+        const i = vms.findIndex((v) => v.name == vm.name);
+        if (i === -1) return;
+        vms[i] = { ...vm, screenshot: vm.screenshot || vms[i].screenshot };
+        this.experiment.vms = [...vms];
+      },
 
-              case 'triggerError': {
-                this.$buefy.toast.open({
-                  message: 'Triggering phēnix Apps ' + this.apps + ' failed.',
-                  type: 'is-danger',
-                  duration: 4000,
-                });
+      setVmBusy(name, busy) {
+        const row = this.findVm(name);
+        if (!row) return;
+        row.busy = busy;
+        if (busy) row.percent = 0;
+      },
 
-                this.apps = null;
+      setVmPercent(name, fraction) {
+        const row = this.findVm(name);
+        if (!row) return;
+        row.busy = true; // in case the starting message was missed
+        row.percent = Math.round(fraction * 100);
+      },
 
-                break;
-              }
-            }
+      // Apps publish their runs on apps/<app>, scheduled runs included, so
+      // only the apps this page triggered get a toast.
+      handleAppTrigger(msg) {
+        const app = msg.resource.type.slice('apps/'.length);
+        const i = this.triggeredApps.indexOf(app);
+        if (msg.resource.name !== this.$route.params.id || i === -1) return;
+
+        switch (msg.resource.action) {
+          case 'success':
+            this.$buefy.toast.open({
+              message: 'phēnix app ' + app + ' was triggered successfully.',
+              type: 'is-success',
+              duration: 4000,
+            });
             break;
-          }
+          case 'error':
+            showError(
+              'Triggering phēnix app ' + app + ' failed',
+              msg.result?.error,
+            );
+            break;
+          default:
+            return;
+        }
 
+        this.triggeredApps.splice(i, 1);
+      },
+
+      // a queued redeploy finished or failed: send the next or close the modal
+      advanceRedeployQueue(name) {
+        const queue = this.redeployModal.actionsQueue;
+        const index = queue.findIndex((action) => action.name == name);
+        if (index === -1) return;
+
+        queue.splice(index, 1);
+        if (queue.length > 0) {
+          axiosInstance.post(queue[0].url, queue[0].body).catch((err) => {
+            useErrorNotification(err);
+          });
+        } else {
+          this.redeployModal.active = false;
+          this.resetRedeployModal();
+          this.isWaiting = false;
+        }
+      },
+
+      handleWs(msg) {
+        if (msg.resource.type.startsWith('apps/')) {
+          this.handleAppTrigger(msg);
+          return;
+        }
+
+        switch (msg.resource.type) {
           case 'experiment/vms': {
             if (msg.resource.action != 'list') {
               return;
@@ -1907,6 +1987,7 @@
               screenshot: vm.screenshot || shots.get(vm.name),
             }));
             this.table.total = msg.result.total;
+            this.vmsLoaded = true;
 
             // a VM still without a screenshot by then has none to show
             this.screenshotsDue = false;
@@ -1922,15 +2003,9 @@
               });
             }
 
-            if (this.search.filter) {
-              // Only add successful searches to the search history
-              if (this.table.total > 0) {
-                if (this.searchHistory > this.searchHistoryLength) {
-                  this.searchHistory.pop();
-                }
-                this.searchHistory.push(this.search.filter.trim());
-                this.searchHistory = this.getUniqueItems(this.searchHistory);
-              }
+            // Only add successful searches to the search history
+            if (this.search.filter && this.table.total > 0) {
+              this.addSearchHistory();
             }
 
             this.isWaiting = false;
@@ -1939,17 +2014,12 @@
           }
 
           case 'experiment/vm': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
+            const name = this.eventVmName(msg);
+            if (name === null) break;
 
             switch (msg.resource.action) {
               case 'update': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == msg.result.name) {
-                    vms[i] = msg.result;
-                    break;
-                  }
-                }
+                this.replaceVm(msg.result);
 
                 this.$buefy.toast.open({
                   message:
@@ -1963,122 +2033,80 @@
               }
 
               case 'delete': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms.splice(i, 1);
-                    break;
-                  }
+                const vms = this.experiment.vms;
+                const i = vms.findIndex((v) => v.name == name);
+                if (i !== -1) {
+                  vms.splice(i, 1);
                 }
 
                 this.$buefy.toast.open({
-                  message: 'The ' + vm[1] + ' VM was killed.',
+                  message: 'The ' + name + ' VM was killed.',
                   type: 'is-success',
                 });
 
                 break;
               }
 
-              case 'start': {
-                break;
-              }
-
-              case 'starting': {
-                break;
-              }
-
-              case 'stop': {
-                break;
-              }
-
-              case 'stopping': {
-                break;
-              }
-
+              // also published when a delayed-start VM starts
+              case 'start':
+              case 'stop':
               case 'redeploying': {
+                this.replaceVm(msg.result);
                 break;
               }
 
-              case 'shutdown': {
-                break;
-              }
-
-              case 'cdrom-inserted': {
-                this.$buefy.toast.open({
-                  message:
-                    'The optical disc for ' +
-                    vm[1] +
-                    ' was successfully inserted.',
-                  type: 'is-success',
-                  duration: 4000,
-                });
-
-                // Refresh the VM
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    this.getInfo(vms[i]);
-                    break;
-                  }
-                }
-
-                break;
-              }
-
+              case 'cdrom-inserted':
               case 'cdrom-ejected': {
                 this.$buefy.toast.open({
                   message:
                     'The optical disc for ' +
-                    vm[1] +
-                    ' was successfully ejected.',
+                    name +
+                    ' was successfully ' +
+                    (msg.resource.action == 'cdrom-inserted'
+                      ? 'inserted.'
+                      : 'ejected.'),
                   type: 'is-success',
                   duration: 4000,
                 });
 
-                // Refresh the VM
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    this.getInfo(vms[i]);
-                    break;
-                  }
+                // refresh the VM's details if they are open
+                if (this.expModal.active && this.expModal.vm.name == name) {
+                  const row = this.findVm(name);
+                  if (row) this.getInfo(row);
                 }
+
                 break;
               }
 
               case 'redeployed': {
                 this.$buefy.toast.open({
-                  message: 'Redeployed ' + vm[1],
+                  message: 'Redeployed ' + name,
                   type: 'is-success',
                 });
-                let index = this.redeployModal.actionsQueue.findIndex(
-                  (action) => action.name == vm[1],
-                );
-                if (index !== -1) {
-                  this.redeployModal.actionsQueue.splice(index, 1);
-                }
-                if (this.redeployModal.actionsQueue.length > 0) {
-                  let url = this.redeployModal.actionsQueue[0].url;
-                  let body = this.redeployModal.actionsQueue[0].body;
-                  axiosInstance.post(url, body).catch((err) => {
-                    useErrorNotification(err);
-                  });
-                } else {
-                  this.redeployModal.active = false;
-                  this.resetRedeployModal();
-                  this.isWaiting = false;
-                }
+                this.replaceVm(msg.result);
+                this.advanceRedeployQueue(name);
+
+                break;
+              }
+
+              case 'errorRedeploying': {
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message: 'Redeploying the ' + name + ' VM failed.',
+                  type: 'is-danger',
+                  duration: 4000,
+                });
+                this.advanceRedeployQueue(name);
 
                 break;
               }
 
               case 'error': {
-                // Only show this error if the user is currently viewing the
-                // running experiment in which the error occurred.
-                if (this.$route.params.id == vm[0]) {
-                  this.$buefy.toast.open({
-                    message: msg.result.error,
-                    type: 'is-danger',
-                    duration: 4000,
-                  });
-                }
+                this.$buefy.toast.open({
+                  message: msg.result.error,
+                  type: 'is-danger',
+                  duration: 4000,
+                });
 
                 break;
               }
@@ -2088,74 +2116,59 @@
           }
 
           case 'experiment/vm/commit': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
+            const name = this.eventVmName(msg);
+            if (name === null) break;
 
             switch (msg.resource.action) {
               case 'commit': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = false;
-                    vms[i] = msg.result.vm;
+                if (!this.findVm(name)) break;
+                this.replaceVm({ ...msg.result.vm, busy: false });
 
-                    let disk = msg.result.disk;
+                this.$buefy.toast.open({
+                  message:
+                    'The backing image with name ' +
+                    msg.result.disk +
+                    ' for the ' +
+                    name +
+                    ' VM was successfully created.',
+                  type: 'is-success',
+                  duration: 4000,
+                });
 
-                    this.$buefy.toast.open({
-                      message:
-                        'The backing image with name ' +
-                        disk +
-                        ' for the ' +
-                        vm[1] +
-                        ' VM was successfully created.',
-                      type: 'is-success',
-                      duration: 4000,
-                    });
-
-                    break;
-                  }
-                }
                 break;
               }
 
               case 'committing': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true;
-                    vms[i].percent = 0;
+                if (!this.findVm(name)) break;
+                this.setVmBusy(name, true);
 
-                    let disk = msg.result.disk;
-
-                    this.$buefy.toast.open({
-                      message:
-                        'A backing image with name ' +
-                        disk +
-                        ' for the ' +
-                        vm[1] +
-                        ' VM is being created.',
-                      type: 'is-warning',
-                      duration: 4000,
-                    });
-
-                    break;
-                  }
-                }
+                this.$buefy.toast.open({
+                  message:
+                    'A backing image with name ' +
+                    msg.result.disk +
+                    ' for the ' +
+                    name +
+                    ' VM is being created.',
+                  type: 'is-warning',
+                  duration: 4000,
+                });
 
                 break;
               }
 
               case 'progress': {
-                let percent = Math.round(msg.result.percent * 100);
+                this.setVmPercent(name, msg.result.percent);
+                break;
+              }
 
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true; // in case committing message is missed
-                    vms[i].percent = percent;
-                    this.experiment.vms = [...vms];
-
-                    break;
-                  }
-                }
-
+              case 'errorCommitting': {
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message:
+                    'Creating a backing image for the ' + name + ' VM failed.',
+                  type: 'is-danger',
+                  duration: 4000,
+                });
                 break;
               }
             }
@@ -2164,66 +2177,59 @@
           }
 
           case 'experiment/vm/memorySnapshot': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
+            const name = this.eventVmName(msg);
+            if (name === null) break;
+
             switch (msg.resource.action) {
               case 'commit': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = false;
-                    let disk = msg.result.disk;
+                if (!this.findVm(name)) break;
+                this.setVmBusy(name, false);
 
-                    this.$buefy.toast.open({
-                      message:
-                        'A memory snapshot was created with name ' +
-                        disk +
-                        ' for the ' +
-                        vm[1] +
-                        ' VM was successfully created.',
-                      type: 'is-success',
-                      duration: 4000,
-                    });
-                    this.experiment.vms = [...vms];
-                    break;
-                  }
-                }
+                this.$buefy.toast.open({
+                  message:
+                    'A memory snapshot with name ' +
+                    msg.result.disk +
+                    ' for the ' +
+                    name +
+                    ' VM was successfully created.',
+                  type: 'is-success',
+                  duration: 4000,
+                });
                 break;
               }
+
               case 'committing': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true;
-                    vms[i].percent = 0;
-                    let disk = msg.result.disk;
+                if (!this.findVm(name)) break;
+                this.setVmBusy(name, true);
 
-                    this.$buefy.toast.open({
-                      message:
-                        'A memory snapshot with name ' +
-                        disk +
-                        ' for the ' +
-                        vm[1] +
-                        ' VM is being created.',
-                      type: 'is-warning',
-                      duration: 4000,
-                    });
-
-                    this.experiment.vms = [...vms];
-                    break;
-                  }
-                }
+                this.$buefy.toast.open({
+                  message:
+                    'A memory snapshot with name ' +
+                    msg.result.disk +
+                    ' for the ' +
+                    name +
+                    ' VM is being created.',
+                  type: 'is-warning',
+                  duration: 4000,
+                });
                 break;
               }
 
               case 'progress': {
-                let percent = Math.round(msg.result.percent * 100);
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true; // in case committing message is missed
-                    vms[i].percent = percent;
-                    this.experiment.vms = [...vms];
-                    break;
-                  }
-                }
+                this.setVmPercent(name, msg.result.percent);
+                break;
+              }
+
+              case 'errorCommitting': {
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message:
+                    'Creating a memory snapshot for the ' +
+                    name +
+                    ' VM failed.',
+                  type: 'is-danger',
+                  duration: 4000,
+                });
                 break;
               }
             }
@@ -2231,55 +2237,43 @@
           }
 
           case 'experiment/vm/screenshot': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
-            if (!vms || vm[0] != this.$route.params.id) {
-              break;
-            }
+            const name = this.eventVmName(msg);
+            if (name === null) break;
 
-            switch (msg.resource.action) {
-              case 'update': {
-                // Screenshots arrive for every subscribed VM every few
-                // seconds: mutate the row in place instead of replacing the
-                // array, which would make b-table re-process every row.
-                const row = vms.find((v) => v.name == vm[1]);
-                if (row) {
-                  row.screenshot = msg.result.screenshot;
-                }
-
-                break;
+            if (msg.resource.action == 'update') {
+              // Screenshots arrive for every subscribed VM every few
+              // seconds: mutate the row in place instead of replacing the
+              // array, which would make b-table re-process every row.
+              const row = this.findVm(name);
+              if (row) {
+                row.screenshot = msg.result.screenshot;
               }
             }
             break;
           }
 
           case 'experiment/vm/capture': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
+            const name = this.eventVmName(msg);
+            if (name === null) break;
+            const row = this.findVm(name);
 
             switch (msg.resource.action) {
               case 'start': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    if (vms[i].captures == null) {
-                      vms[i].captures = [];
-                    }
-
-                    vms[i].captures.push({
-                      vm: vm[1],
-                      interface: msg.result.interface,
-                      filename: msg.result.filename,
-                    });
-
-                    break;
+                if (row) {
+                  if (row.captures == null) {
+                    row.captures = [];
                   }
-                }
 
-                this.experiment.vms = [...vms];
+                  row.captures.push({
+                    vm: name,
+                    interface: msg.result.interface,
+                    filename: msg.result.filename,
+                  });
+                }
 
                 this.$buefy.toast.open({
                   message:
-                    'Packet capture was started for the ' + vm[1] + ' VM.',
+                    'Packet capture was started for the ' + name + ' VM.',
                   type: 'is-success',
                 });
 
@@ -2287,17 +2281,12 @@
               }
 
               case 'stop': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].captures = applyStopCaptureUpdate(
-                      vms[i].captures,
-                      msg.result,
-                    );
-                    break;
-                  }
+                if (row) {
+                  row.captures = applyStopCaptureUpdate(
+                    row.captures,
+                    msg.result,
+                  );
                 }
-
-                this.experiment.vms = [...vms];
 
                 this.$buefy.toast.open({
                   message:
@@ -2305,9 +2294,9 @@
                       ? 'Packet capture was stopped for interface ' +
                         msg.result.interface +
                         ' on the ' +
-                        vm[1] +
+                        name +
                         ' VM.'
-                      : 'Packet capture was stopped for the ' + vm[1] + ' VM.',
+                      : 'Packet capture was stopped for the ' + name + ' VM.',
                   type: 'is-success',
                 });
 
@@ -2319,103 +2308,80 @@
           }
 
           case 'experiment/vm/snapshot': {
-            let vm = msg.resource.name.split('/');
-            let vms = this.experiment.vms;
-            if (!vms) {
-              break;
-            }
+            const name = this.eventVmName(msg);
+            if (name === null || !this.findVm(name)) break;
 
             switch (msg.resource.action) {
               case 'create': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = false;
-                    this.$buefy.toast.open({
-                      message:
-                        'The snapshot for the ' +
-                        vm[1] +
-                        ' VM was successfully created.',
-                      type: 'is-success',
-                      duration: 4000,
-                    });
-                  }
-
-                  this.experiment.vms = [...vms];
-                }
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message:
+                    'The snapshot for the ' +
+                    name +
+                    ' VM was successfully created.',
+                  type: 'is-success',
+                  duration: 4000,
+                });
 
                 break;
               }
 
               case 'creating': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true;
-                    vms[i].percent = 0;
-                    this.$buefy.toast.open({
-                      message:
-                        'A snapshot for the ' + vm[1] + ' VM is being created.',
-                      type: 'is-warning',
-                      duration: 4000,
-                    });
-                  }
-
-                  this.experiment.vms = [...vms];
-                }
+                this.setVmBusy(name, true);
+                this.$buefy.toast.open({
+                  message:
+                    'A snapshot for the ' + name + ' VM is being created.',
+                  type: 'is-warning',
+                  duration: 4000,
+                });
 
                 break;
               }
 
               case 'progress': {
-                let percent = Math.round(msg.result.percent * 100);
-
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].percent = percent;
-                    this.experiment.vms = [...vms];
-                    break;
-                  }
-                }
-
+                this.setVmPercent(name, msg.result.percent);
                 break;
               }
 
               case 'restore': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = false;
-                    this.$buefy.toast.open({
-                      message:
-                        'The ' +
-                        vm[1] +
-                        ' VM was successfully reverted to a previous snapshot.',
-                      type: 'is-success',
-                      duration: 4000,
-                    });
-                  }
-
-                  this.experiment.vms = [...vms];
-                }
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message:
+                    'The ' +
+                    name +
+                    ' VM was successfully reverted to a previous snapshot.',
+                  type: 'is-success',
+                  duration: 4000,
+                });
 
                 break;
               }
 
               case 'restoring': {
-                for (let i = 0; i < vms.length; i++) {
-                  if (vms[i].name == vm[1]) {
-                    vms[i].busy = true;
-                    vms[i].percent = 0;
-                    this.$buefy.toast.open({
-                      message:
-                        'A snapshot for the ' +
-                        vm[1] +
-                        ' VM is being restored.',
-                      type: 'is-warning',
-                      duration: 4000,
-                    });
-                  }
+                this.setVmBusy(name, true);
+                this.$buefy.toast.open({
+                  message:
+                    'A snapshot for the ' + name + ' VM is being restored.',
+                  type: 'is-warning',
+                  duration: 4000,
+                });
 
-                  this.experiment.vms = [...vms];
-                }
+                break;
+              }
+
+              case 'errorCreating':
+              case 'errorRestoring': {
+                this.setVmBusy(name, false);
+                this.$buefy.toast.open({
+                  message:
+                    (msg.resource.action == 'errorCreating'
+                      ? 'Creating a snapshot for the '
+                      : 'Restoring a snapshot for the ') +
+                    name +
+                    ' VM failed.',
+                  type: 'is-danger',
+                  duration: 4000,
+                });
 
                 break;
               }
@@ -2442,11 +2408,6 @@
         return false;
       },
 
-      async updateExperiment() {
-        await this.loader.load();
-        this.isWaiting = false;
-      },
-
       updateDisks(diskType = '') {
         this.disks = [];
         this.isWaiting = true;
@@ -2471,17 +2432,25 @@
       },
 
       updateFiles() {
-        let params = '?filter=' + this.search.filter;
-        params = params + '&sortCol=' + this.filesTable.sortColumn;
-        params = params + '&sortDir=' + this.filesTable.defaultSortDirection;
+        if (
+          !this.roleAllowed('experiments/files', 'list', this.experiment.name)
+        ) {
+          return;
+        }
 
-        if (this.table.isPaginated) {
-          params = params + '&pageNum=' + this.table.currentPage;
-          params = params + '&perPage=' + this.table.perPage;
+        const params = {
+          filter: this.search.filter,
+          sortCol: this.filesTable.sortColumn,
+          sortDir: this.filesTable.defaultSortDirection,
+        };
+
+        if (this.filesTable.isPaginated) {
+          params.pageNum = this.filesTable.currentPage;
+          params.perPage = this.filesTable.perPage;
         }
 
         axiosInstance
-          .get('experiments/' + this.$route.params.id + '/files' + params)
+          .get('experiments/' + this.$route.params.id + '/files', { params })
           .then((resp) => {
             this.files = resp.data.files === null ? [] : resp.data.files;
             this.filesTable.total = resp.data.total;
@@ -2505,12 +2474,8 @@
             }
 
             // Only add successful searches to the search history
-            if (this.files.length > 0) {
-              if (this.searchHistory > this.searchHistoryLength) {
-                this.searchHistory.pop();
-              }
-              this.searchHistory.push(this.search.filter.trim());
-              this.searchHistory = this.getUniqueItems(this.searchHistory);
+            if (this.search.filter && this.files.length > 0) {
+              this.addSearchHistory();
             }
 
             this.isWaiting = false;
@@ -2529,12 +2494,17 @@
 
         axiosInstance
           .get(
-            `experiments/${this.$route.params.id}/files/${file.name}?path=${file.path}`,
-            { headers: { Accept: 'text/plain' } },
+            `experiments/${this.$route.params.id}/files/${encodeURIComponent(file.name)}`,
+            {
+              params: { path: file.path },
+              headers: { Accept: 'text/plain' },
+              // show JSON files as text rather than parsing them
+              responseType: 'text',
+            },
           )
           .then((response) => {
             this.fileViewerModal.title = file.path;
-            this.fileViewerModal.contents = response.dataText;
+            this.fileViewerModal.contents = fileText(file.name, response.data);
             this.fileViewerModal.active = true;
           })
           .catch((err) => {
@@ -2586,15 +2556,21 @@
           return;
         }
 
+        const fullName = this.experiment.name + '/' + vm.name;
         this.expModal.vm = vm;
-        this.expModal.fullName = this.experiment.name + '/' + vm.name;
+        this.expModal.fullName = fullName;
         this.expModal.active = true;
 
         try {
+          // roles without these permissions still get the rest of the details
           const [details, snapshots, forwards] = await Promise.all([
             this.fetchVMDetails(vm),
-            this.fetchVMSnapshots(vm),
-            this.fetchVMForwards(vm),
+            this.roleAllowed('vms/snapshots', 'list', fullName)
+              ? this.fetchVMSnapshots(vm)
+              : { snapshots: [] },
+            this.roleAllowed('vms/forwards', 'list', fullName)
+              ? this.fetchVMForwards(vm)
+              : { listeners: [] },
           ]);
 
           this.expModal.vm = details;
@@ -2620,26 +2596,6 @@
         }
       },
 
-      snapshots(vm) {
-        axiosInstance
-          .get(
-            'experiments/' +
-              this.$route.params.id +
-              '/vms/' +
-              vm.name +
-              '/snapshots',
-          )
-          .then((response) => {
-            if (response.data.snapshots.length > 0) {
-              return true;
-            }
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isWaiting = false;
-          });
-      },
-
       captureSnapshot(name) {
         const { enabled, disabled } = partitionSnapshotVMNames(
           name,
@@ -2649,16 +2605,8 @@
         name = enabled;
         if (name.length === 0) return;
 
-        var dateTime = new Date();
-        var time =
-          dateTime.getFullYear() +
-          '-' +
-          ('0' + (dateTime.getMonth() + 1)).slice(-2) +
-          '-' +
-          ('0' + dateTime.getDate()).slice(-2) +
-          '_' +
-          ('0' + dateTime.getHours()).slice(-2) +
-          ('0' + dateTime.getMinutes()).slice(-2);
+        const t = timestampParts();
+        const time = `${t.year}-${t.month}-${t.day}_${t.hours}${t.minutes}`;
 
         this.$buefy.dialog.confirm({
           title: 'Create a VM Snapshot',
@@ -2726,19 +2674,9 @@
         name = enabled;
         if (name.length === 0) return;
 
-        var now = new Date();
-        var date =
-          now.getFullYear() +
-          '' +
-          ('0' + now.getMonth() + 1).slice(-2) +
-          '' +
-          now.getDate();
-        var time =
-          ('0' + now.getHours()).slice(-2) +
-          '' +
-          ('0' + now.getMinutes()).slice(-2) +
-          '' +
-          ('0' + now.getSeconds()).slice(-2);
+        const t = timestampParts();
+        const date = `${t.year}${t.month}${t.day}`;
+        const time = `${t.hours}${t.minutes}${t.seconds}`;
         let vms = this.experiment.vms;
         name.forEach((arg) => {
           for (let i = 0; i < vms.length; i++) {
@@ -2809,24 +2747,12 @@
             });
           },
         });
-
-        this.diskImageModal.active = true;
       },
 
       queueMemorySnapshotVMs(name) {
-        var now = new Date();
-        var date =
-          now.getFullYear() +
-          '' +
-          ('0' + now.getMonth() + 1).slice(-2) +
-          '' +
-          now.getDate();
-        var time =
-          ('0' + now.getHours()).slice(-2) +
-          '' +
-          ('0' + now.getMinutes()).slice(-2) +
-          '' +
-          ('0' + now.getSeconds()).slice(-2);
+        const t = timestampParts();
+        const date = `${t.year}${t.month}${t.day}`;
+        const time = `${t.hours}${t.minutes}${t.seconds}`;
         if (!Array.isArray(name)) {
           name = [name];
         }
@@ -3015,20 +2941,9 @@
               '/captures',
             { params: params },
           )
-          .then((response) => {
-            if (response.status == 204) {
-              let vms = this.experiment.vms;
-
-              for (let i = 0; i < vms.length; i++) {
-                if (vms[i].name == response.data.name) {
-                  vms[i] = response.data;
-                  break;
-                }
-              }
-
-              this.experiment.vms = [...vms];
-              this.isWaiting = false;
-            }
+          .then(() => {
+            // the row updates from the capture's websocket event
+            this.isWaiting = false;
           })
           .catch((err) => {
             useErrorNotification(err);
@@ -3037,16 +2952,8 @@
       },
 
       handlePcap(vm, iface) {
-        var dateTime = new Date();
-        var time =
-          dateTime.getFullYear() +
-          '-' +
-          ('0' + (dateTime.getMonth() + 1)).slice(-2) +
-          '-' +
-          ('0' + dateTime.getDate()).slice(-2) +
-          '_' +
-          ('0' + dateTime.getHours()).slice(-2) +
-          ('0' + dateTime.getMinutes()).slice(-2);
+        const t = timestampParts();
+        const time = `${t.year}-${t.month}-${t.day}_${t.hours}${t.minutes}`;
 
         axiosInstance
           .get(
@@ -3141,20 +3048,8 @@
                         filename: [vm.name, iface, time].join('_') + '.pcap',
                       },
                     )
-                    .then((response) => {
-                      if (response.status == 204) {
-                        let vms = this.experiment.vms;
-
-                        for (let i = 0; i < vms.length; i++) {
-                          if (vms[i].name == response.data.name) {
-                            vms[i] = response.data;
-                            break;
-                          }
-                        }
-
-                        this.experiment.vms = [...vms];
-                        this.isWaiting = false;
-                      }
+                    .then(() => {
+                      this.isWaiting = false;
                     })
                     .catch((err) => {
                       useErrorNotification(err);
@@ -3163,6 +3058,9 @@
                 },
               });
             }
+          })
+          .catch((err) => {
+            useErrorNotification(err);
           });
       },
 
@@ -3561,7 +3459,8 @@
             vm.name +
             '/redeploy';
 
-          if (vm.inject) {
+          // the select stores the string 'true' or 'false'
+          if (vm.inject === true || vm.inject === 'true') {
             body['injects'] = true;
           }
 
@@ -3686,11 +3585,12 @@
         if (this.getOpticalDiscLabel().indexOf('eject') != -1) {
           axiosInstance.delete(url).catch((err) => useErrorNotification(err));
         } else {
-          url += `?isoPath=${isoPath}`;
-          axiosInstance.post(url).catch((err) => useErrorNotification(err));
+          axiosInstance
+            .post(url, null, { params: { isoPath } })
+            .catch((err) => useErrorNotification(err));
         }
 
-        this.resetOpticalDiscModal;
+        this.resetOpticalDiscModal();
       },
 
       resetExpModal() {
@@ -3736,19 +3636,17 @@
       },
 
       startApps(apps) {
-        apps = apps.join();
-        this.apps = apps;
+        this.triggeredApps.push(...apps);
 
         axiosInstance
-          .post(
-            'experiments/' +
-              this.$route.params.id +
-              '/trigger' +
-              '?apps=' +
-              apps,
-          )
+          .post('experiments/' + this.$route.params.id + '/trigger', null, {
+            params: { apps: apps.join() },
+          })
           .catch((err) => {
             useErrorNotification(err);
+            this.triggeredApps = this.triggeredApps.filter(
+              (a) => !apps.includes(a),
+            );
             this.isWaiting = false;
           });
 
@@ -3863,6 +3761,14 @@
         });
       },
 
+      addSearchHistory() {
+        if (this.searchHistory.length >= this.searchHistoryLength) {
+          this.searchHistory.pop();
+        }
+        this.searchHistory.push(this.search.filter.trim());
+        this.searchHistory = this.getUniqueItems(this.searchHistory);
+      },
+
       getUniqueItems(inputArray) {
         let arrayHash = {};
 
@@ -3955,10 +3861,20 @@
 
       async createPortForward() {
         let url = `experiments/${this.$route.params.id}/vms/${this.portForwardModal.vmName}/forwards`;
-        let params = `?src=${this.portForwardModal.srcPort}&host=${this.portForwardModal.dstHost}&dst=${this.portForwardModal.dstPort}`;
+        const params = {
+          src: this.portForwardModal.srcPort,
+          host: this.portForwardModal.dstHost,
+          dst: this.portForwardModal.dstPort,
+        };
 
         try {
-          await axiosInstance.post(url + params);
+          await axiosInstance.post(url, null, { params });
+
+          if (
+            !this.roleAllowed('vms/forwards', 'list', this.expModal.fullName)
+          ) {
+            return;
+          }
 
           let resp = await axiosInstance.get(url);
 
@@ -3983,10 +3899,10 @@
 
       async deletePortForward(vm, forward) {
         let url = `experiments/${this.$route.params.id}/vms/${vm}/forwards`;
-        let params = `?host=${forward.dstHost}&dst=${forward.dstPort}`;
+        const params = { host: forward.dstHost, dst: forward.dstPort };
 
         try {
-          await axiosInstance.delete(url + params);
+          await axiosInstance.delete(url, { params });
 
           let resp = await axiosInstance.get(url);
 
@@ -4093,10 +4009,64 @@
         }
       },
 
+      // Otherwise the server keeps screenshotting these VMs, and each
+      // screenshot holds up every other minimega command.
+      unsubscribeVms() {
+        sendWsMsg({
+          resource: {
+            type: 'experiment/vms',
+            name: this.experiment?.name ?? '',
+            action: 'unsubscribe',
+          },
+        });
+      },
+
+      // a hidden browser tab needs no screenshots; on return the VMs are
+      // listed again, which brings fresh ones
+      onVisibilityChange() {
+        if (!this.experiment.name) return;
+        if (document.hidden) {
+          this.unsubscribeVms();
+        } else {
+          this.updateTable();
+        }
+      },
+
+      // Sizes the netflow table to the room left in the window, so the table
+      // scrolls instead of the page and the footer stays on screen.
+      fitNetflowView() {
+        const view = this.$refs.netflowView;
+        const main = view?.closest('main');
+        const footer = document.querySelector('.app-footer');
+        if (!main || !footer || view.offsetParent === null) return;
+
+        const bottom = (el) => el.getBoundingClientRect().bottom;
+        const viewBox = view.getBoundingClientRect();
+        // the main area stretches to push the footer down, so measure the
+        // page's content in it rather than the area itself
+        const contentBottom = Math.max(...[...main.children].map(bottom));
+        const mainStyle = getComputedStyle(main);
+        const mainEnd =
+          parseFloat(mainStyle.paddingBottom) +
+          parseFloat(mainStyle.borderBottomWidth);
+        // the footer's text floats outside its box, so measure every part
+        const footerBox = footer.getBoundingClientRect();
+        const footerHeight =
+          Math.max(...[footer, ...footer.querySelectorAll('*')].map(bottom)) -
+          footerBox.top +
+          Math.max(0, footerBox.top - bottom(main));
+        const below = contentBottom - viewBox.bottom + mainEnd + footerHeight;
+        const room =
+          window.innerHeight - (viewBox.top + window.scrollY) - below;
+        this.netflowMaxHeight = `${Math.max(Math.floor(room), 100)}px`;
+      },
+
       // keeps the most recent NETFLOW_MAX_LINES lines
       addNetflowLines(lines) {
         if (lines.length === 0) return;
         const all = this.netflow.lines;
+        // the table appears with the first line
+        if (all.length === 0) this.$nextTick(this.fitNetflowView);
         all.push(...lines);
         if (all.length > NETFLOW_MAX_LINES) {
           all.splice(0, all.length - NETFLOW_MAX_LINES);
@@ -4131,14 +4101,14 @@
         // Clear search history and
         // search filter when switching tabs
         this.searchHistory = [];
-        this.searchName = '';
+        this.search.filter = '';
 
         if (newVal == 0 || newVal == 2) {
           this.searchPlaceholder = 'Find a VM';
-          this.updateExperiment();
+          if (this.experiment.name) this.updateTable();
         } else if (newVal == NETFLOW_TAB) {
           this.searchPlaceholder = 'Search netflow';
-          this.search.filter = '';
+          this.$nextTick(this.fitNetflowView);
         } else {
           this.searchPlaceholder = 'Find a File';
           this.updateFiles();
@@ -4156,9 +4126,10 @@
         screenshotsDue: false,
         screenshotsTimer: null,
         search: {
-          vms: [],
           filter: '',
         },
+        // whether the websocket has sent the VM table yet
+        vmsLoaded: false,
         table: {
           isPaginated: loadPaginate('running-vms'),
           isPaginationSimple: true,
@@ -4200,17 +4171,11 @@
           vmName: null,
           vmFromNet: null,
           vmNetIndex: null,
-          vmNet: [],
         },
         redeployModal: {
           active: false,
           vm: [],
           actionsQueue: [],
-          name: null,
-          cpus: null,
-          ram: null,
-          disk: null,
-          inject: false,
         },
         diskImageModal: {
           active: false,
@@ -4243,7 +4208,8 @@
           disc: '',
           vmName: null,
         },
-        apps: null,
+        // apps this page triggered that have not reported back
+        triggeredApps: [],
         experiment: [],
         files: [],
         filesLoaded: false,
@@ -4259,12 +4225,11 @@
           kill: 2,
           redeploy: 3,
           createBacking: 4,
-          createSnapshot: 5,
+          captureSnapshot: 5,
           restart: 6,
           shutdown: 7,
           resetState: 8,
           createMemorySnapshot: 9,
-          recordScreenshots: 10,
         },
         searchHistory: [],
         searchHistoryLength: 10,
@@ -4317,6 +4282,8 @@
         },
         activeTab: 0,
         vncZoom: 4,
+        // sized to the window so the page never scrolls; null until measured
+        netflowMaxHeight: null,
         netflow: {
           tooltip: 'Start Netflow Capture',
           capturing: false,
@@ -4347,7 +4314,7 @@
   /* scrolls within the window, so the page below stays reachable */
   .netflow-view {
     max-height: calc(100vh - 18rem);
-    min-height: 10rem;
+    min-height: 100px;
     overflow: auto;
   }
 
@@ -4372,9 +4339,25 @@
     opacity: 0.8;
   }
 
+  .vnc-tile-name {
+    color: whitesmoke;
+    display: block;
+    background-color: grey;
+    text-align: center;
+    padding: 2px 0px;
+  }
+
   .vm-modal-list-row {
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+
+  /* the configs viewer's colors */
+  .file-viewer {
+    background-color: #686868;
+    color: whitesmoke;
+    font-family: monospace;
+    white-space: pre;
   }
 </style>

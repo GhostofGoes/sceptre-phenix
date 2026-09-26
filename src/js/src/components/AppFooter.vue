@@ -4,7 +4,7 @@ component.
 -->
 
 <template>
-  <div>
+  <div class="app-footer">
     <hr class="mb-4" />
     <div class="container is-fluid">
       <small>

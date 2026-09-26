@@ -503,8 +503,10 @@
           case 'commit':
             return (
               disk.inUse ||
-              (disk.backingImages && disk.backingImages.length == 0) ||
-              disk.kind != 'VM'
+              !disk.backingImages?.length ||
+              disk.kind != 'VM' ||
+              // committing writes into the backing image
+              !roleAllowed('disks', 'update', disk.backingImages[0])
             );
           case 'rebase':
             return (

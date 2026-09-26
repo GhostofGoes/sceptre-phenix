@@ -146,6 +146,11 @@ func (r *Role) AddPolicy(res, rn, v []string) {
 }
 
 func (r Role) Allowed(resource, verb string, names ...string) bool {
+	// the zero Role (no role in the request context) allows nothing
+	if r.Spec == nil {
+		return false
+	}
+
 	for _, policy := range r.policiesForResource(resource) {
 		if policy.verbAllowed(verb) {
 			if len(names) == 0 {

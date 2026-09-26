@@ -5,6 +5,10 @@ import { ToastProgrammatic as Toast } from 'buefy';
 
 let globalWs: WebSocket = null;
 const wsListeners: Function[] = [];
+const reconnectListeners: (() => void)[] = [];
+
+// set once the socket has opened, so later opens are reconnects
+let everConnected: boolean = false;
 
 var shouldBeConnected: boolean = false;
 var errorToast = null;
@@ -57,6 +61,19 @@ export function connectWebsocket(): void {
     // flush anything queued while the socket was connecting
     const queued = pendingMessages.splice(0);
     queued.forEach((msg) => globalWs.send(msg));
+
+    // the server forgets a client's subscriptions when its socket closes
+    const reconnected = everConnected;
+    everConnected = true;
+    if (reconnected) {
+      reconnectListeners.slice().forEach((listener) => {
+        try {
+          listener();
+        } catch (err) {
+          console.error('websocket reconnect listener error', err);
+        }
+      });
+    }
   };
 
   globalWs.onclose = () => {
@@ -130,6 +147,18 @@ export function removeWsHandler(f: (msg: object) => void): void {
   if (i >= 0) {
     wsListeners.splice(i, 1);
   }
+}
+
+// Calls f each time the socket reopens after a reconnect (not on the first
+// connect). Returns a function that removes it.
+export function onWsReconnect(f: () => void): () => void {
+  reconnectListeners.push(f);
+  return () => {
+    const i = reconnectListeners.indexOf(f);
+    if (i >= 0) {
+      reconnectListeners.splice(i, 1);
+    }
+  };
 }
 
 function globalWsMessageHandler(event: MessageEvent): void {

@@ -27,17 +27,11 @@ side will pass.
           v-model="searchName"
           placeholder="Find a VM"
           icon="search"
-          :data="filteredData"
-          @select="(option) => (filtered = option)">
+          :data="filteredData">
           <template #empty>No results found</template>
         </b-autocomplete>
         <p class="control">
-          <button
-            class="button input-button"
-            @click="
-              searchVMs('');
-              filesTable.category = null;
-            ">
+          <button class="button input-button" @click="searchName = ''">
             <b-icon icon="window-close"></b-icon>
           </button>
         </p>
@@ -74,49 +68,24 @@ side will pass.
     <div v-for="(chunk, chunkIndex) in chunkedVMs" :key="chunkIndex">
       <div class="tile is-ancestor">
         <div class="tile is-parent">
-          <template v-if="exp == null">
-            <div
-              v-for="v in chunk"
-              :key="vmFullName(v)"
-              class="tile is-child box is-4">
-              <p class="title" style="font-size: medium">
-                {{ vmFullName(v) }}
-              </p>
-              <figure class="image">
-                <template v-if="v.running">
-                  <a :href="vncLoc(v)" target="_blank">
-                    <img :src="v.screenshot" />
-                  </a>
-                </template>
-                <template v-else>
-                  <img src="@/assets/imgs/not-running.png" />
-                </template>
-              </figure>
-            </div>
-          </template>
-          <template v-else>
-            <div
-              v-for="v in chunk"
-              :key="vmFullName(v)"
-              class="tile is-child box is-4">
-              <p
-                v-if="v.experiment === exp"
-                class="title"
-                style="font-size: medium">
-                {{ vmFullName(v) }}
-              </p>
-              <figure class="image">
-                <template v-if="v.running && v.experiment === exp">
-                  <a :href="vncLoc(v)" target="_blank">
-                    <img :src="v.screenshot" />
-                  </a>
-                </template>
-                <template v-else-if="v.experiment === exp">
-                  <img src="@/assets/imgs/not-running.png" />
-                </template>
-              </figure>
-            </div>
-          </template>
+          <div
+            v-for="v in chunk"
+            :key="vmFullName(v)"
+            class="tile is-child box is-4">
+            <p class="title" style="font-size: medium">
+              {{ vmFullName(v) }}
+            </p>
+            <figure class="image">
+              <template v-if="v.running">
+                <a :href="vncLoc(v)" target="_blank">
+                  <img :src="v.screenshot" />
+                </a>
+              </template>
+              <template v-else>
+                <img src="@/assets/imgs/not-running.png" />
+              </template>
+            </figure>
+          </div>
         </div>
       </div>
     </div>
@@ -127,6 +96,7 @@ side will pass.
   import { chunk, sortBy } from 'lodash-es';
   import { createPageLoader } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
+  import { inForeground } from '@/utils/foreground.js';
   import { usePhenixStore } from '@/store';
   export default {
     beforeUnmount() {
@@ -154,7 +124,7 @@ side will pass.
           });
         }
 
-        var name_re = new RegExp(this.searchName, 'i');
+        const term = (this.searchName ?? '').toLowerCase();
         var data = [];
 
         for (let i in vms) {
@@ -165,7 +135,7 @@ side will pass.
             name = vm.experiment + '_' + vm.name;
           }
 
-          if (name.match(name_re)) {
+          if (name.toLowerCase().includes(term)) {
             data.push(vm);
           }
         }
@@ -210,12 +180,12 @@ side will pass.
     methods: {
       periodicUpdateVms() {
         this.update = setInterval(() => {
-          // skip polling (and its screenshots) while the tab is in the
-          // background, or while the last poll is still waiting on the server
-          if (!document.hidden && !this.loader.loading) {
+          // skip polling (and its screenshots) unless the page is focused,
+          // or while the last poll is still waiting on the server
+          if (inForeground() && !this.loader.loading) {
             this.loader.load();
           }
-        }, 30000);
+        }, 60000);
       },
 
       vmFullName(vm) {
@@ -240,10 +210,10 @@ side will pass.
 
     data() {
       return {
-        exp: null,
+        // opened from an experiment's page, start with only its VMs
+        exp: this.$route.params.id ?? null,
         vms: [],
         searchName: '',
-        filtered: null,
       };
     },
   };

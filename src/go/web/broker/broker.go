@@ -9,6 +9,7 @@ import (
 	"phenix/api/vm"
 	"phenix/app"
 	putil "phenix/util"
+	"phenix/util/plog"
 	"phenix/util/pubsub"
 	bt "phenix/web/broker/brokertypes"
 	"phenix/web/util"
@@ -56,29 +57,17 @@ func Start() {
 			}
 		case pub := <-delayedSub:
 			delayed, _ := pub.(string)
-			names := strings.Split(delayed, "/")
 
-			v, err := vm.Get(names[0], names[1])
-			if err != nil {
+			expName, vmName, ok := strings.Cut(delayed, "/")
+			if !ok {
+				plog.Error(plog.TypeSystem, "unexpected delayed-start publication", "name", delayed)
+
 				continue
 			}
 
-			screenshot, err := util.GetScreenshot(names[0], names[1], "215")
-			if err == nil {
-				v.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(
-					screenshot,
-				)
-			}
-
-			body, err := marshaler.Marshal(util.VMToProtobuf(names[0], *v, nil))
-			if err != nil {
-				continue
-			}
-
-			policy := bt.NewRequestPolicy("vms/start", "update", strings.Join(names, "_"))
-			resource := bt.NewResource("experiment/vm", delayed, "start")
-
-			broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: body}
+			// asks minimega for the VM and a screenshot, so it runs on its own
+			// rather than holding up every other client's messages
+			go publishDelayedStart(delayed, expName, vmName)
 		case cli := <-register:
 			clients[cli] = true
 		case cli := <-unregister:
@@ -132,4 +121,31 @@ func errorResult(err error) []byte {
 	result, _ := json.Marshal(map[string]string{triggerStateError: msg})
 
 	return result
+}
+
+// publishDelayedStart tells clients a VM held back by delayed start is now
+// running.
+func publishDelayedStart(delayed, expName, vmName string) {
+	v, err := vm.Get(expName, vmName)
+	if err != nil {
+		return
+	}
+
+	screenshot, err := util.GetScreenshot(expName, vmName, "215")
+	if err == nil {
+		v.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(
+			screenshot,
+		)
+	}
+
+	body, err := marshaler.Marshal(util.VMToProtobuf(expName, *v, nil))
+	if err != nil {
+		return
+	}
+
+	// RBAC resource names for VMs are exp/vm, as in the REST handlers.
+	policy := bt.NewRequestPolicy("vms/start", "update", delayed)
+	resource := bt.NewResource("experiment/vm", delayed, "start")
+
+	broadcast <- bt.Publish{RequestPolicy: policy, Resource: resource, Result: body}
 }

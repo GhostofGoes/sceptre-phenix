@@ -171,8 +171,7 @@
             v-model="searchName"
             placeholder="Find an Experiment"
             icon="search"
-            :data="filteredData"
-            @select="(option) => (filtered = option)">
+            :data="filteredData">
             <template #empty> No results found </template>
           </b-autocomplete>
           <p class="control">
@@ -221,7 +220,11 @@
             sortable
             header-class="sort-inline"
             v-slot="props">
-            <template v-if="updating(props.row.status)">
+            <template
+              v-if="
+                updating(props.row.status) ||
+                !roleAllowed('experiments', 'get', props.row.name)
+              ">
               {{ props.row.name }}
             </template>
             <template v-else>
@@ -255,7 +258,13 @@
               </section>
             </template>
             <template
-              v-else-if="roleAllowed('experiments', 'update', props.row.name)">
+              v-else-if="
+                roleAllowed(
+                  props.row.running ? 'experiments/stop' : 'experiments/start',
+                  'update',
+                  props.row.name,
+                )
+              ">
               <b-tooltip
                 :label="getExpControlLabel(props.row.name, props.row.status)"
                 type="is-dark">
@@ -434,12 +443,12 @@
       filteredExperiments: function () {
         let experiments = this.experiments;
 
-        var name_re = new RegExp(this.searchName, 'i');
+        const term = (this.searchName ?? '').toLowerCase();
         var data = [];
 
         for (let i in experiments) {
           let exp = experiments[i];
-          if (exp.name.match(name_re)) {
+          if (exp.name.toLowerCase().includes(term)) {
             exp.start_time = exp.start_time == '' ? 'N/A' : exp.start_time;
             data.push(exp);
           }
@@ -536,8 +545,8 @@
 
             let toast = `The ${msg.resource.name} experiment has been started`;
 
-            if (msg.resource.delayed_vms > 0) {
-              toast = `${toast} (with ${msg.resource.delayed_vms} delayed VMs).`;
+            if (msg.result.delayed_vms > 0) {
+              toast = `${toast} (with ${msg.result.delayed_vms} delayed VMs).`;
             } else {
               toast = `${toast}.`;
             }
@@ -938,7 +947,7 @@
 
     directives: {
       focus: {
-        inserted(el) {
+        mounted(el) {
           if (el.tagName == 'INPUT') {
             el.focus();
           } else {
@@ -970,10 +979,6 @@
         experiments: [],
         topologies: [],
         searchName: '',
-        filtered: null,
-        isMenuActive: false,
-        action: null,
-        rowName: null,
         isWaiting: false, // set while a change is being saved
         deleting: {}, // names of the experiments being deleted
         loaded: false, // false until the first list arrives

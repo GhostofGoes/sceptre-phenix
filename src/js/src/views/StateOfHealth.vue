@@ -611,7 +611,14 @@
               disabled
               >{{ sohState }}</b-button
             >
-            <b-button v-else @click="execSoH" type="is-light">Run SOH</b-button>
+            <b-button
+              v-else-if="
+                roleAllowed('experiments/trigger', 'create', $route.params.id)
+              "
+              @click="execSoH"
+              type="is-light"
+              >Run SOH</b-button
+            >
           </div>
           <div
             style="

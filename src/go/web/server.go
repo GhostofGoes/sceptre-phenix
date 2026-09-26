@@ -138,6 +138,7 @@ func Start(opts ...ServerOption) error {
 
 	if o.featured("tunneler-download") {
 		plog.Info(plog.TypeSystem, "Serving phēnix tunneler downloads")
+		router.HandleFunc("/downloads/tunneler", forward.ListTunnelers).Methods("GET")
 		router.HandleFunc("/downloads/tunneler/{name}", forward.GetTunneler).Methods("GET")
 	}
 

@@ -75,7 +75,7 @@
             {{ props.row.status }}
           </span>
           <b-tooltip
-            v-if="roleAllowed('experiments/start', 'update', props.row.name)"
+            v-if="expControlAllowed(props.row)"
             :label="expControlLabel(props.row)"
             type="is-dark">
             <button
@@ -332,6 +332,14 @@
       // a run's name, or its number when it has none
       runName(exp, run) {
         return exp.scorch.runs?.[run] || `run ${run}`;
+      },
+
+      expControlAllowed(exp) {
+        return roleAllowed(
+          exp.running ? 'experiments/stop' : 'experiments/start',
+          'update',
+          exp.name,
+        );
       },
 
       scorchControlAllowed(exp) {
