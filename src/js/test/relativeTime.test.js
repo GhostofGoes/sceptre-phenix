@@ -22,6 +22,6 @@ test('a time in the future reads as such', () => {
   expect(relativeTime('2026-09-25T14:00:00Z', now)).toBe('in 2 hours');
 });
 
-test('an unparseable time gives nothing', () => {
+test('an unparsable time gives nothing', () => {
   expect(relativeTime('not a time', now)).toBe('');
 });
