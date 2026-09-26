@@ -845,15 +845,6 @@
       <b-field
         v-if="roleAllowed('experiments/files', 'list', experiment.name)"
         position="is-right">
-        <b-field>
-          <b-tooltip :label="netflow.tooltip" type="is-light">
-            <button
-              :class="`button ${netflow.capturing ? 'is-danger' : 'is-success'}`"
-              @click="handleNetflow(!netflow.capturing)">
-              <b-icon icon="circle-nodes"></b-icon>
-            </button>
-          </b-tooltip>
-        </b-field>
         <b-field v-if="activeTab == 1">
           <b-tooltip label="search on a specific category" type="is-light">
             <b-select
@@ -898,6 +889,17 @@
               class="button is-danger"
               icon-right="stop"
               @click="stop">
+            </b-button>
+          </b-tooltip>
+        </b-field>
+        <b-field
+          v-if="roleAllowed('experiments/netflow', 'create', experiment.name)">
+          <b-tooltip :label="netflow.tooltip" type="is-light">
+            <b-button
+              :class="netflow.capturing ? 'is-danger' : 'is-success'"
+              :loading="netflow.starting"
+              icon-left="circle-nodes"
+              @click="handleNetflow(!netflow.capturing)">
             </b-button>
           </b-tooltip>
         </b-field>
@@ -1118,6 +1120,8 @@
               v-if="isDelayed()"
               field="delayed"
               label="Delay"
+              sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <b-tag
@@ -1247,7 +1251,9 @@
               v-if="columnVisibility.uptime"
               field="uptime"
               label="Uptime"
-              width="165"
+              sortable
+              header-class="sort-inline"
+              cell-class="nowrap-cell"
               v-slot="props">
               <template v-if="props.row.external"> unknown </template>
               <template v-else>
@@ -1431,8 +1437,20 @@
             }}</template>
           </div>
         </b-tab-item>
-        <b-tab-item label="Netflow" icon="circle-nodes" v-if="netflow.data">
-          <div class="control">
+        <b-tab-item
+          label="Netflow"
+          icon="circle-nodes"
+          v-if="roleAllowed('experiments/netflow', 'get', experiment.name)">
+          <div
+            v-if="!netflow.data"
+            class="content has-text-white has-text-centered">
+            {{
+              netflow.starting
+                ? 'Starting netflow capture…'
+                : 'No netflow captures yet. Start one with the netflow button above.'
+            }}
+          </div>
+          <div v-else class="control">
             <textarea
               class="textarea"
               style="font-family: 'Courier New'"
@@ -1476,6 +1494,11 @@
   import notAvailableImg from '@/assets/imgs/not-available.png';
   import delayedImg from '@/assets/imgs/delayed.png';
   import notRunningImg from '@/assets/imgs/not-running.png';
+  import loadingScreenshotImg from '@/assets/imgs/loading-screenshot.svg';
+
+  // how long a VM shows "Loading Screenshot" before "Not Available"; minimega
+  // takes screenshots one at a time, so large experiments need a while
+  const SCREENSHOT_WAIT_MS = 60000;
 
   export default {
     components: { BSlider, BSliderTick },
@@ -1486,6 +1509,7 @@
 
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
+      clearTimeout(this.screenshotsTimer);
       // otherwise the server keeps screenshotting these VMs every few seconds,
       // tying up minimega for every other page
       sendWsMsg({
@@ -1637,7 +1661,8 @@
         if (vm.external) {
           return externalImg;
         } else if (vm.running && !vm.busy && !vm.screenshot) {
-          return notAvailableImg;
+          // the server sends screenshots after the VM list
+          return this.screenshotsDue ? notAvailableImg : loadingScreenshotImg;
         } else if (vm.delayed_start && vm.state == 'BUILDING') {
           return delayedImg;
         } else if (vm.running && !vm.busy && vm.screenshot) {
@@ -1778,8 +1803,22 @@
               return;
             }
 
-            this.experiment.vms = [...msg.result.vms];
+            // screenshots follow the list, so keep the ones already shown
+            const shots = new Map(
+              (this.experiment.vms ?? []).map((vm) => [vm.name, vm.screenshot]),
+            );
+            this.experiment.vms = msg.result.vms.map((vm) => ({
+              ...vm,
+              screenshot: vm.screenshot || shots.get(vm.name),
+            }));
             this.table.total = msg.result.total;
+
+            // a VM still without a screenshot by then has none to show
+            this.screenshotsDue = false;
+            clearTimeout(this.screenshotsTimer);
+            this.screenshotsTimer = setTimeout(() => {
+              this.screenshotsDue = true;
+            }, SCREENSHOT_WAIT_MS);
 
             // keep the cached page current, unless it is a filtered view
             if (!this.search.filter && !this.table.isPaginated) {
@@ -3878,11 +3917,13 @@
           // the websocket upgrade 404s until the backend registers the
           // capture, so wait for the POST to finish before connecting
           if (create) {
+            this.netflow.starting = true;
             try {
               await axiosInstance.post(
                 `experiments/${this.$route.params.id}/netflow`,
               );
             } catch (err) {
+              this.netflow.starting = false;
               useErrorNotification(err);
               return;
             }
@@ -3903,6 +3944,9 @@
           let url = proto + location.host + path;
 
           this.socket = new WebSocket(url);
+          const started = () => (this.netflow.starting = false);
+          this.socket.addEventListener('open', started);
+          this.socket.addEventListener('error', started);
           this.socket.addEventListener('message', (event) => {
             // append once per frame: each append re-renders the whole
             // (ever-growing) textarea
@@ -3980,6 +4024,9 @@
 
     data() {
       return {
+        // whether VMs still without screenshots have waited long enough
+        screenshotsDue: false,
+        screenshotsTimer: null,
         search: {
           vms: [],
           filter: '',
@@ -4145,6 +4192,7 @@
         netflow: {
           tooltip: 'Start Netflow Capture',
           capturing: false,
+          starting: false,
           socket: null,
           data: '',
         },

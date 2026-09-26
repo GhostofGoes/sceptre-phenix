@@ -32,6 +32,7 @@ import (
 	"phenix/api/settings"
 	"phenix/api/vm"
 	"phenix/app"
+	"phenix/types"
 	putil "phenix/util"
 	"phenix/util/common"
 	"phenix/util/mm"
@@ -90,6 +91,8 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 
 	allowed := []*proto.Experiment{}
 
+	busy := anyExperimentLocked(experiments)
+
 	for _, exp := range experiments {
 		if !role.Allowed("experiments", "list", exp.Metadata.Name) {
 			continue
@@ -109,17 +112,7 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: limit per-experiment VMs based on RBAC
 
-		vms, err := vm.List(exp.Spec.ExperimentName())
-		if err != nil {
-			plog.Error(
-				plog.TypeSystem,
-				"listing VMs for experiment",
-				"exp",
-				exp.Spec.ExperimentName(),
-				"err",
-				err,
-			)
-		}
+		vms := listExperimentVMs(exp, busy && size == "")
 
 		if exp.Running() && size != "" {
 			for i, v := range vms {
@@ -142,7 +135,12 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		allowed = append(allowed, util.ExperimentToProtobuf(exp, status, vms))
+		pb := util.ExperimentToProtobuf(exp, status, vms)
+		if status == cache.StatusStarting {
+			pb.Percent = StartProgress(exp.Metadata.Name)
+		}
+
+		allowed = append(allowed, pb)
 	}
 
 	body, err := marshaler.Marshal(&proto.ExperimentList{Experiments: allowed})
@@ -158,6 +156,34 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, _ = w.Write(body)
+}
+
+// anyExperimentLocked reports whether any of the experiments is starting or
+// stopping. That keeps minimega busy for as long as it takes, so asking it
+// about VMs meanwhile would stall the experiment list until it finishes.
+func anyExperimentLocked(experiments []types.Experiment) bool {
+	for _, exp := range experiments {
+		if cache.IsExperimentLocked(exp.Metadata.Name) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// listExperimentVMs lists the experiment's VMs, from its topology alone when
+// minimega is busy.
+func listExperimentVMs(exp types.Experiment, busy bool) []mm.VM {
+	if busy {
+		return vm.ListConfigured(exp)
+	}
+
+	vms, err := vm.List(exp.Spec.ExperimentName())
+	if err != nil {
+		plog.Error(plog.TypeSystem, "listing VMs for experiment", "exp", exp.Spec.ExperimentName(), "err", err)
+	}
+
+	return vms
 }
 
 // CreateExperiment - POST /experiments.

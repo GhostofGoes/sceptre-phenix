@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,6 +18,7 @@ import (
 
 	"phenix/api/experiment"
 	"phenix/api/vm"
+	ifaces "phenix/types/interfaces"
 	"phenix/util/cache"
 	"phenix/util/mm"
 	"phenix/util/plog"
@@ -69,6 +72,10 @@ type Client struct {
 	// the WebSocket connection.
 	vms  []vmScope
 	vmMu sync.RWMutex
+
+	// held while screenshots are being pushed; shotAgain asks for another round
+	shotMu    sync.Mutex
+	shotAgain atomic.Bool
 }
 
 func NewClient(role rbac.Role, conn *websocket.Conn) *Client {
@@ -422,23 +429,9 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 					}
 				}
 
+				// Screenshots follow the list (see updateScreenshots): minimega
+				// takes them one at a time, which would hold back the whole list.
 				if c.role.Allowed("vms", "list", fmt.Sprintf("%s/%s", expName, vm.Name)) {
-					if vm.Running {
-						screenshot, err := util.GetScreenshot(expName, vm.Name, screenshotSize)
-						if err != nil {
-							plog.Error(
-								plog.TypeSystem,
-								"getting screenshot for WebSocket client",
-								"err",
-								err,
-							)
-						} else {
-							vm.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(
-								screenshot,
-							)
-						}
-					}
-
 					allowed = append(allowed, vm)
 				}
 			}
@@ -452,7 +445,11 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 
 			payload = map[string]any{"total": len(allowed)}
 
-			if sort != "" {
+			switch sort {
+			case "":
+			case "delayed":
+				sortByDelay(allowed, exp.Spec.Topology(), asc)
+			default:
 				allowed.SortBy(sort, asc)
 			}
 
@@ -498,8 +495,52 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 				Resource: bt.NewResource("experiment/vms", expName, "list"),
 				Result:   body,
 			}
+
+			go c.updateScreenshots()
 		}
 	}
+}
+
+// sortByDelay orders VMs by the delay holding back their start, as the UI's
+// Delay column shows it: only for VMs still waiting to start. Timer delays
+// compare by duration so "timer:30s" sorts before "timer:5m".
+func sortByDelay(vms mm.VMs, topo ifaces.TopologySpec, asc bool) {
+	delays := make(map[string]string, len(vms))
+
+	for _, vm := range vms {
+		if vm.State != "BUILDING" {
+			continue
+		}
+
+		if node := topo.FindNodeByName(vm.Name); node != nil {
+			delays[vm.Name] = node.Delayed()
+		}
+	}
+
+	sort.SliceStable(vms, func(i, j int) bool {
+		a, b := delays[vms[i].Name], delays[vms[j].Name]
+		if !asc {
+			a, b = b, a
+		}
+
+		return delayLess(a, b)
+	})
+}
+
+func delayLess(a, b string) bool {
+	ta, aTimer := strings.CutPrefix(a, "timer:")
+	tb, bTimer := strings.CutPrefix(b, "timer:")
+
+	if aTimer && bTimer {
+		da, errA := time.ParseDuration(ta)
+		db, errB := time.ParseDuration(tb)
+
+		if errA == nil && errB == nil {
+			return da < db
+		}
+	}
+
+	return a < b
 }
 
 func (c *Client) write() {
@@ -611,7 +652,27 @@ func (c *Client) clearVMs() {
 	c.vms = nil
 }
 
+// updateScreenshots pushes screenshots of the VMs in view. The ticker and a
+// new VM list both call it. A call while one is running asks that one to go
+// again once it finishes, so a new list's VMs are not left waiting.
 func (c *Client) updateScreenshots() {
+	c.shotAgain.Store(true)
+
+	// a request made just as the running round let go is picked up here
+	for c.shotAgain.Load() {
+		if !c.shotMu.TryLock() {
+			return
+		}
+
+		for c.shotAgain.Swap(false) {
+			c.pushScreenshots()
+		}
+
+		c.shotMu.Unlock()
+	}
+}
+
+func (c *Client) pushScreenshots() {
 	names := make(map[string][]string)
 
 	c.vmMu.RLock()

@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: On the experiment page the VM rows appear first and screenshots fill in as the server takes them, with a loading image meanwhile. Uptime is narrower, and Uptime and Delay can be sorted. The Netflow tab is always shown (saying when there are no captures yet), the netflow button shows a spinner while a capture starts and sits left of the State of Health button.
+- **API**: Experiment listings report start progress (`percent`) for starting experiments. VM lists sent over the WebSocket no longer carry screenshots; they follow as `experiment/vm/screenshot` updates. VM lists can sort by `delayed`.
+- **Web UI**: Disks explain in tooltips which experiments use a disk and why an action is unavailable. The footer documentation button uses a book icon.
 - **Web UI**: The Disks table has Size on Disk and a sortable Virtual Size column, an Actions column (snapshot, clone, download, rename, delete), and a narrower Name, In Use and search box. Sort arrows now sit beside the heading in every table.
 - **Web UI**: A help button in the footer links to the phēnix documentation, and the Tunneler page links to its documentation page.
 - **API**: Disk listings name the experiments that use each disk (`experiments`, with whether each is running), including disks that back the images an experiment uses. This replaces the `experiment` field, which was never set.
@@ -21,6 +24,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Refreshing the Experiments page while a large experiment starts no longer hangs on "Loading experiments": the list no longer waits on minimega while an experiment starts or stops, and shows the starting experiment's progress.
+- **Web UI**: Sorting VMs on the experiment page no longer waits for every VM to be screenshotted.
 - **Web UI**: A disk's details now show the experiments using it, marking stopped ones, instead of always "N/A". Size sorting on Disks is correct for sizes in bytes and minimega's size format.
 - **Web UI**: Sorting Hosts by number of VMs now works.
 - **Web UI**: Configs open for viewing and editing in well under a second instead of several. The viewer reuses the config data it already fetched (and fetches on hover), the editor reuses the viewer's copy, and the Ace editor loads in the background in one round of requests. Download buttons show a spinner at once.

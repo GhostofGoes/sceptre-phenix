@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"phenix/api/experiment"
+	"phenix/types"
 	"phenix/util/common"
 	"phenix/util/file"
 	"phenix/util/mm"
@@ -54,7 +55,7 @@ func Count(expName string) (int, error) {
 // List collects VMs, combining topology settings with running VM details if the
 // experiment is running. It returns a slice of VM structs and any errors
 // encountered while gathering them.
-func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
+func List(expName string) ([]mm.VM, error) {
 	if expName == "" {
 		return nil, errors.New("no experiment name provided")
 	}
@@ -64,16 +65,27 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		return nil, fmt.Errorf("getting experiment %s: %w", expName, err)
 	}
 
-	var (
-		running = make(map[string]mm.VM)
-		vms     []mm.VM
-	)
+	running := make(map[string]mm.VM)
 
 	if exp.Running() {
 		for _, vm := range mm.GetVMInfo(mm.NS(expName)) {
 			running[vm.Name] = vm
 		}
 	}
+
+	return listVMs(*exp, running), nil
+}
+
+// ListConfigured lists the experiment's VMs as its topology configures them,
+// without asking minimega for their state, for when minimega is busy.
+func ListConfigured(exp types.Experiment) []mm.VM {
+	return listVMs(exp, nil)
+}
+
+// listVMs combines the topology's VMs with running (minimega's details for a
+// running experiment's VMs, or nil to leave them out).
+func listVMs(exp types.Experiment, running map[string]mm.VM) []mm.VM { //nolint:funlen // complex logic
+	var vms []mm.VM
 
 	for idx, node := range exp.Spec.Topology().Nodes() {
 		var (
@@ -127,7 +139,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		}
 
 		details, exists := running[vm.Name]
-		if exp.Running() && !exp.DryRun() && !node.External() && !dnb && !exists {
+		if running != nil && exp.Running() && !exp.DryRun() && !node.External() && !dnb && !exists {
 			continue
 		}
 
@@ -193,7 +205,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		vms = append(vms, vm)
 	}
 
-	return vms, nil
+	return vms
 }
 
 // Get retrieves the VM with the given name from the experiment with the given

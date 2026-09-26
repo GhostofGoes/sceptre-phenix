@@ -401,7 +401,11 @@
         key: 'experiments',
         fetch: pageFetchers.experiments,
         apply: (experiments) => {
-          this.experiments = experiments;
+          // the server reports a starting experiment's progress from 0 to 1
+          this.experiments = experiments.map((exp) => ({
+            ...exp,
+            percent: Math.round((exp.percent ?? 0) * 100),
+          }));
           this.loaded = true;
         },
       });

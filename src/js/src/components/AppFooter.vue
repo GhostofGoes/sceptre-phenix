@@ -16,7 +16,7 @@ component.
               target="_blank"
               rel="noopener"
               aria-label="phēnix documentation">
-              <b-icon icon="question-circle" />
+              <b-icon icon="book" />
             </a>
           </b-tooltip>
           Copyright &copy; <b>2019-2026 Sandia National Laboratories</b>. All

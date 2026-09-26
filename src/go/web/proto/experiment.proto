@@ -29,6 +29,9 @@ message Experiment {
 	uint32 vm_count = 15 [json_name="vm_count"];
 
 	uint32 delayed_vms = 20 [json_name="delayed_vms"];
+
+	// launch progress from 0 to 1 while the experiment is starting
+	double percent = 21;
 }
 
 message ExperimentList {

@@ -335,7 +335,13 @@
         sortable
         header-class="sort-inline"
         v-slot="props">
-        <b-icon v-if="props.row.inUse" icon="play-circle" size="is-small" />
+        <b-tooltip
+          v-if="props.row.inUse"
+          :label="`In use by ${runningText(props.row)}`"
+          type="is-dark"
+          multilined>
+          <b-icon icon="play-circle" size="is-small" />
+        </b-tooltip>
       </b-table-column>
 
       <b-table-column
@@ -363,8 +369,9 @@
           <b-tooltip
             v-for="action in rowActions"
             :key="action.name"
-            :label="action.label"
-            type="is-dark">
+            :label="actionTooltip(action, props.row)"
+            type="is-dark"
+            multilined>
             <button
               class="button is-light is-small action"
               :aria-label="action.label"
@@ -699,6 +706,30 @@
         return (diskA, diskB, isAsc) =>
           (this.toByteCount(diskA[field]) - this.toByteCount(diskB[field])) *
           (isAsc ? 1 : -1);
+      },
+      // the running experiments using a disk, which hold it in use
+      runningText(disk) {
+        const running = (disk.experiments ?? []).filter((exp) => exp.running);
+        return running.length
+          ? running.map((exp) => exp.name).join(', ')
+          : 'a running experiment';
+      },
+      // an action's name, or why it cannot be used on the disk
+      actionTooltip(action, disk) {
+        if (!this.shouldDisableAction(action.name, disk)) return action.label;
+
+        const verb = action.label.toLowerCase();
+        if (
+          disk.inUse &&
+          action.name !== 'clone' &&
+          action.name !== 'download'
+        ) {
+          return `Can't ${verb}: the disk is in use by ${this.runningText(disk)}`;
+        }
+        if (action.name === 'snapshot' && disk.kind != 'VM') {
+          return "Can't snapshot: only VM disks can be snapshotted";
+        }
+        return `Can't ${verb}: you don't have permission`;
       },
       // the experiments using a disk, noting the stopped ones
       experimentsText(disk) {

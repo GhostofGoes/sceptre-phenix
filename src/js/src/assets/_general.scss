@@ -149,3 +149,9 @@ textarea::placeholder {
 .b-table .table th.sort-inline .sort-icon.icon.is-desc {
   transform: rotate(180deg) !important;
 }
+
+// Table cells that should size to their content instead of wrapping.
+.b-table .table td.nowrap-cell {
+  white-space: nowrap;
+  width: 1%;
+}
