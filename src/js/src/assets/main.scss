@@ -1,8 +1,122 @@
-@import '_variables';
+@use 'sass:color';
+@use 'variables' as v;
 
-// Bulma - Vite confuses it as an ordinary JavaScript module if we do @import "bulma"
-@import 'bulma/bulma';
-// Buefy
-@import 'buefy/src/scss/buefy';
+// Bulma v1 ships an automatic dark mode (prefers-color-scheme); phenix has its
+// own always-dark theme, so use the build without it.
+@use 'bulma/versions/bulma-no-dark-mode' with (
+  $primary: v.$primary,
+  $link: v.$link,
+  $scheme-h: 0,
+  $scheme-s: 0%,
+  $fullhd: 1536px + (2 * 32px),
+  $body-background-color: v.$background,
+  $table-background-color: v.$background-bis,
+  $card-background-color: v.$background-bis,
+  $navbar-background-color: v.$background-ter,
+  $navbar-item-img-max-height: 2.5rem,
+  $modal-card-body-background-color: v.$background-ter,
+  $modal-card-head-background-color: v.$background-ter,
+  $modal-card-foot-background-color: v.$background-ter,
+  $modal-card-head-padding: 20px,
+  $modal-card-body-padding: 20px,
+  $modal-background-background-color: rgba(#0a0a0a, 0.86),
+  $button-text-hover-background-color: v.$scheme-main,
+  $input-icon-color: color.adjust(v.$scheme-main, $lightness: 20%),
+  $hr-background-color: whitesmoke,
+  // keep the Bulma 0.9 fonts, radii, and input colors
+  $family-sans-serif: (
+      BlinkMacSystemFont,
+      -apple-system,
+      'Segoe UI',
+      'Roboto',
+      'Oxygen',
+      'Ubuntu',
+      'Cantarell',
+      'Fira Sans',
+      'Droid Sans',
+      'Helvetica Neue',
+      'Helvetica',
+      'Arial',
+      sans-serif,
+    ),
+  $family-monospace: monospace,
+  $body-size: 16px,
+  $radius-small: 2px,
+  $radius: 4px,
+  $radius-large: 6px,
+  $input-background-l: 100%,
+  $input-color-l: 21%,
+  $input-placeholder-color: rgba(v.$input-color, 0.3),
+  $input-disabled-color: #7a7a7a,
+  $card-radius: 0.25rem
+);
+@use 'buefy/src/scss/buefy';
+@use 'general';
 
-@import '_general';
+// Bulma v1 computes the scheme colors from these lightness variables; map
+// them onto the phenix dark palette.
+:root {
+  --bulma-scheme-main-l: #{v.lightness(v.$scheme-main)};
+  --bulma-scheme-main-bis-l: #{v.lightness(v.$scheme-main-bis)};
+  --bulma-scheme-invert-l: 100%;
+  --bulma-background-l: #{v.lightness(v.$background)};
+  --bulma-border-l: 100%;
+  --bulma-text-l: 96%;
+  --bulma-text-weak-l: 96%;
+  --bulma-text-strong-l: 100%;
+  --bulma-text-title-l: 100%;
+
+  // Bulma's greys are hard-coded with a blue tint; keep them neutral
+  @each $name in ('white', 'black', 'light', 'dark', 'text', 'shadow') {
+    --bulma-#{$name}-h: 0deg;
+    --bulma-#{$name}-s: 0%;
+  }
+
+  // Bulma darkens colored text for contrast on a light scheme; on this dark
+  // scheme use the colors as-is, as Bulma 0.9 did
+  $palette:
+    'white', 'black', 'light', 'dark', 'text', 'primary', 'link', 'info',
+    'success', 'warning', 'danger';
+  @each $name in $palette {
+    --bulma-#{$name}-on-scheme-l: var(--bulma-#{$name}-l);
+  }
+}
+
+// a lot of existing buttons and heroes are tagged `is-light`; on the dark
+// theme they should use the scheme color rather than near-white
+.button.is-light,
+.hero.is-light {
+  --bulma-light-l: #{v.lightness(v.$scheme-main)};
+  --bulma-light-invert-l: 100%;
+  --bulma-light: #{v.$scheme-main};
+  --bulma-light-invert: #{v.$scheme-invert};
+}
+
+// buttons had a lighter scheme-colored border rather than the (white) border
+.button {
+  --bulma-button-border-l: #{v.lightness(
+      color.adjust(v.$scheme-main, $lightness: 10%)
+    )};
+}
+
+// untyped tags used the scheme color in the Bulma 0.9 theme
+.tag {
+  --bulma-tag-background-l: var(--bulma-scheme-main-l);
+}
+
+// Bulma 0.9 separated the modal card head and foot with borders, not shadows
+.modal-card-head {
+  box-shadow: none;
+}
+.modal-card-foot {
+  border-top: 1px solid v.$scheme-main-bis;
+}
+
+// Font Awesome 7 makes every icon fixed-width (1.25em); keep the natural
+// widths the UI was laid out with
+.svg-inline--fa {
+  --fa-width: auto;
+}
+.fa-layers {
+  --fa-width: 1em;
+}

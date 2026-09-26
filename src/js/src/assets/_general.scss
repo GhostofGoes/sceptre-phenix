@@ -1,3 +1,5 @@
+@use 'variables' as v;
+
 html {
   background-repeat: no-repeat;
   background-image: url('@/assets/imgs/phenix.png');
@@ -73,12 +75,12 @@ textarea:focus {
 
 a.navbar-item.router-link-exact-active,
 a.navbar-item:hover {
-  background: $scheme-main !important;
+  background: v.$scheme-main !important;
   color: whitesmoke !important;
 }
 
 div.is-success {
-  color: $success;
+  color: var(--bulma-success);
 }
 
 .b-table {
@@ -91,10 +93,9 @@ div.is-success {
 
 // For buttons attached to an input field
 .button.input-button {
-  background-color: $input-background-color;
-  color: $scheme-main;
-  border-color: $input-border-color $input-border-color $input-border-color
-    $scheme-main-bis;
+  background-color: white;
+  color: v.$scheme-main;
+  border-color: white white white v.$scheme-main-bis;
 }
 
 // scale icons inside inputs so they don't touch the edges
@@ -104,7 +105,7 @@ div.is-success {
 
 // round bottom of modal-card even if not explicitly a footer
 .modal-card > :last-child {
-  border-radius: 0 0 $modal-card-foot-radius $modal-card-foot-radius;
+  border-radius: 0 0 var(--bulma-radius-large) var(--bulma-radius-large);
 }
 
 // center icons used for tooltips
@@ -117,7 +118,7 @@ div.is-success {
   margin: auto;
   max-width: 800px;
 
-  background-color: $background-bis;
+  background-color: v.$background-bis;
   border-radius: 12px;
 }
 

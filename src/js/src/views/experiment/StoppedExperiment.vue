@@ -1786,10 +1786,8 @@
 </script>
 
 <style lang="scss" scoped>
-  @import '@/assets/_variables.scss';
-
   .boot {
-    color: $primary;
+    color: var(--bulma-primary);
   }
 
   .dnb {
