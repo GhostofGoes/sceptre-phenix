@@ -60,7 +60,7 @@ $(VENV)/bin/activate: python/requirements.txt
 
 example-go:
 	@echo "Building go example"
-	$(call check-command,$(GO),Please install Go 1.24+ or set GO variable)
+	$(call check-command,$(GO),Please install Go 1.26+ or set GO variable)
 	cd go && $(GO) mod tidy
 	cd go && $(GO) build -v -o example-app .
 	cd go && $(GO) test -v .

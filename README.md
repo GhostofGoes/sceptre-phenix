@@ -81,7 +81,7 @@ If you wish to build and run the services locally without Docker, follow these s
 
 ### Prerequisites
 
-* Go 1.24+ (for core development)
+* Go 1.26+ (for core development)
 * Python 3.12+ (for app development)
 * Node.js 24+ & npm (for UI development)
 * Protoc 3.12+ (for Protocol Buffers generation)
@@ -93,7 +93,7 @@ sudo apt update
 sudo apt install -y protobuf-compiler python3 python3-pip python3-venv
 ```
 
-For Go 1.24+, follow the [official installation instructions](https://go.dev/doc/install).
+For Go 1.26+, follow the [official installation instructions](https://go.dev/doc/install).
 
 For Node.js, the simplest way to get (and stay on) the right version is
 [nvm](https://github.com/nvm-sh/nvm):

@@ -3,7 +3,7 @@
 # directory, so paths below are relative to examples/go.
 # See the root prek.toml for general notes on this repository's prek setup.
 
-default_language_version.golang = "1.24"
+default_language_version.golang = "1.26"
 
 # Named priority aliases must be redeclared per nested project (prek 0.4.11+).
 # See the root prek.toml for the full fixers/format/lint ordering rationale.
@@ -15,13 +15,13 @@ lint = 2
 [[repos]]
 repo = "https://github.com/golangci/golangci-lint"
 # NOTE: keep in sync with the golangci-lint version pinned in src/go/prek.toml.
-# See that file for why `language_version = "1.25"` is pinned below.
+# See that file for why `language_version = "1.26"` is pinned below.
 rev = "v2.10.1"
 
 [[repos.hooks]]
 id = "golangci-lint-fmt"
 args = ["-c", "../../src/go/.golangci.yml"]
-language_version = "1.25"
+language_version = "1.26"
 priority = "format"
 
 [[repos.hooks]]
@@ -29,5 +29,5 @@ id = "golangci-lint-full"
 # --allow-parallel-runners avoids lock contention with the concurrently
 # running src/go nested project's own golangci-lint-full invocation.
 args = ["-c", "../../src/go/.golangci.yml", "--fix", "--allow-parallel-runners"]
-language_version = "1.25"
+language_version = "1.26"
 priority = "lint"

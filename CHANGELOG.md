@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
+- **Build**: Require Go 1.26 and update Go dependencies to their latest releases that are at least a month old, including the etcd v3.7 client (`go.etcd.io/etcd/client/v3`), bbolt v1.5, cobra v1.10, viper v1.21, kin-openapi v0.147, and `golang.org/x/*`.
+- **CLI**: Tables are rendered with tablewriter v1. Numeric cells are now left-aligned instead of right-aligned; borders, header case, and wrapping are unchanged.
 
 ## [1.0.0]
 

@@ -88,11 +88,7 @@ type C2ParallelCommand struct {
 }
 
 func ScheduleC2ParallelCommand(ctx context.Context, cmd *C2ParallelCommand) {
-	cmd.Wait.Add(1)
-
-	go func() {
-		defer cmd.Wait.Done()
-
+	cmd.Wait.Go(func() {
 		opts := make([]C2Option, 0, len(cmd.Options)+c2OptionPadding)
 		opts = append(opts, cmd.Options...)
 		opts = append(opts, C2Context(ctx), C2Wait())
@@ -187,5 +183,5 @@ func ScheduleC2ParallelCommand(ctx context.Context, cmd *C2ParallelCommand) {
 				}
 			}
 		}
-	}()
+	})
 }

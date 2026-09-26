@@ -93,9 +93,7 @@ func newSettingsDBListCmd() *cobra.Command {
 				return nil
 			}
 
-			printer.PrintTableOfSettings(os.Stdout, s)
-
-			return nil
+			return printer.PrintTableOfSettings(os.Stdout, s)
 		},
 	}
 
@@ -311,7 +309,9 @@ func newSettingsListCmd() *cobra.Command {
 				}
 				fmt.Fprint(os.Stdout, string(b))
 			case "table":
-				printer.PrintTableOfRuntimeSettings(os.Stdout, settings)
+				if err := printer.PrintTableOfRuntimeSettings(os.Stdout, settings); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unsupported output format: %s", format)
 			}
@@ -373,7 +373,9 @@ func newSettingsGetCmd() *cobra.Command {
 					}
 					m = map[string]any{k: val}
 				}
-				printer.PrintTableOfRuntimeSettings(os.Stdout, m)
+				if err := printer.PrintTableOfRuntimeSettings(os.Stdout, m); err != nil {
+					return err
+				}
 			case FormatYAML:
 				switch v := val.(type) {
 				case map[string]any, []any:

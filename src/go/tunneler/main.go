@@ -13,6 +13,8 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/websocket"
 	"golang.org/x/term"
@@ -307,21 +309,17 @@ var listCmd = &cobra.Command{ //nolint:gochecknoglobals // cobra command
 			return nil
 		}
 
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader(
-			[]string{
-				"ID",
-				"Experiment",
-				"VM",
-				"Remote Host",
-				"Remote Port",
-				"Local Port",
-				"Active",
-			},
+		table := tablewriter.NewTable(
+			os.Stdout,
+			tablewriter.WithRenderer(
+				//nolint:exhaustruct // partial initialization
+				renderer.NewBlueprint(tw.Rendition{Symbols: tw.NewSymbols(tw.StyleASCII)}),
+			),
 		)
+		table.Header("ID", "Experiment", "VM", "Remote Host", "Remote Port", "Local Port", "Active")
 
 		for _, listener := range listeners {
-			table.Append([]string{
+			err := table.Append([]string{
 				strconv.Itoa(listener.ID),
 				listener.Exp,
 				listener.VM,
@@ -330,9 +328,14 @@ var listCmd = &cobra.Command{ //nolint:gochecknoglobals // cobra command
 				strconv.Itoa(listener.SrcPort),
 				strconv.FormatBool(listener.Listening),
 			})
+			if err != nil {
+				return fmt.Errorf("err: adding listener to table: %w", err)
+			}
 		}
 
-		table.Render()
+		if err := table.Render(); err != nil {
+			return fmt.Errorf("err: rendering listener table: %w", err)
+		}
 
 		return nil
 	},

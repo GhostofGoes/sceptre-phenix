@@ -42,7 +42,9 @@ func newVlanAliasCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANAliases(os.Stdout, info)
+				if err := printer.PrintTableOfVLANAliases(os.Stdout, info); err != nil {
+					return err
+				}
 			case 1:
 				exp := args[0]
 
@@ -57,7 +59,9 @@ func newVlanAliasCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANAliases(os.Stdout, info)
+				if err := printer.PrintTableOfVLANAliases(os.Stdout, info); err != nil {
+					return err
+				}
 			case aliasArgs:
 				var (
 					exp   = args[0]
@@ -114,7 +118,9 @@ func newVlanRangeCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANRanges(os.Stdout, info)
+				if err := printer.PrintTableOfVLANRanges(os.Stdout, info); err != nil {
+					return err
+				}
 			case 1:
 				exp := args[0]
 
@@ -129,7 +135,9 @@ func newVlanRangeCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANRanges(os.Stdout, info)
+				if err := printer.PrintTableOfVLANRanges(os.Stdout, info); err != nil {
+					return err
+				}
 			case aliasArgs:
 				var (
 					exp    = args[0]

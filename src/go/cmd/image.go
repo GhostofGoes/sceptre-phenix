@@ -61,7 +61,9 @@ func newImageListCmd() *cobra.Command {
 			if len(imgs) == 0 {
 				fmt.Fprintln(os.Stdout, "\nThere are no image configurations available")
 			} else {
-				printer.PrintTableOfImageConfigs(os.Stdout, optional, imgs...)
+				if err := printer.PrintTableOfImageConfigs(os.Stdout, optional, imgs...); err != nil {
+					return err
+				}
 			}
 
 			return nil

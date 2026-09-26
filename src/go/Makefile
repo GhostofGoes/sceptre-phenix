@@ -66,7 +66,7 @@ all: test
 generate: generate-mocks generate-protobuf go-generate
 
 test:
-	$(call check-command,go,Please install Go 1.24+ (https://go.dev/doc/install))
+	$(call check-command,go,Please install Go 1.26+ (https://go.dev/doc/install))
 	go test -v -race ./...
 
 clean:
@@ -82,7 +82,7 @@ clean:
 	go clean -testcache
 
 install:
-	$(call check-command,go,Please install Go 1.24+ (https://go.dev/doc/install))
+	$(call check-command,go,Please install Go 1.26+ (https://go.dev/doc/install))
 	go mod tidy
 
 install-dev: bin/mockgen bin/protoc-gen-go
@@ -136,7 +136,7 @@ web/proto/vm.pb.go: web/proto/*.proto bin/protoc-gen-go
 go-generate: web/rbac/known_policy.go
 
 web/rbac/known_policy.go: $(UISOURCES)
-	$(call check-command,go,Please install Go 1.24+ (https://go.dev/doc/install))
+	$(call check-command,go,Please install Go 1.26+ (https://go.dev/doc/install))
 	go generate web/rbac/known_policy_gen.go
 
 phenix: bin/phenix
