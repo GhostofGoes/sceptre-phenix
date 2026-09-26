@@ -121,6 +121,9 @@ func (n *Netflow) Close() {
 	_ = n.Conn.Close()
 }
 
+// netflowFields is how many fields an ASCII netflow record from minimega has.
+const netflowFields = 8
+
 var (
 	netflows  = make(map[string]*Netflow) //nolint:gochecknoglobals // package level registry
 	netflowMu sync.RWMutex                //nolint:gochecknoglobals // package level registry
@@ -217,18 +220,28 @@ func StartNetflow(exp string) error {
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
 
+			// a malformed record would otherwise index past the fields and
+			// take down phenix
+			if len(fields) < netflowFields {
+				continue
+			}
+
+			srcHost, srcPort, okSrc := splitAddr(fields[3])
+			dstHost, dstPort, okDst := splitAddr(fields[5])
+
+			if !okSrc || !okDst {
+				continue
+			}
+
 			body := make(map[string]any)
 
 			body["proto"], _ = strconv.Atoi(fields[2])
 
-			src := strings.Split(fields[3], ":")
-			dst := strings.Split(fields[5], ":")
+			body["src"] = srcHost
+			body["sport"], _ = strconv.Atoi(srcPort)
 
-			body["src"] = src[0]
-			body["sport"], _ = strconv.Atoi(src[1])
-
-			body["dst"] = dst[0]
-			body["dport"], _ = strconv.Atoi(dst[1])
+			body["dst"] = dstHost
+			body["dport"], _ = strconv.Atoi(dstPort)
 
 			body["packets"], _ = strconv.Atoi(fields[6])
 			body["bytes"], _ = strconv.Atoi(fields[7])
@@ -238,6 +251,17 @@ func StartNetflow(exp string) error {
 	}()
 
 	return nil
+}
+
+// splitAddr splits a netflow address into host and port at its last colon,
+// so IPv6 hosts keep their colons.
+func splitAddr(addr string) (string, string, bool) {
+	i := strings.LastIndex(addr, ":")
+	if i < 0 {
+		return "", "", false
+	}
+
+	return addr[:i], addr[i+1:], true
 }
 
 func StopNetflow(exp string) error {

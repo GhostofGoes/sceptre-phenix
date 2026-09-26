@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: The experiment page's Netflow tab shows flows as a themed table (time, source, destination, protocol name, packets, bytes), newest first, scrolling within the window instead of a fixed white text box. The search box reads "Search netflow" on that tab and filters the flows.
+- **Web UI**: Deleting an experiment spins only that row's delete button and then removes the row, instead of covering the page with a spinner.
+- **Web UI**: State of Health has an "All" filter (the default), keeps the chosen filter when the graph reloads, shows its filters on one line each, says "Loading…" on the SOH button until the graph loads, and only shows the tab bar when there is a Network Volume tab to switch to. The no-match message says "your filter criteria" and no longer has a Refresh Network button.
 - **Web UI**: Users has a search box and can sort by First Name. Error popups are wider and show each step of a nested server error on its own line, the root cause last in bold.
 - **Web UI**: On the SCORCH pipelines page the experiment name sits in a box colored by the experiment's state (green running, red stopped, yellow starting or stopping), clicking a node opens its output window at once with a loading spinner, and the node name in that window is outlined.
 - **API**: The SCORCH pipelines response includes the experiment's state (`experiment.status`). SCORCH component output and terminal endpoints now require permission to get the experiment.
@@ -28,6 +31,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Stopping a netflow capture that the server had already stopped no longer shows "Error: not found"; the button resets and a message explains why. The netflow button can no longer be double-clicked into a second stop. The server's message now says no capture is running.
+- **Netflow**: A malformed netflow record no longer crashes phenix, and IPv6 addresses keep their host and port.
+- **Web UI**: The experiment page's search box, stop, SOH, SCORCH and column buttons no longer disappear for roles without file listing, and searching on the VNC tab searches VMs.
+- **Web UI**: State of Health draws the graph when it first appears after "no nodes match", clicking a not-booted node no longer shows the previously opened node, and VM updates arriving before the graph loads no longer throw.
 - **Web UI**: Stopping an experiment from the SCORCH page (or the Experiments page) no longer flips back to "started" when a list requested before the stop arrives after it.
 - **Web UI**: Users: Role sorting works; editing a user and closing the dialog no longer changes the row; a rejected edit keeps the dialog open; a failed delete no longer leaves a spinner; roles stay shown after updates from other sessions; resource names are no longer split into characters after a user is created; password errors are highlighted.
 - **Web UI**: Server error text in popups is escaped rather than rendered as HTML.

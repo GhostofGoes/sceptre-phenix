@@ -842,10 +842,12 @@
         <hr style="width: 1px; height: 100%; margin: 0" />
       </b-field>
 
-      <b-field
-        v-if="roleAllowed('experiments/files', 'list', experiment.name)"
-        position="is-right">
-        <b-field v-if="activeTab == 1">
+      <b-field position="is-right">
+        <b-field
+          v-if="
+            activeTab == 1 &&
+            roleAllowed('experiments/files', 'list', experiment.name)
+          ">
           <b-tooltip label="search on a specific category" type="is-light">
             <b-select
               :value="filesTable.category"
@@ -897,7 +899,7 @@
           <b-tooltip :label="netflow.tooltip" type="is-light">
             <b-button
               :class="netflow.capturing ? 'is-danger' : 'is-success'"
-              :loading="netflow.starting"
+              :loading="netflow.starting || netflow.stopping"
               icon-left="circle-nodes"
               @click="handleNetflow(!netflow.capturing)">
             </b-button>
@@ -1442,7 +1444,7 @@
           icon="circle-nodes"
           v-if="roleAllowed('experiments/netflow', 'get', experiment.name)">
           <div
-            v-if="!netflow.data"
+            v-if="netflow.lines.length === 0"
             class="content has-text-white has-text-centered">
             {{
               netflow.starting
@@ -1450,14 +1452,41 @@
                 : 'No netflow captures yet. Start one with the netflow button above.'
             }}
           </div>
-          <div v-else class="control">
-            <textarea
-              class="textarea"
-              style="font-family: 'Courier New'"
-              readonly
-              rows="40"
-              v-model="netflow.data"></textarea>
-          </div>
+          <template v-else>
+            <p class="netflow-summary">
+              {{ netflowSummary }}
+            </p>
+            <div class="netflow-view">
+              <table class="table is-narrow is-fullwidth netflow-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Source</th>
+                    <th>Destination</th>
+                    <th>Protocol</th>
+                    <th class="has-text-right">Packets</th>
+                    <th class="has-text-right">Bytes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="line in netflowRows"
+                    :key="line.id"
+                    :class="{ 'netflow-marker': line.marker }">
+                    <td>{{ line.time }}</td>
+                    <td v-if="line.marker" colspan="5">{{ line.marker }}</td>
+                    <template v-else>
+                      <td>{{ line.src }}</td>
+                      <td>{{ line.dst }}</td>
+                      <td>{{ line.proto }}</td>
+                      <td class="has-text-right">{{ line.packets }}</td>
+                      <td class="has-text-right">{{ line.bytes }}</td>
+                    </template>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
         </b-tab-item>
       </b-tabs>
     </div>
@@ -1476,6 +1505,7 @@
   import { usePhenixStore } from '@/store';
   import VMMountBrowserModal from '@/components/VMMountBrowserModal.vue';
   import { debounce } from 'lodash-es';
+  import { markRaw } from 'vue';
   import { roleAllowed } from '@/utils/rbac.js';
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
@@ -1499,6 +1529,33 @@
   // how long a VM shows "Loading Screenshot" before "Not Available"; minimega
   // takes screenshots one at a time, so large experiments need a while
   const SCREENSHOT_WAIT_MS = 60000;
+
+  // the netflow tab's position among the tabs
+  const NETFLOW_TAB = 3;
+  // flows kept for the netflow tab, and how many of them it shows at once
+  const NETFLOW_MAX_LINES = 10000;
+  const NETFLOW_SHOWN_LINES = 500;
+  const IP_PROTOCOLS = { 1: 'ICMP', 6: 'TCP', 17: 'UDP', 58: 'ICMPv6' };
+
+  let netflowLineID = 0;
+  const clockTime = () => new Date().toLocaleTimeString();
+
+  // a captured flow as the netflow tab shows it; markRaw: flows never change
+  function netflowLine(flow) {
+    return markRaw({
+      id: ++netflowLineID,
+      time: clockTime(),
+      src: `${flow.src}:${flow.sport}`,
+      dst: `${flow.dst}:${flow.dport}`,
+      proto: IP_PROTOCOLS[flow.proto] ?? String(flow.proto),
+      packets: flow.packets,
+      bytes: flow.bytes,
+    });
+  }
+
+  function netflowMarker(text) {
+    return markRaw({ id: ++netflowLineID, time: clockTime(), marker: text });
+  }
 
   export default {
     components: { BSlider, BSliderTick },
@@ -1567,6 +1624,40 @@
     },
 
     computed: {
+      // the newest flows matching the search box, newest first
+      netflowMatches() {
+        const text =
+          this.activeTab == NETFLOW_TAB
+            ? (this.search.filter ?? '').trim().toLowerCase()
+            : '';
+        const lines = this.netflow.lines;
+        const matches = text
+          ? lines.filter((line) =>
+              [line.marker, line.src, line.dst, line.proto, line.time]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase()
+                .includes(text),
+            )
+          : lines;
+        return matches;
+      },
+
+      netflowRows() {
+        return this.netflowMatches.slice(-NETFLOW_SHOWN_LINES).reverse();
+      },
+
+      netflowSummary() {
+        const matches = this.netflowMatches.length;
+        const shown = Math.min(matches, NETFLOW_SHOWN_LINES);
+        const of =
+          matches === this.netflow.lines.length
+            ? `${matches}`
+            : `${matches} matching (of ${this.netflow.lines.length})`;
+        return shown < matches
+          ? `Newest ${shown} of ${of} lines, newest first`
+          : `${of} lines, newest first`;
+      },
       vmsEmptyText() {
         if (!this.experiment.name) return loadingText('VMs');
         if (this.search.filter) return 'No VMs match your search';
@@ -1693,12 +1784,16 @@
           term = '';
         }
         this.search.filter = term;
-        if (this.activeTab == 0) {
-          this.updateExperiment();
-          return;
+        switch (this.activeTab) {
+          case 0:
+          case 2:
+            this.updateExperiment();
+            break;
+          case 1:
+            this.updateFiles();
+            break;
+          // the netflow tab filters what it already has (netflowRows)
         }
-
-        this.updateFiles();
       }, 250),
 
       switchPagination(enabled) {
@@ -3913,68 +4008,98 @@
       },
 
       async handleNetflow(start, create = true) {
-        if (start) {
-          // the websocket upgrade 404s until the backend registers the
-          // capture, so wait for the POST to finish before connecting
-          if (create) {
-            this.netflow.starting = true;
-            try {
-              await axiosInstance.post(
-                `experiments/${this.$route.params.id}/netflow`,
-              );
-            } catch (err) {
-              this.netflow.starting = false;
-              useErrorNotification(err);
-              return;
-            }
+        if (this.netflow.starting || this.netflow.stopping) return;
+
+        if (!start) {
+          this.stopNetflow();
+          return;
+        }
+
+        // the websocket upgrade 404s until the backend registers the
+        // capture, so wait for the POST to finish before connecting
+        if (create) {
+          this.netflow.starting = true;
+          try {
+            await axiosInstance.post(
+              `experiments/${this.$route.params.id}/netflow`,
+            );
+          } catch (err) {
+            this.netflow.starting = false;
+            useErrorNotification(err);
+            return;
           }
+        }
 
-          this.netflow.capturing = true;
-          this.netflow.tooltip = 'Stop Netflow Capture';
-          this.netflow.data += '### CAPTURE START ###\n';
+        this.netflow.capturing = true;
+        this.netflow.tooltip = 'Stop Netflow Capture';
+        this.addNetflowLines([netflowMarker('Capture started')]);
 
-          let path = `${import.meta.env.BASE_URL}api/v1/experiments/${this.$route.params.id}/netflow/ws`;
+        let path = `${import.meta.env.BASE_URL}api/v1/experiments/${this.$route.params.id}/netflow/ws`;
 
-          let token = usePhenixStore().token;
-          if (token) {
-            path += `?token=${token}`;
+        let token = usePhenixStore().token;
+        if (token) {
+          path += `?token=${token}`;
+        }
+
+        let proto = location.protocol == 'https:' ? 'wss://' : 'ws://';
+        let url = proto + location.host + path;
+
+        this.socket = new WebSocket(url);
+        const started = () => (this.netflow.starting = false);
+        this.socket.addEventListener('open', started);
+        this.socket.addEventListener('error', started);
+        this.socket.addEventListener('message', (event) => {
+          // one update per frame, however many flows it carries
+          const flows = event.data
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((data) => netflowLine(JSON.parse(data)));
+          this.addNetflowLines(flows);
+        });
+      },
+
+      async stopNetflow() {
+        this.netflow.stopping = true;
+        try {
+          await axiosInstance.delete(
+            `experiments/${this.$route.params.id}/netflow`,
+          );
+          this.addNetflowLines([netflowMarker('Capture stopped')]);
+        } catch (err) {
+          if (err.response?.status !== 404) {
+            useErrorNotification(err);
+            return;
           }
-
-          let proto = location.protocol == 'https:' ? 'wss://' : 'ws://';
-          let url = proto + location.host + path;
-
-          this.socket = new WebSocket(url);
-          const started = () => (this.netflow.starting = false);
-          this.socket.addEventListener('open', started);
-          this.socket.addEventListener('error', started);
-          this.socket.addEventListener('message', (event) => {
-            // append once per frame: each append re-renders the whole
-            // (ever-growing) textarea
-            let flows = '';
-            event.data.split(/\r?\n/).forEach((data) => {
-              if (data) {
-                let msg = JSON.parse(data);
-                flows += `${msg['src']}:${msg['sport']}\t\t-->\t${msg['dst']}:${msg['dport']}\t\t${msg['proto']}\t${msg['packets']}\t${msg['bytes']}\n`;
-              }
-            });
-            if (flows) {
-              this.netflow.data += flows;
-            }
+          // the server has no capture to stop: it already stopped (from
+          // another window, or with the experiment), or phenix restarted
+          this.addNetflowLines([
+            netflowMarker('Capture had already stopped on the server'),
+          ]);
+          this.$buefy.toast.open({
+            message:
+              'The netflow capture had already stopped (from another window, by the experiment stopping, or by a phenix restart).',
+            type: 'is-info',
+            duration: 6000,
           });
-        } else {
-          axiosInstance
-            .delete(`experiments/${this.$route.params.id}/netflow`)
-            .then((_) => {
-              this.netflow.capturing = false;
-              this.netflow.tooltip = 'Start Netflow Capture';
-              this.netflow.data += '### CAPTURE STOP ###\n';
+        } finally {
+          this.netflow.stopping = false;
+        }
 
-              if (this.socket) {
-                this.socket.close();
-                this.socket = null;
-              }
-            })
-            .catch((err) => useErrorNotification(err));
+        this.netflow.capturing = false;
+        this.netflow.tooltip = 'Start Netflow Capture';
+        if (this.socket) {
+          this.socket.close();
+          this.socket = null;
+        }
+      },
+
+      // keeps the most recent NETFLOW_MAX_LINES lines
+      addNetflowLines(lines) {
+        if (lines.length === 0) return;
+        const all = this.netflow.lines;
+        all.push(...lines);
+        if (all.length > NETFLOW_MAX_LINES) {
+          all.splice(0, all.length - NETFLOW_MAX_LINES);
         }
       },
     },
@@ -4011,6 +4136,9 @@
         if (newVal == 0 || newVal == 2) {
           this.searchPlaceholder = 'Find a VM';
           this.updateExperiment();
+        } else if (newVal == NETFLOW_TAB) {
+          this.searchPlaceholder = 'Search netflow';
+          this.search.filter = '';
         } else {
           this.searchPlaceholder = 'Find a File';
           this.updateFiles();
@@ -4193,8 +4321,9 @@
           tooltip: 'Start Netflow Capture',
           capturing: false,
           starting: false,
-          socket: null,
-          data: '',
+          stopping: false,
+          // captured flows and start/stop markers, oldest first
+          lines: [],
         },
         features: [],
       };
@@ -4213,6 +4342,34 @@
 
   :deep(.b-tabs .tab-content) {
     padding: 1rem 0 0 0;
+  }
+
+  /* scrolls within the window, so the page below stays reachable */
+  .netflow-view {
+    max-height: calc(100vh - 18rem);
+    min-height: 10rem;
+    overflow: auto;
+  }
+
+  .netflow-table td {
+    font-family: monospace;
+    white-space: nowrap;
+  }
+
+  .netflow-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .netflow-marker td {
+    font-weight: bold;
+    font-style: italic;
+  }
+
+  .netflow-summary {
+    margin-bottom: 0.5rem;
+    opacity: 0.8;
   }
 
   .vm-modal-list-row {

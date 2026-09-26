@@ -325,7 +325,10 @@
               <button
                 v-if="roleAllowed('experiments', 'delete', props.row.name)"
                 class="button is-light is-small"
-                :disabled="updating(props.row.status)"
+                :class="{ 'is-loading': deleting[props.row.name] }"
+                :disabled="
+                  updating(props.row.status) || deleting[props.row.name]
+                "
                 @click="del(props.row.name, props.row.running)">
                 <b-icon icon="trash"></b-icon>
               </button>
@@ -731,27 +734,18 @@
             type: 'is-danger',
             hasIcon: true,
             onConfirm: () => {
-              this.isWaiting = true;
+              // only this experiment's button spins while it is deleted
+              this.deleting[name] = true;
 
               axiosInstance
                 .delete('experiments/' + name)
-                .then((response) => {
-                  if (response.status == 204) {
-                    let exp = this.experiments;
-                    for (let i = 0; i < exp.length; i++) {
-                      if (exp[i].name == name) {
-                        exp.splice(i, 1);
-                        break;
-                      }
-                    }
-                    this.experiments = [...exp];
-                  }
-                  this.isWaiting = false;
+                .then(() => {
+                  this.experiments = this.experiments.filter(
+                    (exp) => exp.name != name,
+                  );
                 })
-                .catch((err) => {
-                  useErrorNotification(err);
-                  this.isWaiting = false;
-                });
+                .catch((err) => useErrorNotification(err))
+                .finally(() => delete this.deleting[name]);
             },
           });
         }
@@ -981,6 +975,7 @@
         action: null,
         rowName: null,
         isWaiting: false, // set while a change is being saved
+        deleting: {}, // names of the experiments being deleted
         loaded: false, // false until the first list arrives
         options: {},
       };
