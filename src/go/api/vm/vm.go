@@ -1505,13 +1505,9 @@ func CaptureSubnet(expName, subnet string, vmList []string) ([]mm.Capture, error
 	// Find the interfaces that are in the
 	// specified subnet
 	for _, vm := range vms {
-		// Make sure the VM is running
-		state, err := mm.GetVMState(mm.NS(expName), mm.VMName(vm.Name))
-		if err != nil {
-			continue
-		}
-
-		if state != vmStateRunning {
+		// Make sure the VM is running. List already has its state from minimega
+		// (and none for a VM minimega doesn't have).
+		if vm.State != vmStateRunning {
 			continue
 		}
 
@@ -1540,16 +1536,30 @@ func CaptureSubnet(expName, subnet string, vmList []string) ([]mm.Capture, error
 		}
 	}
 
-	// Get all the captures for all the VMs
-	var allVMCaptures []mm.Capture
+	return capturesForVMs(expName, matchedVMs), nil
+}
 
-	for _, vmName := range matchedVMs {
-		vmCaptures := mm.GetVMCaptures(mm.NS(expName), mm.VMName(vmName))
-
-		allVMCaptures = append(allVMCaptures, vmCaptures...)
+// capturesForVMs returns the captures for each of the named VMs, in the order
+// named (repeating a VM's captures if it is named more than once), with one
+// `capture` listing for the experiment rather than one per VM.
+func capturesForVMs(expName string, vmNames []string) []mm.Capture {
+	if len(vmNames) == 0 {
+		return nil
 	}
 
-	return allVMCaptures, nil
+	byVM := make(map[string][]mm.Capture)
+
+	for _, capture := range mm.GetExperimentCaptures(mm.NS(expName)) {
+		byVM[capture.VM] = append(byVM[capture.VM], capture)
+	}
+
+	var captures []mm.Capture
+
+	for _, vmName := range vmNames {
+		captures = append(captures, byVM[vmName]...)
+	}
+
+	return captures
 }
 
 // StopCaptureSubnet will stop all captures for any VM
@@ -1608,13 +1618,8 @@ func StopCaptureSubnet(expName, subnet string, vmList []string) ([]string, error
 			continue
 		}
 
-		// Make sure the VM is running
-		state, err := mm.GetVMState(mm.NS(expName), mm.VMName(vm.Name))
-		if err != nil {
-			continue
-		}
-
-		if state != vmStateRunning {
+		// Make sure the VM is running. List already has its state from minimega.
+		if vm.State != vmStateRunning {
 			continue
 		}
 

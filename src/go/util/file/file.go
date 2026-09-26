@@ -17,6 +17,9 @@ var DefaultClusterFiles ClusterFiles = new(MMClusterFiles) //nolint:gochecknoglo
 const snapshotBoth = "both"
 const scorchComponentIndex = 2
 
+// copyStatusInterval is how often CopyFile polls a transfer's progress.
+const copyStatusInterval = 500 * time.Millisecond
+
 type ClusterFiles interface {
 	GetExperimentFiles(exp, filter string) (Files, error)
 
@@ -215,9 +218,12 @@ func (MMClusterFiles) GetExperimentSnapshots(exp string) ([]string, error) {
 }
 
 func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
-	cmd := mmcli.NewCommand()
+	var (
+		cmd      = mmcli.NewCommand()
+		headnode = mm.IsHeadnode(dest)
+	)
 
-	if mm.IsHeadnode(dest) {
+	if headnode {
 		cmd.Command = "file get " + path
 	} else {
 		cmd.Command = fmt.Sprintf(`mesh send %s file get %s`, dest, path)
@@ -228,7 +234,7 @@ func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
 		return fmt.Errorf("copying file to destination: %w", err)
 	}
 
-	if mm.IsHeadnode(dest) {
+	if headnode {
 		cmd.Command = "file status"
 	} else {
 		cmd.Command = fmt.Sprintf(`mesh send %s file status`, dest)
@@ -259,6 +265,10 @@ func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
 		if !found {
 			break
 		}
+
+		// Don't poll back to back: every poll waits its turn for the minimega
+		// connection that every other request shares.
+		time.Sleep(copyStatusInterval)
 	}
 
 	return nil

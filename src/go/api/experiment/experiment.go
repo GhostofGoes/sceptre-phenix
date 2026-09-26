@@ -703,13 +703,8 @@ func Start(ctx context.Context, opts ...StartOption) error {
 			}
 		}
 
-		schedule := make(map[string]string)
-
-		for _, vm := range mm.GetVMInfo(mm.NS(exp.Spec.ExperimentName())) {
-			schedule[vm.Name] = vm.Host
-		}
-
-		exp.Status.SetSchedule(schedule)
+		// Only VM hosts are needed here, not full VM details.
+		exp.Status.SetSchedule(mm.GetVMHosts(mm.NS(exp.Spec.ExperimentName())))
 
 		var vlans map[string]int
 		vlans, err = mm.GetVLANs(mm.NS(exp.Spec.ExperimentName()))

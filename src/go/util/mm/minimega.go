@@ -30,7 +30,10 @@ var (
 	ErrScreenshotNotFound = errors.New("screenshot not found")
 )
 
-const vmInfoCmd = "vm info"
+const (
+	vmInfoCmd   = "vm info"
+	ccClientCmd = "cc client"
+)
 
 const (
 	hostColumn             = "host"
@@ -65,7 +68,9 @@ func (Minimega) ReadScriptFromFile(ns, filename string) error {
 	cmd := mmcli.NewNamespacedCommand(ns)
 	cmd.Command = "read " + filename
 
-	err := mmcli.ErrorResponse(mmcli.Run(cmd))
+	// A script can take minutes to run; don't hold the shared connection (and
+	// so every other command) for all of it.
+	err := mmcli.ErrorResponse(mmcli.RunDedicated(cmd))
 	if err != nil {
 		return fmt.Errorf("reading mmcli script: %w", err)
 	}
@@ -76,6 +81,9 @@ func (Minimega) ReadScriptFromFile(ns, filename string) error {
 func (Minimega) ClearNamespace(ns string) error {
 	cmd := mmcli.NewCommand()
 	cmd.Command = "clear namespace " + ns
+
+	// The namespace's VMs are gone (or going) either way.
+	forgetSnapshotDisks(ns)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -89,7 +97,10 @@ func (Minimega) LaunchVMs(ns string, start ...string) error {
 	cmd := mmcli.NewNamespacedCommand(ns)
 	cmd.Command = "vm launch"
 
-	err := mmcli.ErrorResponse(mmcli.Run(cmd))
+	// Launching every queued VM can take minutes; don't hold the shared
+	// connection (and so every other command, including launch progress
+	// polling) for all of it.
+	err := mmcli.ErrorResponse(mmcli.RunDedicated(cmd))
 	if err != nil {
 		return fmt.Errorf("launching VMs: %w", err)
 	}
@@ -157,11 +168,24 @@ func (Minimega) GetLaunchProgress(ns string, expected int) (float64, error) {
 	return float64(queued) / float64(expected), nil
 }
 
-func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex logic
+// GetVMInfo returns minimega's details for the VMs in a namespace, optionally
+// filtered by VM name. Concurrent calls asking for the same VMs share one set of
+// minimega commands (see flightGroup); each caller gets its own copy.
+func (m Minimega) GetVMInfo(opts ...Option) VMs {
 	o := NewOptions(opts...)
 
+	vms := vmInfoFlights.do(o.ns+"\x00"+o.vm, func(seal func()) VMs {
+		return m.getVMInfo(o, seal)
+	})
+
+	return cloneVMs(vms)
+}
+
+// getVMInfo does GetVMInfo's work, calling started just before its first
+// minimega command is sent.
+func (m Minimega) getVMInfo(o options, started func()) VMs {
 	// don't rely on `cc_active` column in `vm info` table
-	activeC2 := getActiveC2(o.ns)
+	activeC2 := getActiveC2(o.ns, started)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = vmInfoCmd
@@ -187,7 +211,15 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 	}
 
 	status := mmcli.RunTabular(cmd)
+	received := time.Now()
 	vms := make(VMs, 0, len(status))
+
+	var captures map[string][]Capture
+
+	// One `capture` listing for the namespace, rather than one per VM.
+	if len(status) > 0 {
+		captures = groupCapturesByVM(m.GetExperimentCaptures(NS(o.ns)))
+	}
 
 	for _, row := range status {
 		vm := VM{ //nolint:exhaustruct // partial initialization
@@ -198,45 +230,19 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 			Running:  row[stateColumn] == "RUNNING",
 			CCActive: activeC2[row["uuid"]],
 			CdRom:    row["cdrom"],
+			Networks: parseList(row["vlan"]),
+			Taps:     parseList(row["tap"]),
+			IPv4:     parseList(row["ip"]),
+			Captures: captures[row["name"]],
 		}
-
-		s := row["vlan"]
-		s = strings.TrimPrefix(s, "[")
-		s = strings.TrimSuffix(s, "]")
-
-		if s != "" {
-			vm.Networks = strings.Split(s, ", ")
-		}
-
-		s = row["tap"]
-		s = strings.TrimPrefix(s, "[")
-		s = strings.TrimSuffix(s, "]")
-
-		if s != "" {
-			vm.Taps = strings.Split(s, ", ")
-		}
-
-		s = row["ip"]
-		s = strings.TrimPrefix(s, "[")
-		s = strings.TrimSuffix(s, "]")
-
-		if s != "" {
-			vm.IPv4 = strings.Split(s, ", ")
-		}
-
-		s = row["tags"]
 
 		var tags map[string]string
 
-		_ = json.Unmarshal([]byte(s), &tags)
+		_ = json.Unmarshal([]byte(row["tags"]), &tags)
 		vm.Tags = tags
 
-		// Make sure the VM name is set prior to calling `GetVMCaptures`, as the VM
-		// name is not always set when calling `GetVMInfo`.
-		vm.Captures = m.GetVMCaptures(NS(o.ns), VMName(vm.Name))
-
-		uptime, err := time.ParseDuration(row["uptime"])
-		if err == nil {
+		uptime, uptimeErr := time.ParseDuration(row["uptime"])
+		if uptimeErr == nil {
 			vm.Uptime = uptime.Seconds()
 		}
 
@@ -253,27 +259,22 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 		snapshot, _ := strconv.ParseBool(row["snapshot"])
 
 		if snapshot && disk != "" {
-			cmd = mmcli.NewCommand()
-			cmd.Command = "disk info " + disk
-
-			if !IsHeadnode(row[hostColumn]) {
-				cmd.Command = fmt.Sprintf("mesh send %s %s", row[hostColumn], cmd.Command)
+			launch := vmLaunch{ //nolint:exhaustruct // at is only known with an uptime
+				ns:   o.ns,
+				name: vm.Name,
+				uuid: vm.UUID,
+				host: vm.Host,
+				disk: disk,
 			}
 
-			resp := mmcli.RunTabular(cmd)
-
-			if len(resp) == 0 {
-				vm.Disk = disk
-			} else {
-				// Only expect one row returned
-				info := resp[0]
-
-				if info["backingfile"] == "" {
-					vm.Disk = info["image"]
-				} else {
-					vm.Disk = info["backingfile"]
-				}
+			// The disk's backing file can only change while its VM's process is
+			// gone, so a result is only reused for the same launch of a VM whose
+			// process is still up.
+			if uptimeErr == nil && (vm.State == "RUNNING" || vm.State == "PAUSED") {
+				launch.at = received.Add(-uptime)
 			}
+
+			vm.Disk = snapshotBackingDisk(launch)
 		} else {
 			// Attempting to get disk info when not using a snapshot will cause a
 			// locked file error.
@@ -284,6 +285,40 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 	}
 
 	return vms
+}
+
+// snapshotBackingDisk returns the image a VM's snapshot disk is based on (or
+// the snapshot itself if minimega can't say), asking minimega at most once per
+// launch of the VM.
+func snapshotBackingDisk(launch vmLaunch) string {
+	if disk, ok := snapshotDisks.lookup(launch); ok {
+		return disk
+	}
+
+	cmd := mmcli.NewCommand()
+	cmd.Command = "disk info " + launch.disk
+
+	if !IsHeadnode(launch.host) {
+		cmd.Command = fmt.Sprintf("mesh send %s %s", launch.host, cmd.Command)
+	}
+
+	resp := mmcli.RunTabular(cmd)
+
+	if len(resp) == 0 {
+		return launch.disk
+	}
+
+	// Only expect one row returned
+	info := resp[0]
+
+	disk := info["backingfile"]
+	if disk == "" {
+		disk = info["image"]
+	}
+
+	snapshotDisks.store(launch, disk)
+
+	return disk
 }
 
 func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
@@ -391,6 +426,9 @@ func (Minimega) StopVM(opts ...Option) error {
 
 func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex logic
 	o := NewOptions(opts...)
+
+	// The VM's snapshot disk may be recreated from a different image.
+	forgetSnapshotDisks(o.ns)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 
@@ -529,6 +567,8 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 func (Minimega) KillVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
+	forgetSnapshotDisks(o.ns)
+
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = "vm kill " + o.vm
 
@@ -555,6 +595,68 @@ func (Minimega) GetVMHost(opts ...Option) (string, error) {
 	}
 
 	return status[0][hostColumn], nil
+}
+
+// GetVMHosts returns the host each VM in a namespace (optionally filtered by VM
+// name) is running on, keyed by VM name, using a single narrow `vm info`.
+func (Minimega) GetVMHosts(opts ...Option) map[string]string {
+	o := NewOptions(opts...)
+
+	cmd := mmcli.NewNamespacedCommand(o.ns)
+	cmd.Command = vmInfoCmd
+	cmd.Columns = []string{hostColumn, "name"}
+
+	if o.vm != "" {
+		cmd.Filters = []string{"name=" + o.vm}
+	}
+
+	hosts := make(map[string]string)
+
+	for _, row := range mmcli.RunTabular(cmd) {
+		hosts[row["name"]] = row[hostColumn]
+	}
+
+	return hosts
+}
+
+// GetVMIPv4 returns the IPv4 addresses minimega reports for a VM's interfaces,
+// in interface order (nil if it reports none), using a single narrow `vm info`.
+func (Minimega) GetVMIPv4(opts ...Option) ([]string, error) {
+	o := NewOptions(opts...)
+
+	cmd := mmcli.NewNamespacedCommand(o.ns)
+	cmd.Command = vmInfoCmd
+	cmd.Columns = []string{"ip"}
+	cmd.Filters = []string{"name=" + o.vm}
+
+	rows := mmcli.RunTabular(cmd)
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("vm %s in namespace %s: %w", o.vm, o.ns, ErrVMNotFound)
+	}
+
+	return parseList(rows[0]["ip"]), nil
+}
+
+// getVMIdentities returns the name and UUID of the VMs in a namespace
+// (optionally filtered by VM name), and nothing else, using a single narrow
+// `vm info`.
+func getVMIdentities(ns, name string) VMs {
+	cmd := mmcli.NewNamespacedCommand(ns)
+	cmd.Command = vmInfoCmd
+	cmd.Columns = []string{"name", "uuid"}
+
+	if name != "" {
+		cmd.Filters = []string{"name=" + name}
+	}
+
+	rows := mmcli.RunTabular(cmd)
+	vms := make(VMs, 0, len(rows))
+
+	for _, row := range rows {
+		vms = append(vms, VM{Name: row["name"], UUID: row["uuid"]}) //nolint:exhaustruct // partial initialization
+	}
+
+	return vms
 }
 
 func (Minimega) GetVMState(opts ...Option) (string, error) {
@@ -921,9 +1023,24 @@ func (m Minimega) GetVMCaptures(opts ...Option) []Capture {
 	return keep
 }
 
+// GetClusterHosts returns the cluster's hosts, or only those VMs can be
+// scheduled on. Concurrent calls share one set of minimega commands (see
+// flightGroup); each caller gets its own copy.
 func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
+	res := clusterHostsFlights.do(strconv.FormatBool(schedOnly), func(seal func()) clusterHosts {
+		hosts, err := m.getClusterHosts(schedOnly, seal)
+
+		return clusterHosts{hosts: hosts, err: err}
+	})
+
+	return cloneHosts(res.hosts), res.err
+}
+
+// getClusterHosts does GetClusterHosts' work, calling started just before its
+// first minimega command is sent.
+func (m Minimega) getClusterHosts(schedOnly bool, started func()) (Hosts, error) {
 	// Get headnode details
-	hosts := processNamespaceHosts("minimega")
+	hosts := processNamespaceHosts("minimega", started)
 
 	if len(hosts) == 0 {
 		return []Host{}, errors.New("no cluster hosts found")
@@ -940,7 +1057,7 @@ func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 	_ = m.ClearNamespace("__phenix__")
 
 	// Get compute nodes details
-	hosts = processNamespaceHosts("__phenix__")
+	hosts = processNamespaceHosts("__phenix__", nil)
 
 	for _, host := range hosts {
 		// This will happen if the headnode is included as a compute node
@@ -955,8 +1072,7 @@ func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 		host.Schedulable = true
 
 		// Add disk info
-		host.DiskUsage.Phenix = m.getDiskUsage(host.Name, common.PhenixBase)
-		host.DiskUsage.Minimega = m.getDiskUsage(host.Name, common.MinimegaBase)
+		host.DiskUsage = m.getHostDiskUsage(host.Name)
 
 		cluster = append(cluster, host)
 	}
@@ -968,8 +1084,7 @@ func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 	head.Name = common.TrimHostnameSuffixes(head.Name)
 
 	// Add disk info
-	head.DiskUsage.Phenix = m.getDiskUsage(head.Name, common.PhenixBase)
-	head.DiskUsage.Minimega = m.getDiskUsage(head.Name, common.MinimegaBase)
+	head.DiskUsage = m.getHostDiskUsage(head.Name)
 
 	cluster = append(cluster, head)
 
@@ -978,7 +1093,7 @@ func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 
 func (m Minimega) GetNamespaceHosts(ns string) (Hosts, error) {
 	// Get namespace nodes details
-	processed := processNamespaceHosts(ns)
+	processed := processNamespaceHosts(ns, nil)
 
 	hosts := make([]Host, 0, len(processed))
 
@@ -986,8 +1101,7 @@ func (m Minimega) GetNamespaceHosts(ns string) (Hosts, error) {
 		host.Name = common.TrimHostnameSuffixes(host.Name)
 
 		// Add disk info
-		host.DiskUsage.Phenix = m.getDiskUsage(host.Name, common.PhenixBase)
-		host.DiskUsage.Minimega = m.getDiskUsage(host.Name, common.MinimegaBase)
+		host.DiskUsage = m.getHostDiskUsage(host.Name)
 
 		hosts = append(hosts, host)
 	}
@@ -995,27 +1109,34 @@ func (m Minimega) GetNamespaceHosts(ns string) (Hosts, error) {
 	return hosts, nil
 }
 
+// Headnode returns the name of the host phenix's minimega runs on. It does not
+// change for the life of the process, so it is looked up once and then reused.
 func (Minimega) Headnode() string {
+	headnode.mu.Lock()
+	name := headnode.name
+	headnode.mu.Unlock()
+
+	if name != "" {
+		return name
+	}
+
 	// Get headnode details
-	hosts := processNamespaceHosts("minimega")
+	hosts := processNamespaceHosts("minimega", nil)
+
+	headnode.mu.Lock()
+	defer headnode.mu.Unlock()
 
 	if len(hosts) == 0 {
-		// hosts is empty on any mmcli failure, fall back to the last known headnode
-		headnode.mu.Lock()
-		defer headnode.mu.Unlock()
-
+		// hosts is empty on any mmcli failure, fall back to the last known
+		// headnode (set by a concurrent lookup, if any)
 		return headnode.name
 	}
 
 	// Trim host name suffixes (like -minimega, or -phenix) potentially added to
 	// Docker containers by Docker Compose config.
-	name := common.TrimHostnameSuffixes(hosts[0].Name)
+	headnode.name = common.TrimHostnameSuffixes(hosts[0].Name)
 
-	headnode.mu.Lock()
-	headnode.name = name
-	headnode.mu.Unlock()
-
-	return name
+	return headnode.name
 }
 
 func (m Minimega) IsHeadnode(node string) bool {
@@ -1104,7 +1225,7 @@ func (Minimega) c2Client(o c2Options) (string, string, error) {
 		return o.vm, "", nil
 	}
 
-	vms := GetVMInfo(NS(o.ns), VMName(o.vm))
+	vms := getVMIdentities(o.ns, o.vm)
 	if len(vms) == 0 {
 		return "", "", fmt.Errorf("vm %s does not exist", o.vm)
 	}
@@ -1113,7 +1234,7 @@ func (Minimega) c2Client(o c2Options) (string, string, error) {
 	vm := pickVM(vms, o.vm)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "cc client"
+	cmd.Command = ccClientCmd
 
 	if o.idByUUID {
 		// We use the UUID of the VM instead of the name since `cc clients` returns
@@ -1306,7 +1427,7 @@ func (Minimega) GetC2Response(opts ...C2Option) (string, error) {
 		return "", fmt.Errorf("getting response for command %s: %w", o.commandID, err)
 	}
 
-	vms := GetVMInfo(NS(o.ns), VMName(o.vm))
+	vms := getVMIdentities(o.ns, o.vm)
 	if len(vms) == 0 {
 		return "", fmt.Errorf("vm %s does not exist", o.vm)
 	}
@@ -1612,13 +1733,13 @@ func GetLocalMountPath(ns, vm string) string {
 	return filepath.Join(common.MountDir(), ns, vm)
 }
 
-func getActiveC2(ns string) map[string]bool {
+func getActiveC2(ns string, started func()) map[string]bool {
 	active := make(map[string]bool)
 
 	cmd := mmcli.NewNamespacedCommand(ns)
-	cmd.Command = "cc client"
+	cmd.Command = ccClientCmd
 
-	for _, row := range mmcli.RunTabular(cmd) {
+	for _, row := range mmcli.RunTabularStarted(cmd, started) {
 		active[row["uuid"]] = true
 	}
 
@@ -1715,11 +1836,11 @@ func deleteFile(path string) error {
 	return nil
 }
 
-func processNamespaceHosts(namespace string) Hosts {
+func processNamespaceHosts(namespace string, started func()) Hosts {
 	cmd := mmcli.NewNamespacedCommand(namespace)
 	cmd.Command = hostColumn
 
-	status := mmcli.RunTabular(cmd)
+	status := mmcli.RunTabularStarted(cmd, started)
 	hosts := make(Hosts, 0, len(status))
 
 	for _, row := range status {
@@ -1761,44 +1882,93 @@ var (
 	diskUsageCache = map[string]diskUsageEntry{} //nolint:gochecknoglobals // cache shared across requests
 )
 
-// getDiskUsage returns the percent of the disk holding `path` on `host` that
-// is in use, measured at most once per diskUsageTTL.
-func (m Minimega) getDiskUsage(host, path string) float64 {
-	key := host + "\x00" + path
+// getHostDiskUsage returns the percent of the disks holding phenix's and
+// minimega's base directories on `host` that is in use, measured at most once
+// per diskUsageTTL. Both are measured with a single shell command.
+func (m Minimega) getHostDiskUsage(host string) DiskUsage {
+	paths := []string{common.PhenixBase, common.MinimegaBase}
+	usage := make([]float64, len(paths))
+	stale := false
 
 	diskUsageMu.Lock()
-	entry, ok := diskUsageCache[key]
-	diskUsageMu.Unlock()
 
-	if ok && time.Since(entry.at) < diskUsageTTL {
-		return entry.value
+	for i, path := range paths {
+		entry, ok := diskUsageCache[host+"\x00"+path]
+		if ok && time.Since(entry.at) < diskUsageTTL {
+			usage[i] = entry.value
+		} else {
+			stale = true
+		}
 	}
 
-	value, ok := m.measureDiskUsage(host, path)
-	if !ok {
-		return 0
-	}
-
-	diskUsageMu.Lock()
-	diskUsageCache[key] = diskUsageEntry{value: value, at: time.Now()}
 	diskUsageMu.Unlock()
 
-	return value
+	if stale {
+		measured := m.measureDiskUsage(host, paths...)
+		now := time.Now()
+
+		diskUsageMu.Lock()
+
+		for i, path := range paths {
+			if value, ok := measured[i]; ok {
+				usage[i] = value
+				diskUsageCache[host+"\x00"+path] = diskUsageEntry{value: value, at: now}
+			}
+		}
+
+		diskUsageMu.Unlock()
+	}
+
+	return DiskUsage{Phenix: usage[0], Minimega: usage[1]}
 }
 
-// Run shell command to get disk usage for `path` on `host`.
-func (m Minimega) measureDiskUsage(host, path string) (float64, bool) {
-	cmd := fmt.Sprintf(`bash -c "echo $(df %s | awk '{print $(NF-1)}' | tail -1)"`, path)
-	resp, err := m.MeshShellResponse(host, cmd)
-
-	if (resp == "") || (err != nil) {
-		return 0, false
-	}
-
-	diskUsage, err := strconv.ParseFloat(strings.TrimSuffix(resp, "%"), 64)
+// measureDiskUsage runs one shell command on `host` to get the disk usage for
+// each of `paths`, returning the usage keyed by index into `paths` for each
+// path it could be measured for.
+func (m Minimega) measureDiskUsage(host string, paths ...string) map[int]float64 {
+	resp, err := m.MeshShellResponse(host, diskUsageCommand(paths...))
 	if err != nil {
-		return 0, false
+		return nil
 	}
 
-	return diskUsage, true
+	return parseDiskUsage(resp, len(paths))
+}
+
+// diskUsageCommand builds a shell command printing `<index>=<use%>` for each
+// path, e.g. `0=42% 1=17%`. The index tags each value, so a path df fails for
+// (printing nothing) can't be mistaken for another.
+func diskUsageCommand(paths ...string) string {
+	parts := make([]string, len(paths))
+
+	for i, path := range paths {
+		parts[i] = fmt.Sprintf(`%d=$(df %s | awk '{print $(NF-1)}' | tail -1)`, i, path)
+	}
+
+	return fmt.Sprintf(`bash -c "echo %s"`, strings.Join(parts, " "))
+}
+
+// parseDiskUsage parses diskUsageCommand's output for `count` paths.
+func parseDiskUsage(resp string, count int) map[int]float64 {
+	usage := make(map[int]float64)
+
+	for field := range strings.FieldsSeq(resp) {
+		idxStr, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 || idx >= count {
+			continue
+		}
+
+		diskUsage, err := strconv.ParseFloat(strings.TrimSuffix(value, "%"), 64)
+		if err != nil {
+			continue
+		}
+
+		usage[idx] = diskUsage
+	}
+
+	return usage
 }
