@@ -153,7 +153,9 @@ func newConfigListCmd() *cobra.Command {
 			if len(configs) == 0 {
 				fmt.Fprintln(os.Stdout, "There are no configurations available")
 			} else {
-				printer.PrintTableOfConfigs(os.Stdout, configs)
+				if err := printer.PrintTableOfConfigs(os.Stdout, configs); err != nil {
+					return err
+				}
 			}
 
 			fmt.Fprintln(os.Stdout)

@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-func boolPtr(b bool) *bool { return &b }
-
 func nodeWithGateways(external *bool, gateways ...string) Node {
 	ifaces := make([]*Interface, len(gateways))
 	for i, gw := range gateways {
@@ -64,11 +62,11 @@ func TestNodeValidate(t *testing.T) {
 		},
 		{
 			name: "external node with two gateways is exempt",
-			node: nodeWithGateways(boolPtr(true), "10.0.0.1", "10.0.1.1"),
+			node: nodeWithGateways(new(true), "10.0.0.1", "10.0.1.1"),
 		},
 		{
 			name:    "external key explicitly false is rejected",
-			node:    nodeWithGateways(boolPtr(false), "10.0.0.1"),
+			node:    nodeWithGateways(new(false), "10.0.0.1"),
 			wantErr: true,
 			substr:  "external key should not be included",
 		},

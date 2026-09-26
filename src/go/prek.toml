@@ -5,7 +5,7 @@
 
 update.cooldown_days = 30
 minimum_prek_version = "0.4.11"
-default_language_version.golang = "1.24"
+default_language_version.golang = "1.26"
 
 # Named priority aliases must be redeclared per nested project (prek 0.4.11+).
 # See the root prek.toml for the full fixers/format/lint ordering rationale.
@@ -35,23 +35,20 @@ priority = "fixers"
 [[repos]]
 repo = "https://github.com/golangci/golangci-lint"
 # NOTE: keep in sync with the golangci-lint version installed by `make install-dev`.
-# v2.10.1 requires Go 1.25+ to build (see its go.mod), newer than this
-# project's default (Go 1.24, set above), so `language_version = "1.25"`
-# overrides that default per-hook to build golangci-lint with a managed Go
-# 1.25 toolchain. This is pinned to the 1.25 minor version band rather than
-# left unconstrained ("default"/go.mod auto-detection): an unconstrained
-# request can resolve to a much newer Go release (e.g. 1.27), and building
+# `language_version = "1.26"` builds golangci-lint with a managed Go 1.26
+# toolchain, matching this project's go.mod: golangci-lint refuses to analyze
+# a module that targets a newer Go release than the one it was built with.
+# This is pinned to the 1.26 minor version band rather than left
+# unconstrained ("default"/go.mod auto-detection): an unconstrained request
+# can resolve to a much newer Go release (e.g. 1.27), and building
 # golangci-lint with a toolchain far newer than it was designed for breaks
 # its type-checking (incompatible compiled package export-data versions).
-# This has no effect on what Go version golangci-lint analyzes: that's
-# controlled by this project's own go.mod/.golangci.yml, which still target
-# Go 1.24.
 rev = "v2.10.1"
 
 [[repos.hooks]]
 id = "golangci-lint-fmt"
 args = ["-c", ".golangci.yml"]
-language_version = "1.25"
+language_version = "1.26"
 priority = "format"
 
 [[repos.hooks]]
@@ -59,6 +56,6 @@ id = "golangci-lint-full"
 # --allow-parallel-runners avoids lock contention with the concurrently
 # running examples/go nested project's own golangci-lint-full invocation.
 args = ["-c", ".golangci.yml", "--fix", "--allow-parallel-runners"]
-language_version = "1.25"
+language_version = "1.26"
 priority = "lint"
 

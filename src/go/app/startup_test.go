@@ -349,7 +349,7 @@ func newStartupTestNode(t *testing.T, hostname, osType string, snapshot bool, in
 		GeneralF: &v1.General{
 			HostnameF:  hostname,
 			SnapshotF:  &snapshot,
-			DoNotBootF: boolPtr(false),
+			DoNotBootF: new(false),
 		},
 		HardwareF: &v1.Hardware{
 			OSTypeF: osType,
@@ -429,9 +429,4 @@ func hasInjection(node *v1.Node, dst string) bool {
 	}
 
 	return false
-}
-
-// boolPtr returns a pointer to v.
-func boolPtr(v bool) *bool {
-	return &v
 }

@@ -4,7 +4,7 @@ This tutorial walks you through running, modifying, and testing the features of 
 
 ## Prerequisites
 
-* **Go**: Version 1.24+ (for the Go example)
+* **Go**: Version 1.26+ (for the Go example)
 * **Python**: Version 3.12+ (for the Python example). On Debian/Ubuntu, ensure `python3-venv` is installed.
 * **Make**: To run the automated build targets.
 

@@ -464,9 +464,7 @@ func newVMInfoCmd() *cobra.Command {
 				return err
 			}
 
-			printer.PrintTableOfVMs(os.Stdout, MustGetBool(cmd.Flags(), "taps"), vms...)
-
-			return nil
+			return printer.PrintTableOfVMs(os.Stdout, MustGetBool(cmd.Flags(), "taps"), vms...)
 		},
 	}
 
@@ -1049,9 +1047,7 @@ func newVMCaptureCmd() *cobra.Command {
 
 			plog.Info(plog.TypeSystem, "subnet packet captures started", "subnet", subnet)
 
-			printer.PrintTableOfSubnetCaptures(os.Stdout, vms)
-
-			return nil
+			return printer.PrintTableOfSubnetCaptures(os.Stdout, vms)
 		},
 	}
 

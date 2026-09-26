@@ -6,7 +6,7 @@
 update.cooldown_days = 30
 minimum_prek_version = "0.4.11"
 default_language_version.python = "3.12"
-default_language_version.golang = "1.24"
+default_language_version.golang = "1.26"
 
 # All hooks at the same priority level will run *concurrently* (in parallel),
 # and hooks with a lower priority will run before hooks with a higher priority.
@@ -92,11 +92,11 @@ rev = "v2.12.2"
 [[repos.hooks]]
 id = "golangci-lint-config-verify"
 entry = "golangci-lint config verify -c src/go/.golangci.yml"
-# Pinned to the 1.25 minor version band (v2.12.2 needs Go 1.25+ to build)
+# Pinned to the 1.26 minor version band (matching the Go projects' go.mod)
 # rather than left unconstrained ("default"/go.mod auto-detection): see
 # src/go/prek.toml for why an unconstrained request is unsafe (can resolve
 # to a much newer Go release that golangci-lint can't be built with reliably).
-language_version = "1.25"
+language_version = "1.26"
 priority = "format"
 
 

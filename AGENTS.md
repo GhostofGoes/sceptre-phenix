@@ -57,7 +57,7 @@ authority when guidance differs, and update the skills when behavior changes.
 
 ## Setup and Common Commands
 
-Requirements: Go 1.24+, Node.js 24+, Python 3.12+, `protoc` 3.12+, npm, and
+Requirements: Go 1.26+, Node.js 24+, Python 3.12+, `protoc` 3.12+, npm, and
 Docker for full deployments and image builds.
 
 | Purpose | Command |

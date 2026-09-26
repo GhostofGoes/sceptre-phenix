@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 
 	"phenix/api/experiment"
@@ -108,14 +111,25 @@ func newUtilRoleTableCmd() *cobra.Command {
 			}
 
 			if MustGetBool(cmd.Flags(), "pretty") {
-				table := tablewriter.NewWriter(os.Stdout)
-				table.SetHeader(header)
-				table.AppendBulk(data)
-				table.SetBorders(
-					tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false},
+				for i, h := range header {
+					header[i] = strings.ToUpper(h)
+				}
+
+				table := tablewriter.NewTable(
+					os.Stdout,
+					tablewriter.WithRenderer(renderer.NewMarkdown()),
+					tablewriter.WithHeaderAutoFormat(tw.Off),
+					tablewriter.WithRowAlignment(tw.AlignLeft),
 				)
-				table.SetCenterSeparator("|")
-				table.Render()
+				table.Header(header)
+
+				if err := table.Bulk(data); err != nil {
+					return fmt.Errorf("adding permissions to table: %w", err)
+				}
+
+				if err := table.Render(); err != nil {
+					return fmt.Errorf("rendering permissions table: %w", err)
+				}
 			} else {
 				w := csv.NewWriter(os.Stdout)
 

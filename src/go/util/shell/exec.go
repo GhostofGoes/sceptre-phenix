@@ -139,11 +139,7 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 		}
 	}()
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stdout)
 		scanner.Split(o.splitter)
 
@@ -165,13 +161,9 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 		if o.stdout != nil {
 			close(o.stdout)
 		}
-	}()
+	})
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
+	wg.Go(func() {
 		scanner := bufio.NewScanner(stderr)
 		scanner.Split(bufio.ScanLines)
 
@@ -193,7 +185,7 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 		if o.stderr != nil {
 			close(o.stderr)
 		}
-	}()
+	})
 
 	wg.Wait()
 

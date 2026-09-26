@@ -385,11 +385,7 @@ func TestRunConcurrentCommands(t *testing.T) {
 	)
 
 	for i := range workers {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			cmd := &Command{Command: fmt.Sprintf("cmd-%d", i)}
 
 			// the fake echoes the command it was sent, so a worker seeing
@@ -417,7 +413,7 @@ func TestRunConcurrentCommands(t *testing.T) {
 			if count != 1 {
 				errs <- fmt.Errorf("%s got %d responses, want 1", want, count)
 			}
-		}()
+		})
 	}
 
 	go func() {

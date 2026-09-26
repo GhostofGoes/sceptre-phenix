@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"go.etcd.io/etcd/v3/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type Etcd struct {
@@ -60,7 +60,7 @@ func (e *Etcd) IsInitialized(component Component) bool {
 		return false
 	}
 
-	return string(resp.Kvs[0].Value) == "true"
+	return string(resp.Kvs[0].GetValue()) == "true"
 }
 
 func (e *Etcd) InitializeComponent(component Component) error {
@@ -90,7 +90,7 @@ func (e Etcd) List(kinds ...string) (Configs, error) {
 		for _, entry := range resp.Kvs {
 			var c Config
 
-			err := json.Unmarshal(entry.Value, &c)
+			err := json.Unmarshal(entry.GetValue(), &c)
 			if err != nil {
 				return nil, fmt.Errorf("unmarshaling config JSON: %w", err)
 			}
@@ -116,7 +116,7 @@ func (e Etcd) Get(c *Config) error {
 
 	entry := resp.Kvs[0]
 
-	if err := json.Unmarshal(entry.Value, &c); err != nil {
+	if err := json.Unmarshal(entry.GetValue(), &c); err != nil {
 		return fmt.Errorf("unmarshaling config JSON: %w", err)
 	}
 

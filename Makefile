@@ -83,7 +83,7 @@ generate:
 	$(MAKE) -C src/go generate
 
 install-dev:
-	$(call check-command,go,Please install Go 1.24+ (https://go.dev/doc/install))
+	$(call check-command,go,Please install Go 1.26+ (https://go.dev/doc/install))
 	$(call check-command,protoc,Please install protobuf-compiler (e.g. sudo apt install protobuf-compiler))
 	$(call check-command,npm,Please install npm (e.g. sudo apt install npm))
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
@@ -127,7 +127,7 @@ ui:
 	$(MAKE) -C src/js dist/index.html
 
 bin/phenix: generate $(if $(SKIP_UI),,ui)
-	$(call check-command,go,Please install Go 1.24+)
+	$(call check-command,go,Please install Go 1.26+)
 	cp -a src/js/dist/* src/go/web/public
 	$(MAKE) -C src/go phenix
 	mkdir -p bin
