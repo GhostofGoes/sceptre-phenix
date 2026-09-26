@@ -138,7 +138,7 @@
         </footer>
       </div>
     </b-modal>
-    <template v-if="experiments.length == 0">
+    <template v-if="loaded && experiments.length == 0">
       <section class="hero is-bold is-large">
         <div class="hero-body">
           <div class="container" style="text-align: center">
@@ -159,13 +159,19 @@
     </template>
     <template v-else>
       <b-field position="is-right" grouped>
+        <div
+          v-if="paginationNeeded"
+          class="control is-flex is-align-items-center">
+          <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+            >Paginate</b-switch
+          >
+        </div>
         <b-field>
           <b-autocomplete
             v-model="searchName"
             placeholder="Find an Experiment"
             icon="search"
-            :data="filteredData"
-            @select="(option) => (filtered = option)">
+            :data="filteredData">
             <template #empty> No results found </template>
           </b-autocomplete>
           <p class="control">
@@ -190,7 +196,7 @@
       <div>
         <b-table
           :data="filteredExperiments"
-          :paginated="table.isPaginated"
+          :paginated="table.isPaginated && paginationNeeded"
           :per-page="table.perPage"
           v-model:current-page="table.currentPage"
           :pagination-simple="table.isPaginationSimple"
@@ -200,12 +206,25 @@
           <template #empty>
             <section class="section">
               <div class="content has-text-white has-text-centered">
-                Your search turned up empty!
+                {{
+                  loaded
+                    ? 'No experiments match your search'
+                    : loadingText('experiments')
+                }}
               </div>
             </section>
           </template>
-          <b-table-column field="name" label="Name" sortable v-slot="props">
-            <template v-if="updating(props.row.status)">
+          <b-table-column
+            field="name"
+            label="Name"
+            sortable
+            header-class="sort-inline"
+            v-slot="props">
+            <template
+              v-if="
+                updating(props.row.status) ||
+                !roleAllowed('experiments', 'get', props.row.name)
+              ">
               {{ props.row.name }}
             </template>
             <template v-else>
@@ -225,6 +244,7 @@
             label="Status"
             width="100"
             sortable
+            header-class="sort-inline"
             centered
             v-slot="props">
             <template v-if="props.row.status == 'starting'">
@@ -238,7 +258,13 @@
               </section>
             </template>
             <template
-              v-else-if="roleAllowed('experiments', 'update', props.row.name)">
+              v-else-if="
+                roleAllowed(
+                  props.row.running ? 'experiments/stop' : 'experiments/start',
+                  'update',
+                  props.row.name,
+                )
+              ">
               <b-tooltip
                 :label="getExpControlLabel(props.row.name, props.row.status)"
                 type="is-dark">
@@ -275,6 +301,7 @@
             field="start_time"
             label="Start Time"
             sortable
+            header-class="sort-inline"
             v-slot="props">
             {{ props.row.start_time }}
           </b-table-column>
@@ -284,6 +311,7 @@
             width="50"
             centered
             sortable
+            header-class="sort-inline"
             v-slot="props">
             {{ props.row.vm_count }}
           </b-table-column>
@@ -306,7 +334,10 @@
               <button
                 v-if="roleAllowed('experiments', 'delete', props.row.name)"
                 class="button is-light is-small"
-                :disabled="updating(props.row.status)"
+                :class="{ 'is-loading': deleting[props.row.name] }"
+                :disabled="
+                  updating(props.row.status) || deleting[props.row.name]
+                "
                 @click="del(props.row.name, props.row.running)">
                 <b-icon icon="trash"></b-icon>
               </button>
@@ -345,18 +376,6 @@
             </b-tooltip>
           </b-table-column>
         </b-table>
-        <br />
-        <b-field v-if="paginationNeeded" grouped position="is-right">
-          <div class="control is-flex">
-            <b-switch
-              v-model="table.isPaginated"
-              size="is-small"
-              type="is-light"
-              @input="changePaginate()"
-              >Paginate</b-switch
-            >
-          </div>
-        </b-field>
       </div>
     </template>
     <b-loading
@@ -367,34 +386,56 @@
 </template>
 
 <script>
+  import { createLiveRows } from '@/utils/liveRows.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
   export default {
     mixins: [formattingMixin],
 
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable({ name: 'experiments' }), roleAllowed };
     },
 
     async beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      this.updateExperiments();
+      this.liveRows = createLiveRows();
+      this.loader = createPageLoader({
+        key: 'experiments',
+        fetch: pageFetchers.experiments,
+        apply: (experiments, { requestedAt }) => {
+          // the server reports a starting experiment's progress from 0 to 1
+          const loaded = experiments.map((exp) => ({
+            ...exp,
+            percent: Math.round((exp.percent ?? 0) * 100),
+          }));
+          this.experiments = this.liveRows.merge(
+            loaded,
+            this.experiments,
+            requestedAt,
+          );
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
       axiosInstance
         .get('/options')
         .then((resp) => {
           this.options = resp.data;
         })
         .catch((err) => {
-          console.log(err);
+          console.warn('failed to get experiment options', err);
         });
     },
 
@@ -402,12 +443,12 @@
       filteredExperiments: function () {
         let experiments = this.experiments;
 
-        var name_re = new RegExp(this.searchName, 'i');
+        const term = (this.searchName ?? '').toLowerCase();
         var data = [];
 
         for (let i in experiments) {
           let exp = experiments[i];
-          if (exp.name.match(name_re)) {
+          if (exp.name.toLowerCase().includes(term)) {
             exp.start_time = exp.start_time == '' ? 'N/A' : exp.start_time;
             data.push(exp);
           }
@@ -431,20 +472,9 @@
         });
       },
 
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
       paginationNeeded() {
-        this.restorePaginate();
-
-        if (this.experiments.length <= 10) {
-          this.table.isPaginated = false;
-          return false;
-        } else {
-          return true;
-        }
+        return this.experiments.length > this.table.perPage;
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
 
       bridgeMode() {
         return this.options['bridge-mode'];
@@ -452,12 +482,15 @@
     },
 
     methods: {
+      loadingText,
+
       handleWs(msg) {
         // We only care about publishes pertaining to an experiment resource.
         if (msg.resource.type != 'experiment') {
           return;
         }
 
+        this.liveRows.touch(msg.resource.name);
         let exp = this.experiments;
 
         switch (msg.resource.action) {
@@ -512,8 +545,8 @@
 
             let toast = `The ${msg.resource.name} experiment has been started`;
 
-            if (msg.resource.delayed_vms > 0) {
-              toast = `${toast} (with ${msg.resource.delayed_vms} delayed VMs).`;
+            if (msg.result.delayed_vms > 0) {
+              toast = `${toast} (with ${msg.result.delayed_vms} delayed VMs).`;
             } else {
               toast = `${toast}.`;
             }
@@ -588,18 +621,6 @@
         }
       },
 
-      updateExperiments() {
-        axiosInstance
-          .get('experiments')
-          .then((response) => {
-            this.experiments = response.data.experiments;
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-          });
-      },
-
       updateTopologies() {
         axiosInstance
           .get('topologies')
@@ -655,11 +676,7 @@
           onConfirm: () => {
             axiosInstance
               .post('experiments/' + name + '/start')
-              .then((_) => {
-                console.log('experiment started');
-              })
               .catch((err) => {
-                console.log('experiment start fail', err);
                 for (let i = 0; i < this.experiments.length; i++) {
                   if (this.experiments[i].name == name) {
                     this.experiments[i].status = 'stopped';
@@ -696,15 +713,10 @@
           type: 'is-danger',
           hasIcon: true,
           onConfirm: () => {
-            axiosInstance
-              .post('experiments/' + name + '/stop')
-              .then((response) => {
-                console.log('experiment stopped: ' + response);
-              })
-              .catch((err) => {
-                useErrorNotification(err);
-                this.isWaiting = false;
-              });
+            axiosInstance.post('experiments/' + name + '/stop').catch((err) => {
+              useErrorNotification(err);
+              this.isWaiting = false;
+            });
           },
         });
       },
@@ -731,27 +743,18 @@
             type: 'is-danger',
             hasIcon: true,
             onConfirm: () => {
-              this.isWaiting = true;
+              // only this experiment's button spins while it is deleted
+              this.deleting[name] = true;
 
               axiosInstance
                 .delete('experiments/' + name)
-                .then((response) => {
-                  if (response.status == 204) {
-                    let exp = this.experiments;
-                    for (let i = 0; i < exp.length; i++) {
-                      if (exp[i].name == name) {
-                        exp.splice(i, 1);
-                        break;
-                      }
-                    }
-                    this.experiments = [...exp];
-                  }
-                  this.isWaiting = false;
+                .then(() => {
+                  this.experiments = this.experiments.filter(
+                    (exp) => exp.name != name,
+                  );
                 })
-                .catch((err) => {
-                  useErrorNotification(err);
-                  this.isWaiting = false;
-                });
+                .catch((err) => useErrorNotification(err))
+                .finally(() => delete this.deleting[name]);
             },
           });
         }
@@ -944,7 +947,7 @@
 
     directives: {
       focus: {
-        inserted(el) {
+        mounted(el) {
           if (el.tagName == 'INPUT') {
             el.focus();
           } else {
@@ -976,11 +979,9 @@
         experiments: [],
         topologies: [],
         searchName: '',
-        filtered: null,
-        isMenuActive: false,
-        action: null,
-        rowName: null,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
+        deleting: {}, // names of the experiments being deleted
+        loaded: false, // false until the first list arrives
         options: {},
       };
     },

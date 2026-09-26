@@ -83,6 +83,8 @@ type pipeline struct {
 	Pipeline []*node   `json:"pipeline"`
 	Loop     *pipeline `json:"loop,omitempty"`
 	Name     string    `json:"name,omitempty"`
+	// whether the run defines cleanup components, which can be run on their own
+	HasCleanup bool `json:"hasCleanup"`
 
 	exp    string
 	runID  int
@@ -525,6 +527,7 @@ func getPipeline(name string, run, loop int) (*pipeline, error) {
 		}
 	}
 
+	pl.HasCleanup = len(exe.Cleanup) > 0
 	if len(exe.Cleanup) == 0 {
 		pl.addComponentToStage(stageCleanup, pl.done)
 	} else {

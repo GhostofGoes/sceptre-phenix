@@ -120,7 +120,6 @@
       </b-field>
     </b-field>
     <div style="position: relative; background: #484848">
-      <b-loading :is-full-page="false" v-model="isLoading"></b-loading>
       <div class="columns row mb-0 has-text-weight-bold mx-0">
         <div class="log-column level-column">Level</div>
         <div class="log-column ts-column">Timestamp</div>
@@ -128,6 +127,16 @@
         <div class="log-column column is-rest">Message</div>
       </div>
 
+      <div v-if="!loaded" class="has-text-centered p-4">
+        {{ loadingText('logs') }}
+      </div>
+      <div v-else-if="filteredLogs.length === 0" class="has-text-centered p-4">
+        {{
+          logs.length
+            ? 'No logs match your filters'
+            : 'No logs in this time range'
+        }}
+      </div>
       <RecycleScroller
         ref="logScroller"
         :items="filteredLogs"
@@ -185,8 +194,9 @@
   import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
   import axiosInstance from '@/utils/axios.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { DEFAULT_LOG_WINDOW, pageFetchers } from '@/utils/pageData.js';
 
   const KNOWN_LEVELS = [
     // in-order
@@ -195,9 +205,10 @@
     'WARN',
     'ERROR',
   ];
+  const DEFAULT_DATE_FILTER = 'Last 10 Minutes';
   const DATE_MODES = {
     // date dropdown options. text => seconds to go back
-    'Last 10 Minutes': 10 * 60,
+    'Last 10 Minutes': DEFAULT_LOG_WINDOW,
     'Last 30 Minutes': 30 * 60,
     'Last 1 Hour': 60 * 60,
     'Last 6 Hours': 6 * 60 * 60,
@@ -235,7 +246,36 @@
       this.startDate = new Date(
         Date.now() - this.dateModes[this.dateFilter] * 1000,
       );
-      this.getLogs();
+      this.loader = createPageLoader({
+        // only the default view is reopened, so only it is worth keeping;
+        // streamed entries are pushed onto the cached array too
+        key: () => (this.isDefaultView() ? 'logs' : null),
+        fetch: async (signal) => {
+          if (this.isDefaultView()) {
+            return pageFetchers.logs(signal);
+          }
+
+          // a refresh of a relative range ("Last 10 Minutes") moves it to now
+          if (this.endNow && this.dateModes[this.dateFilter] !== null) {
+            this.startDate = new Date(
+              Date.now() - this.dateModes[this.dateFilter] * 1000,
+            );
+          }
+          const query =
+            `logs?start=${this.startDate.toISOString()}` +
+            (this.endNow ? '' : `&end=${this.endDate.toISOString()}`);
+          return (await axiosInstance.get(query, { signal })).data ?? [];
+        },
+        apply: (logs) => {
+          this.logs = markRaw(logs);
+          this.loaded = true;
+          this.$nextTick(() => {
+            // the scroller is gone if the user left the page mid-request
+            this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
+          });
+        },
+      });
+      this.loader.start();
 
       addWsHandler(this.handleWs);
     },
@@ -243,6 +283,7 @@
     beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.applySearch.cancel();
+      this.loader.stop();
     },
 
     watch: {
@@ -313,25 +354,16 @@
     },
 
     methods: {
+      loadingText,
+
+      isDefaultView() {
+        return this.endNow && this.dateFilter === DEFAULT_DATE_FILTER;
+      },
+      // loads a newly chosen date range, dropping the old range's logs
       getLogs() {
-        this.isLoading = true;
-        let query =
-          `logs?start=${this.startDate.toISOString()}` +
-          (this.endNow ? '' : `&end=${this.endDate.toISOString()}`);
-        axiosInstance
-          .get(query)
-          .then((response) => {
-            this.logs = markRaw(response.data ?? []);
-            this.$nextTick(() => {
-              // the scroller is gone if the user left the page mid-request
-              this.$refs.logScroller?.scrollToPosition(Number.MAX_SAFE_INTEGER);
-              this.isLoading = false;
-            });
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isLoading = false;
-          });
+        this.logs = markRaw([]);
+        this.loaded = false;
+        this.loader.load();
       },
       // triggers getLogs call when date dropdown closes
       dateDropdownChange(n) {
@@ -354,7 +386,7 @@
         this.$refs.dateDropdown.isActive = false;
       },
       handleWs(msg) {
-        if (msg.resource.type == 'log' && this.endNow && !this.isLoading) {
+        if (msg.resource.type == 'log' && this.endNow) {
           this.logs.push(msg.result);
           this.logsVersion++;
         }
@@ -381,12 +413,12 @@
         startDate: new Date(),
         endDate: new Date(),
         endNow: true, // if true, ignore `endDate` and also append streaming logs
-        dateFilter: 'Last 10 Minutes', // dropdown selection. A key of `dateModes`
+        dateFilter: DEFAULT_DATE_FILTER, // dropdown selection. A key of `dateModes`
         levelFilter: 'INFO',
         typeFilter: [],
         searchInput: '', // bound to the search box; applied to searchFilter debounced
         searchFilter: '',
-        isLoading: false,
+        loaded: false, // false until the first logs arrive
       };
     },
   };

@@ -150,6 +150,10 @@ func startExperiment(name string) ([]byte, error) {
 
 	var progress float64
 
+	// the experiment list reports the latest progress to pages opened
+	// mid-start
+	defer startProgress.Delete(name)
+
 	count, _ := vm.Count(name)
 
 	for {
@@ -229,6 +233,8 @@ func startExperiment(name string) ([]byte, error) {
 				progress = p
 			}
 
+			startProgress.Store(name, progress)
+
 			plog.Debug(plog.TypeSystem, "percent deployed", statusKeyPercent, progress*percentMultiplier, "exp", name)
 
 			status := map[string]any{
@@ -246,6 +252,20 @@ func startExperiment(name string) ([]byte, error) {
 			time.Sleep(experimentStartCheckInterval)
 		}
 	}
+}
+
+// startProgress holds each starting experiment's launch progress, from 0 to 1.
+var startProgress sync.Map //nolint:gochecknoglobals // shared with the list handler
+
+// StartProgress reports how far along the named experiment's start is.
+func StartProgress(name string) float64 {
+	if p, ok := startProgress.Load(name); ok {
+		progress, _ := p.(float64)
+
+		return progress
+	}
+
+	return 0
 }
 
 func stopExperiment(name string) ([]byte, error) {

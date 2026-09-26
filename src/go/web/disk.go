@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,16 +11,56 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
 	"phenix/api/disk"
 	"phenix/util/mm"
 	"phenix/util/plog"
+	"phenix/web/broker"
+	bt "phenix/web/broker/brokertypes"
 	"phenix/web/middleware"
 	"phenix/web/rbac"
 	"phenix/web/util"
 )
+
+// diskChangeDebounce is how long images must stay unchanged before clients
+// are told they changed; an upload writes continuously until it completes.
+const diskChangeDebounce = 2 * time.Second
+
+// WatchDisks inspects disk images in the background, at startup and whenever
+// the minimega files directory changes, then tells clients allowed to list
+// disks to reload them. Listing disks then only waits on images that changed
+// in the meantime.
+func WatchDisks(ctx context.Context) {
+	warm := func() {
+		// without the cache (no qemu-img), warming would only add minimega load
+		if !disk.LocalInspection() {
+			return
+		}
+
+		if _, err := disk.GetImages(""); err != nil {
+			plog.Warn(plog.TypeSystem, "inspecting disk images", "err", err)
+		}
+	}
+
+	go warm()
+
+	dir := mm.GetMMFullPath("")
+
+	err := disk.Watch(ctx, dir, diskChangeDebounce, func() {
+		warm()
+		broker.Broadcast(
+			bt.NewRequestPolicy("disks", "list", ""),
+			bt.NewResource("disks", "", "update"),
+			json.RawMessage("{}"),
+		)
+	})
+	if err != nil {
+		plog.Warn(plog.TypeSystem, "disk list will not update on its own", "err", err)
+	}
+}
 
 // GetDisks - GET /disks.
 func GetDisks(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +93,11 @@ func GetDisks(w http.ResponseWriter, r *http.Request) {
 		for s := range strings.SplitSeq(diskType, ",") {
 			defaultDiskType |= disk.StringToKind(s)
 		}
+	}
+
+	// the UI's refresh button asks for every image to be inspected again
+	if query.Get("refresh") == "true" {
+		disk.ClearCache()
 	}
 
 	disks, err := disk.GetImages(expName)

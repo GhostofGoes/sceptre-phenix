@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 	"phenix/api/settings"
 	"phenix/api/vm"
 	"phenix/app"
+	"phenix/types"
 	putil "phenix/util"
 	"phenix/util/common"
 	"phenix/util/mm"
@@ -62,12 +64,16 @@ const percentDivisor = 100
 const defaultScreenshotSize = "215"
 
 // GetExperiments - GET /experiments.
+//
+// With vms=false the VMs are left out and nothing is asked of minimega: the
+// counts come from each topology.
 func GetExperiments(w http.ResponseWriter, r *http.Request) {
 	var (
 		ctx   = r.Context()
 		role  = middleware.RoleFromContext(ctx)
 		query = r.URL.Query()
 		size  = query.Get("screenshot")
+		noVMs = query.Get("vms") == "false" && size == ""
 	)
 
 	if !role.Allowed("experiments", "list") {
@@ -90,6 +96,8 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 
 	allowed := []*proto.Experiment{}
 
+	busy := anyExperimentLocked(experiments)
+
 	for _, exp := range experiments {
 		if !role.Allowed("experiments", "list", exp.Metadata.Name) {
 			continue
@@ -109,17 +117,7 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: limit per-experiment VMs based on RBAC
 
-		vms, err := vm.List(exp.Spec.ExperimentName())
-		if err != nil {
-			plog.Error(
-				plog.TypeSystem,
-				"listing VMs for experiment",
-				"exp",
-				exp.Spec.ExperimentName(),
-				"err",
-				err,
-			)
-		}
+		vms := listExperimentVMs(exp, noVMs || (busy && size == ""))
 
 		if exp.Running() && size != "" {
 			for i, v := range vms {
@@ -142,7 +140,16 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		allowed = append(allowed, util.ExperimentToProtobuf(exp, status, vms))
+		pb := util.ExperimentToProtobuf(exp, status, vms)
+		if noVMs {
+			pb.Vms = nil
+		}
+
+		if status == cache.StatusStarting {
+			pb.Percent = StartProgress(exp.Metadata.Name)
+		}
+
+		allowed = append(allowed, pb)
 	}
 
 	body, err := marshaler.Marshal(&proto.ExperimentList{Experiments: allowed})
@@ -158,6 +165,34 @@ func GetExperiments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, _ = w.Write(body)
+}
+
+// anyExperimentLocked reports whether any of the experiments is starting or
+// stopping. That keeps minimega busy for as long as it takes, so asking it
+// about VMs meanwhile would stall the experiment list until it finishes.
+func anyExperimentLocked(experiments []types.Experiment) bool {
+	for _, exp := range experiments {
+		if cache.IsExperimentLocked(exp.Metadata.Name) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// listExperimentVMs lists the experiment's VMs, from its topology alone when
+// minimega is busy.
+func listExperimentVMs(exp types.Experiment, busy bool) []mm.VM {
+	if busy {
+		return vm.ListConfigured(exp)
+	}
+
+	vms, err := vm.List(exp.Spec.ExperimentName())
+	if err != nil {
+		plog.Error(plog.TypeSystem, "listing VMs for experiment", "exp", exp.Spec.ExperimentName(), "err", err)
+	}
+
+	return vms
 }
 
 // CreateExperiment - POST /experiments.
@@ -1057,7 +1092,7 @@ func GetExperimentCaptures(w http.ResponseWriter, r *http.Request) {
 	)
 
 	for _, capture := range captures {
-		if role.Allowed("experiments/captures", "list", capture.VM) {
+		if role.Allowed("experiments/captures", "list", name+"/"+capture.VM) {
 			allowed = append(allowed, capture)
 		}
 	}
@@ -1116,14 +1151,23 @@ func GetExperimentFiles(w http.ResponseWriter, r *http.Request) {
 		files.SortBy(sortCol, sortDir == "asc")
 	}
 
+	total := len(files)
+
 	if pageNum != "" && perPage != "" {
-		n, _ := strconv.Atoi(pageNum)
-		s, _ := strconv.Atoi(perPage)
+		n, nErr := strconv.Atoi(pageNum)
+		s, sErr := strconv.Atoi(perPage)
+
+		// Paginate panics on a page or size below 1, and overflows on huge ones.
+		if nErr != nil || sErr != nil || n < 1 || s < 1 || n > math.MaxInt32 || s > math.MaxInt32 {
+			http.Error(w, "invalid pageNum or perPage", http.StatusBadRequest)
+
+			return
+		}
 
 		files = files.Paginate(n, s)
 	}
 
-	body, err := json.Marshal(util.WithRoot("files", files))
+	body, err := json.Marshal(map[string]any{"files": files, "total": total})
 	if err != nil {
 		plog.Error(plog.TypeSystem, "marshaling file list for experiment", "exp", name, "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1789,14 +1833,14 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/start", "update", fullName),
-		bt.NewResource("experiment/vm", name, "starting"),
+		bt.NewResource("experiment/vm", fullName, "starting"),
 		nil,
 	)
 
 	if err := mm.StartVM(mm.NS(expName), mm.VMName(name)); err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
@@ -1809,7 +1853,7 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
@@ -1822,7 +1866,7 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
@@ -1915,14 +1959,14 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/stop", "update", fullName),
-		bt.NewResource("experiment/vm", name, "stopping"),
+		bt.NewResource("experiment/vm", fullName, "stopping"),
 		nil,
 	)
 
 	if err := mm.StopVM(mm.NS(expName), mm.VMName(name)); err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
@@ -1935,7 +1979,7 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
@@ -1948,7 +1992,7 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
@@ -2034,7 +2078,7 @@ func RestartVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/restart", "update", fullName),
-		bt.NewResource("experiment/vm", name, "restarting"),
+		bt.NewResource("experiment/vm", fullName, "restarting"),
 		nil,
 	)
 
@@ -2804,7 +2848,7 @@ func StopCaptureSubnet(w http.ResponseWriter, r *http.Request) {
 		exp  = vars["exp"]
 	)
 
-	if !role.Allowed("exp/captureSubnet", "create", exp) {
+	if !role.Allowed("exp/captureSubnet", "delete", exp) {
 		user := middleware.UserFromContext(ctx)
 		plog.Warn(
 			plog.TypeSecurity,

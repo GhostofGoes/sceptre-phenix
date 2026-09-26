@@ -14,6 +14,7 @@
   import { watch } from 'vue';
 
   import { TimeoutTool } from '@/utils/timeout.js';
+  import { schedulePagePreload } from '@/utils/pageData.js';
 
   const store = usePhenixStore();
   const timeout = new TimeoutTool();
@@ -24,7 +25,7 @@
       store.features = data.features;
     })
     .catch((err) => {
-      console.log(err);
+      console.warn('failed to get enabled features', err);
     });
 
   onMounted(() => {
@@ -32,6 +33,7 @@
     if (import.meta.env.VITE_AUTH === 'disabled' || store.auth) {
       connectWebsocket();
       timeout.fetchAndStart();
+      schedulePagePreload();
     } else {
       const { auth } = storeToRefs(store);
       watch(auth, async (newAuth) => {
@@ -43,6 +45,7 @@
 
         if (newAuth) {
           timeout.fetchAndStart();
+          schedulePagePreload();
         }
       });
     }

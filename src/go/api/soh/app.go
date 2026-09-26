@@ -296,9 +296,9 @@ func (s *SOH) runChecks(ctx context.Context, exp *types.Experiment) error {
 
 							return
 						default:
-							vms := mm.GetVMInfo(mm.NS(ns), mm.VMName(host))
+							addrs, err := mm.GetVMIPv4(mm.NS(ns), mm.VMName(host))
 
-							if vms == nil {
+							if err != nil {
 								wg.AddError(
 									errors.New("unable to get DHCP details from minimega"),
 									map[string]any{hostKey: host},
@@ -306,8 +306,6 @@ func (s *SOH) runChecks(ctx context.Context, exp *types.Experiment) error {
 
 								return
 							} else {
-								addrs := vms[0].IPv4
-
 								if addrs == nil || addrs[idx] == "" {
 									time.Sleep(1 * time.Second)
 

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -113,12 +114,14 @@ func Start(opts ...ServerOption) error {
 	_ = ConfigureUsers(o.users)
 
 	var (
-		router = mux.NewRouter().StrictSlash(true)
-		assets http.FileSystem
+		router    = mux.NewRouter().StrictSlash(true)
+		assets    http.FileSystem
+		publicDir fs.FS // the same files as assets
 	)
 
 	if o.unbundled {
 		assets = http.Dir("web/public")
+		publicDir = os.DirFS("web/public")
 
 		plog.Info(plog.TypeSystem, "serving unbundled assets")
 	} else {
@@ -127,10 +130,15 @@ func Start(opts ...ServerOption) error {
 		if err != nil {
 			return err
 		}
+
+		if publicDir, err = fs.Sub(publicFS, "public"); err != nil {
+			return fmt.Errorf("opening embedded assets: %w", err)
+		}
 	}
 
 	if o.featured("tunneler-download") {
 		plog.Info(plog.TypeSystem, "Serving phēnix tunneler downloads")
+		router.HandleFunc("/downloads/tunneler", forward.ListTunnelers).Methods("GET")
 		router.HandleFunc("/downloads/tunneler/{name}", forward.GetTunneler).Methods("GET")
 	}
 
@@ -157,6 +165,12 @@ func Start(opts ...ServerOption) error {
 		StaticHandler(assets, true),
 	)
 
+	grapheditor, err := fs.Sub(publicDir, "grapheditor")
+	if err != nil {
+		return fmt.Errorf("opening grapheditor assets: %w", err)
+	}
+
+	router.Handle("/grapheditor/builder.bundle.js", BuilderBundleHandler(grapheditor, o.unbundled))
 	router.PathPrefix("/grapheditor/").Handler(
 		StaticHandler(assets, false),
 	)
@@ -264,6 +278,10 @@ func Start(opts ...ServerOption) error {
 		Methods("GET", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}/{loop}", weberror.ErrorHandler(scorch.GetPipeline)).
 		Methods("GET", "OPTIONS")
+	api.Handle("/experiments/{name}/scorch/pipelines/{run}/cleanup", weberror.ErrorHandler(scorch.CleanupPipeline)).
+		Methods("POST", "OPTIONS")
+	api.Handle("/experiments/{name}/scorch/pipelines/{run}/clear", weberror.ErrorHandler(scorch.ClearPipeline)).
+		Methods("POST", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}", weberror.ErrorHandler(scorch.StartPipeline)).
 		Methods("POST", "OPTIONS")
 	api.Handle("/experiments/{name}/scorch/pipelines/{run}", weberror.ErrorHandler(scorch.CancelPipeline)).
@@ -438,6 +456,10 @@ func Start(opts ...ServerOption) error {
 	plog.Info(plog.TypeSystem, "starting log publisher")
 
 	go SyncMinimegaLogs(context.Background(), o.minimegaLogs)
+
+	plog.Info(plog.TypeSystem, "starting disk image watcher")
+
+	WatchDisks(context.Background())
 
 	plog.Info(plog.TypeSystem, "using base path", "path", o.basePath)
 	plog.Info(plog.TypeSystem, "using JWT lifetime", "lifetime", o.jwtLifetime)

@@ -6,10 +6,72 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **minimega**: Far fewer minimega commands, which run one at a time and so hold up every page:
+  - Listing VMs sends 3 commands instead of about 3 per VM: captures are listed once, the head node is looked up once per process, and a snapshot VM's backing disk is looked up once per launch.
+  - Identical VM listings made at the same time share one run.
+  - Starting an experiment reads the start script and launches VMs on their own connection, so the UI stays responsive and start progress updates during the launch.
+  - Waiting for miniccc, building the start schedule, the SOH DHCP wait, subnet captures and port forwards ask only for the columns they need. Host disk usage takes one command per host, and concurrent host listings share one run.
+  - Copying files from a node pauses between status checks instead of polling nonstop.
+- **Web UI**: The experiment list no longer asks minimega about VMs (`GET /experiments?vms=false`), and the SCORCH page reuses it instead of listing experiments again.
+- **Web UI**: VM screenshots are taken every 15 seconds instead of 5, only of running VMs, and not while the browser tab is hidden. Hosts refresh every 30 seconds and VM tiles every 60, and only while the page is visible and focused.
+- **Web UI**: Pages, buttons and menu items now follow the server's permission names (logs get, settings update, SCORCH start/stop, snapshots, port forwards, VM start/pause, run SOH, user roles, disk commit, config names as kind/name). Pages a role cannot use redirect to one it can. Permission checks are faster on large VM tables.
+- **Web UI**: The Tunneler page lists the builds the server actually has (`GET /downloads/tunneler`) and says when none are installed.
+- **Web UI**: The Netflow table sizes itself to the window so the footer stays on screen, and netflow search no longer shows "No results found". The experiment file viewer uses the dark theme and indents JSON.
+- **Web UI**: The experiment page's Netflow tab shows flows as a themed table (time, source, destination, protocol name, packets, bytes), newest first, scrolling within the window instead of a fixed white text box. The search box reads "Search netflow" on that tab and filters the flows.
+- **Web UI**: Deleting an experiment spins only that row's delete button and then removes the row, instead of covering the page with a spinner.
+- **Web UI**: State of Health has an "All" filter (the default), keeps the chosen filter when the graph reloads, shows its filters on one line each, says "Loading…" on the SOH button until the graph loads, and only shows the tab bar when there is a Network Volume tab to switch to. The no-match message says "your filter criteria" and no longer has a Refresh Network button.
+- **Web UI**: Users has a search box and can sort by First Name. Error popups are wider and show each step of a nested server error on its own line, the root cause last in bold.
+- **Web UI**: On the SCORCH pipelines page the experiment name sits in a box colored by the experiment's state (green running, red stopped, yellow starting or stopping), clicking a node opens its output window at once with a loading spinner, and the node name in that window is outlined.
+- **API**: The SCORCH pipelines response includes the experiment's state (`experiment.status`). SCORCH component output and terminal endpoints now require permission to get the experiment.
+- **Hosts**: Disk usage for each host is measured at most once a minute, so the Hosts page no longer queues two minimega mesh commands per host every 10 seconds. Disk usage shows as a percentage.
+- **Web UI**: On the experiment page the VM rows appear first and screenshots fill in as the server takes them, with a loading image meanwhile. Uptime is narrower, and Uptime and Delay can be sorted. The Netflow tab is always shown (saying when there are no captures yet), the netflow button shows a spinner while a capture starts and sits left of the State of Health button.
+- **API**: Experiment listings report start progress (`percent`) for starting experiments. VM lists sent over the WebSocket no longer carry screenshots; they follow as `experiment/vm/screenshot` updates. VM lists can sort by `delayed`.
+- **Web UI**: Disks explain in tooltips which experiments use a disk and why an action is unavailable. The footer documentation button uses a book icon.
+- **Web UI**: The Disks table has Size on Disk and a sortable Virtual Size column, an Actions column (snapshot, clone, download, rename, delete), and a narrower Name, In Use and search box. Sort arrows now sit beside the heading in every table.
+- **Web UI**: A help button in the footer links to the phēnix documentation, and the Tunneler page links to its documentation page.
+- **API**: Disk listings name the experiments that use each disk (`experiments`, with whether each is running), including disks that back the images an experiment uses. This replaces the `experiment` field, which was never set.
+- **Web UI**: The SCORCH pipelines page can clear the status of a run that is not running, with a Clear button per run and Clear all beside Stop all (`POST /experiments/{name}/scorch/pipelines/{run}/clear`). Go to experiment now sits next to Back to SCORCH.
+- **Web UI**: The SCORCH component output window shows the component name on its own line, with the experiment, run name, stage and live status beneath it, so long titles no longer get cut off.
+- **Web UI**: Disks has an upload dialog like Configs, with drag and drop and the accepted file types listed; unsupported files are rejected with an error.
+- **Web UI**: Hosts can sort by RAM Used, RAM Total and Uptime, the "# of VMs" column is now "VMs", and sort arrows sit beside headings instead of over them.
+- **Web UI**: The experiment page is cached, so it opens at once from any page, and shows "Loading experiment…" when nothing is cached yet.
+- **Web UI**: The Scorch page has a button beside each SCORCH start/stop button that opens the experiment's pipelines. The Configs kind filter has an "All kinds" option.
+- **Web UI**: The Configs table can sort by Name and Last Updated, sort arrows sit next to the column titles, and Last Updated also shows how long ago the config changed, for example "(3 hours ago)". The kind filter and search box are visibly separate.
+- **Web UI**: Leaving the config editor, or a new config, without changing anything no longer asks about discarding edits.
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
 
 ### Fixed
 
+- **Web UI**: The running experiment's file viewer showed an empty box; JSON files on the stopped experiment showed "[object Object]".
+- **Web UI**: Experiment pages: VM events from another experiment with the same VM name no longer change rows; VM start/stop (including delayed starts) update rows; failed commits, snapshots and redeploys clear the busy state; trigger toasts appear; dates in snapshot and backing-image names are correct; "No" to replaying injects is respected; file pagination works; VM updates resume after a websocket reconnect; searching no longer reloads the whole experiment.
+- **Web UI**: The stopped experiment page pages VMs correctly, boot buttons check the right VM, the Experiments list shows delayed VM counts, the VM tiles clear button works, and the VM labels dialog closes after saving over HTTP/2.
+- **Server**: A websocket VM list request missing its sort or paging fields no longer crashes phenix; screenshot size is per client and validated; disconnected clients no longer leak goroutines; delayed-start events reach per-VM roles; VM start/stop events use `exp/vm` names; captures and SOH use the right permission checks; bad file paging values return 400.
+- **Web UI**: Stopping a netflow capture that the server had already stopped no longer shows "Error: not found"; the button resets and a message explains why. The netflow button can no longer be double-clicked into a second stop. The server's message now says no capture is running.
+- **Netflow**: A malformed netflow record no longer crashes phenix, and IPv6 addresses keep their host and port.
+- **Web UI**: The experiment page's search box, stop, SOH, SCORCH and column buttons no longer disappear for roles without file listing, and searching on the VNC tab searches VMs.
+- **Web UI**: State of Health draws the graph when it first appears after "no nodes match", clicking a not-booted node no longer shows the previously opened node, and VM updates arriving before the graph loads no longer throw.
+- **Web UI**: Stopping an experiment from the SCORCH page (or the Experiments page) no longer flips back to "started" when a list requested before the stop arrives after it.
+- **Web UI**: Users: Role sorting works; editing a user and closing the dialog no longer changes the row; a rejected edit keeps the dialog open; a failed delete no longer leaves a spinner; roles stay shown after updates from other sessions; resource names are no longer split into characters after a user is created; password errors are highlighted.
+- **Web UI**: Server error text in popups is escaped rather than rendered as HTML.
+- **SCORCH**: Fixed a data race between component output updates and new output streams, and on terminal ownership checks.
+- **Web UI**: Refreshing the Experiments page while a large experiment starts no longer hangs on "Loading experiments": the list no longer waits on minimega while an experiment starts or stops, and shows the starting experiment's progress.
+- **Web UI**: Sorting VMs on the experiment page no longer waits for every VM to be screenshotted.
+- **Web UI**: A disk's details now show the experiments using it, marking stopped ones, instead of always "N/A". Size sorting on Disks is correct for sizes in bytes and minimega's size format.
+- **Web UI**: Sorting Hosts by number of VMs now works.
+- **Web UI**: Configs open for viewing and editing in well under a second instead of several. The viewer reuses the config data it already fetched (and fetches on hover), the editor reuses the viewer's copy, and the Ace editor loads in the background in one round of requests. Download buttons show a spinner at once.
+- **Web UI**: Viewing a Topology config with builder data no longer errors, an invalid upload now reports its error, and the config search treats characters such as `(` literally.
+- **Web UI**: The Builder tab opens several times faster on a remote server (about 3.4 s to 0.7 s over a 100 ms link). mxGraph's loader fetched each of its ~140 source files separately, so the page made 182 requests; the server now serves the builder's scripts as one bundle it builds from the same files, leaving 26 requests.
+- **Web UI**: Fixed the Scorch page: the table no longer breaks when an experiment starts or stops, or when the search contains characters such as `(`. Exiting a terminal now clears its button, and terminals that closed while the page was away no longer linger. Request failures are reported.
+- **Web UI**: The SCORCH runs page no longer errors on run updates that arrive before it loads. It picks up runs added after loading, reports a failed terminal exit, and stops a component's previous output stream before starting another.
+- **Web UI**: Saving a config reports permission and network failures in the usual error notification instead of failing silently; validation errors still open the editor's error dialog.
+- **Web UI**: The paginate toggles on Disks, Experiments, Hosts and Users remember the choice again.
+- **Web UI**: The Settings page has a Reset Form button that discards unsaved changes.
+- **Web UI**: A failed SCORCH run now shows its error in a notification, and failures to start or stop a SCORCH run are reported instead of ignored. The server now sends the run's actual error, and humanized app errors no longer reach the UI as an empty object.
+- **Web UI**: Error notifications show their icon again.
+- **Web UI**: The browser console no longer fills with debug output (API responses, uploaded file objects, pipeline layout steps, websocket chatter). Leftover debug logging was removed, development-only diagnostics now appear only in development builds, real failures log as warnings or errors, and lint rejects new `console.log` calls.
+- **Web UI**: Empty tables say why they are empty (still loading, failed to load, nothing matches the search, or nothing exists yet) instead of "Your search turned up empty!".
+- **Web UI**: Paginate toggles sit above their tables instead of below them.
+- **Web UI**: The Console page no longer says console access is not configured while the console is starting, and names the real reason when it cannot start.
 - **Web UI**: Pages no longer stall for seconds the first time they are opened. The UI prefetches each page's code once idle, and the server now gzip-compresses static assets, marks Vite's hashed assets as immutable, and sends content-hash ETags so other static files (noVNC, xterm.js, the topology builder) are revalidated instead of re-downloaded.
 - **Web UI**: Leaving the Logs page before its logs finish loading no longer throws an error.
 - **Web UI**: Reduced the JavaScript loaded on every page by about a quarter (602 kB to 441 kB, 180 kB to 142 kB gzipped) by registering only the Buefy components the UI uses, and cut bundled image weight from 1.6 MB to about 110 kB.
@@ -21,9 +83,21 @@ All notable changes to this project will be documented in this file.
 - **Web UI**: Cached permission checks are reset when a different role logs in.
 - **Web UI**: Fixed a stopped experiment's schedule update throwing when a VM was not found.
 - **Web UI**: API responses (JSON, YAML, and plain text) are gzip-compressed for browsers that accept it, so large lists such as VMs, disks, and logs download faster on slow links.
+- **Web UI / Server**: Leaving a running experiment now stops the server from screenshotting its VMs every 5 seconds. Those screenshots kept minimega busy for the rest of the session, which made other pages, especially Hosts and Disks, wait on a loading spinner.
+- **Web UI**: Pages no longer hide behind a full-page spinner while their data loads. A status in the header shows when the page's data was last loaded, or that it is loading, and has a refresh button that reloads it without reloading the whole page. The Experiments, Configs, Disks, Hosts, Users, Logs, Scorch, and VM tiles pages show the data they last loaded straight away when you return to them. Pages cancel their requests when you leave. Hosts no longer spins forever when there are no hosts, Disks no longer spins forever after a failed load, and a stopped experiment's host and disk choices no longer repeat or reload with every search.
+- **Web UI**: After login, the UI loads the Experiments, Configs, Users, Logs, Hosts, Scorch, Settings, and Disks tabs in the background, two requests at a time, so they open with data already in place. A page's load keeps running when you leave it, for up to two minutes, so the data is ready when you return.
+- **CI**: The Frontend workflow cancels its superseded runs when new commits are pushed, like the other workflows. Closing or merging a pull request cancels the CI still running for it.
+- **Disks**: When `qemu-img` is installed (it is in the phenix container), phenix inspects disk images itself, in parallel, instead of running one minimega `disk info` per image in turn. It also skips images whose files have not changed since they were last inspected, so listing disks no longer holds up other minimega commands. Images are inspected at startup and whenever the images directory changes. Open Disks pages update on their own when images change, and the Disks refresh button has the server inspect every image again. An image is marked in use when a process holds a lock on it, as minimega does, but a backing image no longer reports the in-use state of the image built on it.
+- **Web UI**: Tables start unpaginated in a fresh browser. Each table's Paginate toggle is remembered separately in the browser's local storage, shared by every user of that browser and kept through logout and reloads; it is no longer stored per user.
+- **Web UI**: The Settings page shows its last-loaded settings straight away, with the header's refresh button to reload them. Reset Form restores the loaded settings at once instead of fetching them again, and Reset Form and Save Changes are disabled until something changes.
+- **Web UI**: The Scorch table keeps its column headings on one line when there is room, gives the Experiment column normal width, centers the status and terminal buttons under their headings, and puts the Experiment sort arrow next to its heading.
+- **Web UI**: The SCORCH pipeline page has a Back to SCORCH button, the experiment's name at the top, and Go to experiment, Start all and Stop all buttons. Start all starts the runs that are not running one after another, since SCORCH runs one at a time; Stop all stops the running run and cancels the rest. Each run is titled with its name and has a start/stop button next to its status that spins until the run starts or stops. The previous-loop button only shows when there is an earlier loop to return to. The page shows its last-loaded runs straight away when you return to it.
+- **Web UI**: The Scorch table has separate start/stop buttons next to the experiment and SCORCH statuses, spinning while a request is in flight, and a Go to experiment button. The SCORCH button's tooltip names the run it starts or stops. The terminal button only shows when the experiment has a SCORCH terminal. Fixed the experiment status failing to render for users who cannot start experiments.
+- **Web UI**: Removed unused pipeline drawing code and a dead component.
 
 ### Added
 
+- **SCORCH**: `POST /experiments/{name}/scorch/pipelines/{run}/cleanup` runs only a run's top-level cleanup stage, and the pipelines response marks runs with `hasCleanup`. The SCORCH pipeline page shows a Cleanup button for runs that define cleanup components.
 - **Web UI**: Bundle size budgets (size-limit) and Lighthouse CI audits run in CI; see `src/js/perf/README.md`.
 
 ## [1.0.0]

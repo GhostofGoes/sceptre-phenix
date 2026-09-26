@@ -69,7 +69,7 @@
         <section class="modal-card-body x-modal-dark">
           <div class="control">
             <textarea
-              class="textarea x-config-text has-fixed-size"
+              class="textarea has-fixed-size file-viewer"
               rows="30"
               v-model="fileViewerModal.contents"
               readonly></textarea>
@@ -113,7 +113,7 @@
             <b-button
               v-if="
                 selectedRows.every((vm) =>
-                  roleAllowed('vms', 'patch', experiment.name + '/' + vm.name),
+                  roleAllowed('vms', 'patch', experiment.name + '/' + vm),
                 )
               "
               class="button is-light boot"
@@ -126,7 +126,7 @@
             <b-button
               v-if="
                 selectedRows.every((vm) =>
-                  roleAllowed('vms', 'patch', experiment.name + '/' + vm.name),
+                  roleAllowed('vms', 'patch', experiment.name + '/' + vm),
                 )
               "
               class="button is-light dnb"
@@ -136,7 +136,7 @@
         </b-field>
         <hr style="width: 1px; height: 100%; margin: 0" />
       </template>
-      <b-field>
+      <b-field v-if="roleAllowed('experiments', 'patch', experiment.name)">
         <b-tooltip
           label="assign VLAN ID to alias"
           type="is-light"
@@ -192,7 +192,8 @@
             @click="start"></b-button>
         </b-tooltip>
       </b-field>
-      <b-field>
+      <b-field
+        v-if="roleAllowed('experiments/schedule', 'create', experiment.name)">
         <b-tooltip
           label="menu for scheduling hosts to the experiment"
           type="is-light"
@@ -213,7 +214,6 @@
         </b-tooltip>
       </b-field>
       <router-link
-        v-if="roleAllowed('experiments', 'get', experiment.name)"
         class="button is-light"
         :to="{ name: 'soh', params: { id: $route.params.id } }">
         <b-icon icon="heartbeat"></b-icon>
@@ -222,6 +222,17 @@
     <div style="margin-top: -4em">
       <b-tabs v-model="activeTab">
         <b-tab-item label="VMs" icon="desktop">
+          <b-field v-if="paginationNeeded" grouped position="is-right">
+            <div class="control is-flex">
+              <b-switch
+                v-model="table.isPaginated"
+                @update:modelValue="updateExperiment()"
+                size="is-small"
+                type="is-light"
+                >Paginate</b-switch
+              >
+            </div>
+          </b-field>
           <b-table
             :key="table.key"
             :data="experiment.vms"
@@ -241,7 +252,7 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  Your search turned up empty!
+                  {{ vmsEmptyText }}
                 </div>
               </section>
             </template>
@@ -260,7 +271,12 @@
                 </div>
               </template>
             </b-table-column>
-            <b-table-column field="name" label="Node" sortable v-slot="props">
+            <b-table-column
+              field="name"
+              label="Node"
+              sortable
+              header-class="sort-inline"
+              v-slot="props">
               <template
                 v-if="
                   !props.row.external &&
@@ -294,6 +310,7 @@
               label="Host"
               width="200"
               sortable
+              header-class="sort-inline"
               v-slot="props">
               <template
                 v-if="
@@ -346,6 +363,7 @@
               label="CPUs"
               width="100"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -380,6 +398,7 @@
               label="Memory"
               width="112"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -448,6 +467,7 @@
               field="inject_partition"
               label="Partition"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -537,23 +557,19 @@
               </template>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="paginationNeeded" grouped position="is-right">
+        </b-tab-item>
+        <b-tab-item label="Files" icon="file-alt" :visible="canListFiles">
+          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
             <div class="control is-flex">
               <b-switch
-                v-model="table.isPaginated"
-                @update:modelValue="
-                  updateExperiment();
-                  changePaginate();
-                "
+                v-model="filesTable.isPaginated"
+                @update:modelValue="updateFiles()"
                 size="is-small"
                 type="is-light"
                 >Paginate</b-switch
               >
             </div>
           </b-field>
-        </b-tab-item>
-        <b-tab-item label="Files" icon="file-alt">
           <b-table
             :data="files"
             :paginated="filesTable.isPaginated && filesPaginationNeeded"
@@ -571,11 +587,16 @@
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
-                  No Files Are Available!
+                  {{ filesEmptyText }}
                 </div>
               </section>
             </template>
-            <b-table-column field="name" label="Name" sortable v-slot="props">
+            <b-table-column
+              field="name"
+              label="Name"
+              sortable
+              header-class="sort-inline"
+              v-slot="props">
               <template v-if="props.row.plainText">
                 <b-tooltip label="view file" type="is-dark">
                   <div class="field is-clickable">
@@ -615,6 +636,7 @@
               field="date"
               label="Date"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ props.row.date }}
@@ -623,6 +645,7 @@
               field="size"
               label="Size"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ formatFileSize(props.row.size) }}
@@ -641,21 +664,6 @@
               </b-button>
             </b-table-column>
           </b-table>
-          <br />
-          <b-field v-if="filesPaginationNeeded" grouped position="is-right">
-            <div class="control is-flex">
-              <b-switch
-                v-model="filesTable.isPaginated"
-                @update:modelValue="
-                  updateFiles();
-                  changeFilesPaginate();
-                "
-                size="is-small"
-                type="is-light"
-                >Paginate</b-switch
-              >
-            </div>
-          </b-field>
         </b-tab-item>
       </b-tabs>
     </div>
@@ -667,6 +675,7 @@
 </template>
 
 <script>
+  import { fileText } from '@/utils/fileText.js';
   import { debounce } from 'lodash-es';
   import { tagCount } from '@/utils/tagCount';
   import { usePhenixStore } from '@/store';
@@ -676,90 +685,113 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { stoppedExperimentKey } from '@/utils/pageData.js';
+  import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
 
   export default {
+    emits: ['running'],
     mixins: [formattingMixin],
     setup() {
       return { roleAllowed, tagCount };
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      this.updateExperiment();
+      this.loader = createPageLoader({
+        // only the default view is cached, as its request is the same each
+        // visit
+        key: () =>
+          this.searchName || this.table.isPaginated || !this.defaultSort
+            ? null
+            : stoppedExperimentKey(this.$route.params.id),
+        fetch: async (signal) => {
+          const params = {
+            show_dnb: true,
+            filter: this.searchName,
+            sortCol: this.table.sortColumn,
+            sortDir: this.table.defaultSortDirection,
+          };
+
+          if (this.table.isPaginated) {
+            params.pageNum = this.table.currentPage;
+            params.perPage = this.table.perPage;
+          }
+
+          const resp = await axiosInstance.get(
+            'experiments/' + this.$route.params.id,
+            { params, signal },
+          );
+          return resp.data;
+        },
+        apply: (experiment) => {
+          if (experiment.running) {
+            // started since the page was opened; Base shows the running view
+            this.$emit('running', true);
+            return;
+          }
+          this.experiment = experiment;
+          // vms holds only the current page; vm_count is the total before paging
+          this.table.total = experiment.vm_count ?? 0;
+
+          this.vlanModal.vlans = this.experiment.vlans.map((vlan) => {
+            return vlan;
+          });
+
+          // Only add successful searches to the search history
+          if (this.table.total > 0) {
+            if (this.searchHistory.length >= this.searchHistoryLength) {
+              this.searchHistory.pop();
+            }
+            this.searchHistory.push(this.searchName.trim());
+            this.searchHistory = this.getUniqueItems(this.searchHistory);
+          }
+        },
+        refresh: () => {
+          this.updateLists();
+          return this.loader.load();
+        },
+      });
+      this.loader.start();
+      this.updateLists();
     },
 
     computed: {
-      vms: function () {
-        let vms = this.experiment.vms;
-
-        var name_re = new RegExp(this.searchName, 'i');
-        var data = [];
-
-        for (let i in vms) {
-          let vm = vms[i];
-          if (vm.name.match(name_re)) {
-            data.push(vm);
-          }
-        }
-
-        return vms;
+      defaultSort() {
+        return (
+          this.table.sortColumn === 'name' &&
+          this.table.defaultSortDirection === 'asc'
+        );
+      },
+      vmsEmptyText() {
+        if (!this.experiment.name) return loadingText('VMs');
+        if (this.searchName) return 'No VMs match your search';
+        return 'This experiment has no VMs';
       },
 
-      filteredData() {
-        if (this.experiment.length == 0) {
-          return [];
+      filesEmptyText() {
+        if (!this.filesLoaded) return 'Loading files…';
+        if (this.searchName || this.filesTable.category) {
+          return 'No files match your search';
         }
-
-        let names = this.experiment.vms.map((vm) => {
-          return vm.name;
-        });
-
-        return names.filter((option) => {
-          return (
-            option
-              .toString()
-              .toLowerCase()
-              .indexOf(this.searchName.toLowerCase()) >= 0
-          );
-        });
+        return 'This experiment has no files yet';
       },
 
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
+      canListFiles() {
+        return roleAllowed('experiments/files', 'list', this.$route.params.id);
+      },
+
       paginationNeeded() {
-        var user = usePhenixStore().username;
-
-        if (localStorage.getItem(user + '.lastPaginate')) {
-          this.table.isPaginated =
-            localStorage.getItem(user + '.lastPaginate') == 'true';
-        }
-
-        if (this.table.total <= this.table.perPage) {
-          return false;
-        } else {
-          return true;
-        }
+        return this.table.total > this.table.perPage;
       },
 
       filesPaginationNeeded() {
-        var user = usePhenixStore().username;
-
-        if (localStorage.getItem(user + '.lastPaginate')) {
-          this.filesTable.isPaginated =
-            localStorage.getItem(user + '.lastPaginate') == 'true';
-        }
-
-        if (this.filesTable.total <= this.filesTable.perPage) {
-          return false;
-        } else {
-          return true;
-        }
+        return this.filesTable.total > this.filesTable.perPage;
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
     },
 
     methods: {
@@ -787,34 +819,6 @@
           return 'boot';
         }
       },
-      getSnapshotStatus(vm, persistanceLabel) {
-        if (vm.external) {
-          return true;
-        }
-
-        if (vm.snapshot && persistanceLabel) {
-          return true;
-        } else if (vm.snapshot && !persistanceLabel) {
-          return false;
-        } else if (!vm.snapshot && persistanceLabel) {
-          return false;
-        } else {
-          return true;
-        }
-      },
-
-      changePaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(user + '.lastPaginate', this.table.isPaginated);
-      },
-
-      changeFilesPaginate() {
-        var user = usePhenixStore().username;
-        localStorage.setItem(
-          user + '.lastPaginate',
-          this.filesTable.isPaginated,
-        );
-      },
 
       onPageChange(page) {
         this.table.currentPage = page;
@@ -839,6 +843,12 @@
       },
 
       handleWs(msg) {
+        // experiment resources are named "exp", VM resources "exp/vm"
+        const [exp] = (msg.resource?.name ?? '').split('/');
+        if (exp !== this.$route.params.id || !this.experiment.vms) {
+          return;
+        }
+
         switch (msg.resource.type) {
           case 'experiment': {
             // We only care about experiment publishes pertaining to the
@@ -847,18 +857,7 @@
               return;
             }
 
-            let vms = this.experiment.vms;
-
-            for (let i = 0; i < msg.result.schedule.length; i++) {
-              for (let j = 0; j < vms.length; j++) {
-                if (vms[j].name == msg.result.schedule[i].vm) {
-                  vms[j].host = msg.result.schedule[i].host;
-                  break;
-                }
-              }
-            }
-
-            this.experiment.vms = [...vms];
+            this.applySchedule(msg.result.schedule);
 
             this.$buefy.toast.open({
               message: 'The VMs for this experiment have been scheduled.',
@@ -898,63 +897,30 @@
         }
       },
 
-      updateExperiment() {
-        let params = '?show_dnb=true&filter=' + this.searchName;
-        params = params + '&sortCol=' + this.table.sortColumn;
-        params = params + '&sortDir=' + this.table.defaultSortDirection;
+      // reloads the VM table for the current search, sort and page
+      async updateExperiment() {
+        await this.loader.load();
+        this.isWaiting = false;
+      },
 
-        if (this.table.isPaginated) {
-          params = params + '&pageNum=' + this.table.currentPage;
-          params = params + '&perPage=' + this.table.perPage;
+      // the host and disk choices for editing VMs; loaded on open and on
+      // refresh rather than with every search, since listing disks is slow
+      updateLists() {
+        if (roleAllowed('hosts', 'list')) {
+          this.updateHosts();
         }
-
-        axiosInstance
-          .get('experiments/' + this.$route.params.id + params)
-          .then(
-            (response) => {
-              this.experiment = response.data;
-              this.table.total = this.experiment.vms.length;
-
-              this.vlanModal.vlans = this.experiment.vlans.map((vlan) => {
-                return vlan;
-              });
-
-              // Only add successful searches to the search history
-              if (this.table.total > 0) {
-                if (this.searchHistory > this.searchHistoryLength) {
-                  this.searchHistory.pop();
-                }
-                this.searchHistory.push(this.searchName.trim());
-                this.searchHistory = this.getUniqueItems(this.searchHistory);
-              }
-
-              if (roleAllowed('hosts', 'list')) {
-                this.updateHosts();
-              }
-              if (roleAllowed('disks', 'list')) {
-                this.updateDisks();
-              }
-            },
-            (err) => {
-              useErrorNotification(err);
-            },
-          )
-          .finally(() => {
-            this.isWaiting = false;
-          });
+        if (roleAllowed('disks', 'list')) {
+          this.updateDisks();
+        }
       },
 
       updateHosts() {
         axiosInstance.get('hosts').then(
           (response) => {
-            for (let i = 0; i < response.data.hosts.length; i++) {
-              if (response.data.hosts[i].schedulable) {
-                this.hosts.push(response.data.hosts[i].name);
-              }
-
-              this.hosts.sort();
-              this.isWaiting = false;
-            }
+            this.hosts = response.data.hosts
+              .filter((host) => host.schedulable)
+              .map((host) => host.name)
+              .sort();
           },
           (err) => {
             useErrorNotification(err);
@@ -963,48 +929,46 @@
       },
 
       updateDisks() {
-        this.isWaiting = true;
-
         axiosInstance.get('disks' + '?expName=' + this.$route.params.id).then(
           (response) => {
-            this.isWaiting = false;
-
-            for (let i = 0; i < response.data.disks.length; i++) {
-              this.disks.push(response.data.disks[i].fullPath);
-            }
-
-            this.disks.sort((a, b) =>
-              this.getBaseName(a).localeCompare(this.getBaseName(b)),
-            );
+            this.disks = response.data.disks
+              .map((disk) => disk.fullPath)
+              .sort((a, b) =>
+                this.getBaseName(a).localeCompare(this.getBaseName(b)),
+              );
           },
           (err) => {
-            this.isWaiting = false;
             useErrorNotification(err);
           },
         );
       },
 
       updateFiles() {
-        let params = '?filter=' + this.searchName;
-        params = params + '&sortCol=' + this.filesTable.sortColumn;
-        params = params + '&sortDir=' + this.filesTable.defaultSortDirection;
+        if (!this.canListFiles) {
+          return;
+        }
 
-        if (this.table.isPaginated) {
-          params = params + '&pageNum=' + this.table.currentPage;
-          params = params + '&perPage=' + this.table.perPage;
+        const params = {
+          filter: this.searchName,
+          sortCol: this.filesTable.sortColumn,
+          sortDir: this.filesTable.defaultSortDirection,
+        };
+
+        if (this.filesTable.isPaginated) {
+          params.pageNum = this.filesTable.currentPage;
+          params.perPage = this.filesTable.perPage;
         }
 
         axiosInstance
-          .get('experiments/' + this.$route.params.id + '/files' + params)
+          .get('experiments/' + this.$route.params.id + '/files', { params })
           .then(
             (response) => {
-              this.files = response.data.files; // TODO: test
-              this.filesTable.total = response.data.total;
+              const files = response.data.files ?? [];
+              this.files = files;
+              this.filesTable.total = response.data.total ?? files.length;
 
-              for (let i = 0; i < response.data.files.length; i++) {
-                this.filesTable.categories.push(
-                  ...response.data.files[i].categories,
-                );
+              for (let i = 0; i < files.length; i++) {
+                this.filesTable.categories.push(...(files[i].categories ?? []));
               }
 
               this.filesTable.categories = this.getUniqueItems(
@@ -1012,10 +976,9 @@
               );
 
               if (this.filesTable.category) {
-                let files = this.files;
                 this.files = [];
                 for (let i = 0; i < files.length; i++) {
-                  if (files[i].categories.includes(this.filesTable.category)) {
+                  if (files[i].categories?.includes(this.filesTable.category)) {
                     this.files.push(files[i]);
                   }
                 }
@@ -1023,7 +986,7 @@
 
               // Only add successful searches to the search history
               if (this.files.length > 0) {
-                if (this.searchHistory > this.searchHistoryLength) {
+                if (this.searchHistory.length >= this.searchHistoryLength) {
                   this.searchHistory.pop();
                 }
 
@@ -1034,7 +997,10 @@
             (err) => {
               useErrorNotification(err);
             },
-          );
+          )
+          .finally(() => {
+            this.filesLoaded = true;
+          });
       },
 
       viewFile(file) {
@@ -1042,13 +1008,21 @@
 
         axiosInstance
           .get(
-            `experiments/${this.$route.params.id}/files/${file.name}?path=${file.path}`,
-            { headers: { Accept: 'text/plain' } },
+            `experiments/${this.$route.params.id}/files/${encodeURIComponent(file.name)}`,
+            {
+              params: { path: file.path },
+              headers: { Accept: 'text/plain' },
+              // show JSON files as text rather than parsing them
+              responseType: 'text',
+            },
           )
           .then(
             (response) => {
               this.fileViewerModal.title = file.path;
-              this.fileViewerModal.contents = response.data;
+              this.fileViewerModal.contents = fileText(
+                file.name,
+                response.data,
+              );
               this.fileViewerModal.active = true;
             },
             (err) => {
@@ -1117,9 +1091,6 @@
               .post('experiments/' + this.$route.params.id + '/start')
               .then(
                 () => {
-                  console.log(
-                    'the ' + this.$route.params.id + ' experiment was started.',
-                  );
                   this.$router.replace('/experiments/');
                 },
                 (err) => {
@@ -1546,17 +1517,7 @@
               })
               .then(
                 (response) => {
-                  let vms = this.experiment.vms;
-
-                  for (let i = 0; i < vms.length; i++) {
-                    if (vms[i].name == response.data.name) {
-                      vms[i] = response.data;
-                      break;
-                    }
-                  }
-
-                  this.experiment.vms = [...vms];
-
+                  this.applySchedule(response.data.schedule);
                   this.isWaiting = false;
                 },
                 (err) => {
@@ -1566,6 +1527,18 @@
               );
           },
         });
+      },
+
+      // sets each VM's host from a schedule of {vm, host} assignments
+      applySchedule(schedule) {
+        if (!schedule || !this.experiment.vms) {
+          return;
+        }
+
+        const hosts = new Map(schedule.map((s) => [s.vm, s.host]));
+        this.experiment.vms = this.experiment.vms.map((vm) =>
+          hosts.has(vm.name) ? { ...vm, host: hosts.get(vm.name) } : vm,
+        );
       },
 
       getUniqueItems(inputArray) {
@@ -1597,22 +1570,9 @@
       },
 
       setBoot(dnb) {
-        let vms = [];
+        let vms = [...this.selectedRows];
 
         let successMessage = '';
-
-        //Determine the list of VMs to apply the boot request to
-        if (this.selectedRows.length == 0 && this.searchName.length > 0) {
-          let visibleItems = this.$refs['vmTable'].visibleData;
-
-          for (let i = 0; i < visibleItems.length; i++) {
-            vms.push(visibleItems[i].name);
-          }
-        } else {
-          for (let i = 0; i < this.selectedRows.length; i++) {
-            vms.push(this.selectedRows[i]);
-          }
-        }
 
         if (vms.length == 0) {
           return;
@@ -1664,8 +1624,10 @@
             },
           );
 
-        // clear the selection
+        // clear the selection; the checkAll watcher does not fire when it
+        // is already false, so rows picked one by one are cleared here
         this.checkAll = false;
+        this.selectedRows = [];
       },
 
       getBaseName(diskName) {
@@ -1679,7 +1641,6 @@
       },
 
       downloadFile(exp_name, name, path) {
-        console.log('attempting to download file');
         const store = usePhenixStore();
         const basePath = import.meta.env.BASE_URL;
 
@@ -1694,6 +1655,12 @@
     },
 
     watch: {
+      'table.isPaginated'(on) {
+        savePaginate('stopped-vms', on);
+      },
+      'filesTable.isPaginated'(on) {
+        savePaginate('stopped-files', on);
+      },
       checkAll(newVal) {
         if (newVal) {
           var visibleItems = this.$refs['vmTable'].visibleData;
@@ -1730,7 +1697,7 @@
       return {
         table: {
           key: 0,
-          isPaginated: false,
+          isPaginated: loadPaginate('stopped-vms'),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
@@ -1740,7 +1707,7 @@
           defaultSortDirection: 'asc',
         },
         filesTable: {
-          isPaginated: false,
+          isPaginated: loadPaginate('stopped-files'),
           isPaginationSimple: true,
           currentPage: 1,
           perPage: 10,
@@ -1763,13 +1730,12 @@
         schedules: ['isolate_experiment', 'round_robin'],
         experiment: [],
         files: [],
+        filesLoaded: false,
         hosts: [],
         disks: [],
         searchName: '',
-        filtered: null,
         algorithm: null,
-        dnb: false,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
         searchHistory: [],
         searchHistoryLength: 10,
         checkAll: false,
@@ -1807,5 +1773,13 @@
 
   :deep(.b-tabs .tab-content) {
     padding: 1rem 0 0 0;
+  }
+
+  /* the configs viewer's colors */
+  .file-viewer {
+    background-color: #686868;
+    color: whitesmoke;
+    font-family: monospace;
+    white-space: pre;
   }
 </style>

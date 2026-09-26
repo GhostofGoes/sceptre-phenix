@@ -48,6 +48,14 @@ func GetVMHost(opts ...Option) (string, error) {
 	return DefaultMM.GetVMHost(opts...)
 }
 
+func GetVMHosts(opts ...Option) map[string]string {
+	return DefaultMM.GetVMHosts(opts...)
+}
+
+func GetVMIPv4(opts ...Option) ([]string, error) {
+	return DefaultMM.GetVMIPv4(opts...)
+}
+
 func GetVMState(opts ...Option) (string, error) {
 	return DefaultMM.GetVMState(opts...)
 }

@@ -110,3 +110,25 @@ test('static assets are compressed and cached', async ({ page, request }) => {
   expect(headers['content-encoding']).toBe('gzip');
   expect(headers['cache-control']).toContain('immutable');
 });
+
+// The builder page is the grapheditor, outside the Vue app. mxGraph's loader
+// fetched each of its ~140 source files separately, so the page made ~180
+// requests and took seconds on a remote server; the server now bundles them.
+test('topology builder loads its scripts in a few requests', async ({
+  page,
+}) => {
+  const issues = [];
+  attachCapture(page, issues);
+
+  const scripts = [];
+  page.on('request', (req) => {
+    if (req.resourceType() === 'script') scripts.push(req.url());
+  });
+
+  await page.goto('/builder');
+  await page.locator('.geSidebar').first().waitFor();
+
+  expect(scripts.length, scripts.join('\n')).toBeLessThan(10);
+  const fatal = fatalOf(issues);
+  expect(fatal, JSON.stringify(fatal, null, 2)).toHaveLength(0);
+});

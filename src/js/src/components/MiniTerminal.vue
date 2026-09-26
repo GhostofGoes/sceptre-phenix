@@ -63,7 +63,7 @@
           var url =
             this.resizePath + '?cols=' + size.cols + '&rows=' + size.rows;
           axiosInstance.post(url).catch((err) => {
-            console.log(err);
+            console.warn('failed to resize the terminal', err);
           });
         });
 

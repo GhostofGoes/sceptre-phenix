@@ -127,12 +127,12 @@ func createPortForward(exp, vm, src, host, dst, user string) error {
 
 		listener.QEMU = true
 	default:
-		info := mm.GetVMInfo(mm.NS(exp), mm.VMName(vm))
-		if len(info) == 0 {
+		clusterHost, err := mm.GetVMHost(mm.NS(exp), mm.VMName(vm))
+		if err != nil {
 			return fmt.Errorf("vm %s not found for experiment %s", vm, exp)
 		}
 
-		listener.ClusterHost = info[0].Host
+		listener.ClusterHost = clusterHost
 
 		listener.DstPort, err = strconv.Atoi(dst)
 		if err != nil {
@@ -341,8 +341,7 @@ func DeletePortForward(w http.ResponseWriter, r *http.Request) {
 		host = "127.0.0.1"
 	}
 
-	info := mm.GetVMInfo(mm.NS(exp), mm.VMName(vm))
-	if len(info) == 0 {
+	if _, err := mm.GetVMHost(mm.NS(exp), mm.VMName(vm)); err != nil {
 		http.Error(w, "vm not found", http.StatusNotFound)
 
 		return

@@ -264,13 +264,25 @@ func guard(
 // shared connection if it was disconnected. Any errors encountered will be
 // returned as part of the response channel, which the caller must drain.
 func Run(c *Command) chan *miniclient.Response {
+	return RunStarted(c, nil)
+}
+
+// RunStarted is Run, calling started (if not nil) just before the command is
+// sent, once it is no longer waiting behind other commands for the shared
+// connection. started may run with the shared connection's lock held, so it
+// must be quick and must not run minimega commands itself.
+func RunStarted(c *Command, started func()) chan *miniclient.Response {
 	cmdStr := c.String()
 
 	if c.Timeout > 0 {
-		return runWithTimeout(cmdStr, c.Timeout)
+		notify(started)
+
+		return runPrivate(cmdStr, c.Timeout)
 	}
 
 	mu.Lock()
+
+	notify(started)
 
 	active, err := conn()
 	if err != nil {
@@ -284,11 +296,27 @@ func Run(c *Command) chan *miniclient.Response {
 	return guard(active, active.Run(cmdStr), mu.Unlock)
 }
 
-// runWithTimeout runs a command on a connection of its own, so that abandoning
-// it on timeout cannot disturb commands in flight on the shared connection.
+// RunDedicated runs the given command on a connection of its own, with no
+// timeout. It is for long-running commands (such as reading an experiment's
+// script or launching its VMs) that would otherwise hold the shared connection,
+// and so every other command, for their whole duration. Callers MUST drain the
+// returned channel, as with Run.
+func RunDedicated(c *Command) chan *miniclient.Response {
+	return runPrivate(c.String(), c.Timeout)
+}
+
+func notify(started func()) {
+	if started != nil {
+		started()
+	}
+}
+
+// runPrivate runs a command on a connection of its own, so that abandoning it
+// on timeout cannot disturb commands in flight on the shared connection. A
+// timeout of zero or less waits for the command however long it takes.
 //
 // Callers MUST drain the returned channel, as with guard.
-func runWithTimeout(cmdStr string, timeout time.Duration) chan *miniclient.Response {
+func runPrivate(cmdStr string, timeout time.Duration) chan *miniclient.Response {
 	private, err := miniclient.Dial(common.MinimegaBase)
 	if err != nil {
 		return wrapErr(fmt.Errorf("unable to dial: %w", err))
@@ -302,9 +330,13 @@ func runWithTimeout(cmdStr string, timeout time.Duration) chan *miniclient.Respo
 
 		var (
 			in    = private.Run(cmdStr)
-			after = time.After(timeout)
+			after <-chan time.Time // nil (never fires) without a timeout
 			count int
 		)
+
+		if timeout > 0 {
+			after = time.After(timeout)
+		}
 
 		for {
 			select {

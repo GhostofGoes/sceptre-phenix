@@ -22,6 +22,7 @@ import (
 	"phenix/app"
 	"phenix/util/plog"
 	"phenix/util/pubsub"
+	"phenix/web/cache"
 	"phenix/web/middleware"
 	"phenix/web/rbac"
 	"phenix/web/util"
@@ -66,6 +67,29 @@ var (
 	mu sync.Mutex //nolint:gochecknoglobals // global lock
 )
 
+// canView reports whether the request's role may view the experiment's SCORCH
+// output and terminals, answering 403 when it may not.
+func canView(w http.ResponseWriter, r *http.Request, exp string) bool {
+	ctx := r.Context()
+
+	role, _ := ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+	if role.Spec != nil && role.Allowed("experiments", "get", exp) {
+		return true
+	}
+
+	plog.Warn(
+		plog.TypeSecurity,
+		"viewing experiment scorch output not allowed",
+		"user",
+		ctx.Value(middleware.ContextKeyUser),
+		"exp",
+		exp,
+	)
+	http.Error(w, "forbidden", http.StatusForbidden)
+
+	return false
+}
+
 // GetTerminals - GET /experiments/{name}/scorch/terminals.
 func GetTerminals(w http.ResponseWriter, r *http.Request) {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "GetTerminal")
@@ -74,6 +98,10 @@ func GetTerminals(w http.ResponseWriter, r *http.Request) {
 		vars = mux.Vars(r)
 		exp  = vars["name"]
 	)
+
+	if !canView(w, r, exp) {
+		return
+	}
 
 	terms, _ := GetExperimentTerminals(exp, -1)
 
@@ -91,6 +119,10 @@ func ConnectTerminal(w http.ResponseWriter, r *http.Request) {
 		stage = vars["stage"]
 		cmp   = vars["cmp"]
 	)
+
+	if !canView(w, r, exp) {
+		return
+	}
 
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {
@@ -122,6 +154,10 @@ func StreamTerminal(w http.ResponseWriter, r *http.Request) {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "StreamTerminal")
 
 	exp := mux.Vars(r)["name"]
+	if !canView(w, r, exp) {
+		return
+	}
+
 	pid, _ := strconv.Atoi(mux.Vars(r)["pid"])
 
 	t, err := GetTerminalByPID(pid)
@@ -151,7 +187,9 @@ func StreamTerminal(w http.ResponseWriter, r *http.Request) {
 
 	close(done)
 
+	mu.Lock()
 	t.RO = rwTerm[pid] != id
+	mu.Unlock()
 
 	plog.Debug(plog.TypeSystem, "starting web terminal streamer", "pid", pid)
 
@@ -166,7 +204,15 @@ func ExitTerminal(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.Atoi(mux.Vars(r)["pid"])
 	id := mux.Vars(r)["id"]
 
-	if rwTerm[pid] != id {
+	if !canView(w, r, exp) {
+		return
+	}
+
+	mu.Lock()
+	owner := rwTerm[pid]
+	mu.Unlock()
+
+	if owner != id {
 		plog.Error(
 			plog.TypeSystem,
 			"terminal client doesn't own R/W rights to PTY",
@@ -401,6 +447,10 @@ func GetComponentOutput(w http.ResponseWriter, r *http.Request) error {
 		cmp   = vars["cmp"]
 	)
 
+	if !canView(w, r, exp) {
+		return nil
+	}
+
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {
 		return weberror.NewWebError(err, "invalid run ID '%s' provided", vars["run"])
@@ -477,6 +527,10 @@ func StreamComponentOutput(w http.ResponseWriter, r *http.Request) {
 		stage = vars["stage"]
 		cmp   = vars["cmp"]
 	)
+
+	if !canView(w, r, exp) {
+		return
+	}
 
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {
@@ -596,7 +650,20 @@ func GetPipelines(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	body, _ := json.Marshal(map[string]any{"pipelines": pipelines, "running": runID})
+	// the experiment's own state, so the pipelines page can show it
+	status := cache.IsExperimentLocked(name)
+	if status == "" {
+		status = cache.StatusStopped
+		if exp.Running() {
+			status = cache.StatusStarted
+		}
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"pipelines":  pipelines,
+		"running":    runID,
+		"experiment": map[string]any{"status": status},
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
@@ -659,14 +726,90 @@ func GetPipeline(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// ClearPipeline - POST /experiments/{name}/scorch/pipelines/{run}/clear.
+//
+// Forgets the component statuses of a run that is not executing, for every
+// loop, so its pipeline shows as never run.
+func ClearPipeline(w http.ResponseWriter, r *http.Request) error {
+	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "ClearPipeline")
+
+	var (
+		ctx     = r.Context()
+		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+		vars    = mux.Vars(r)
+		name    = vars["name"]
+	)
+
+	run, err := strconv.Atoi(vars["run"])
+	if err != nil {
+		return weberror.NewWebError(err, "invalid run ID '%s' provided", vars["run"])
+	}
+
+	if !role.Allowed("experiments/trigger", "create", name) {
+		user, _ := ctx.Value(middleware.ContextKeyUser).(string)
+		err := weberror.NewWebError(
+			nil,
+			"clearing Scorch runs for experiment %s not allowed for %s",
+			name,
+			user,
+		)
+
+		return err.SetStatus(http.StatusForbidden)
+	}
+
+	exp, err := experiment.Get(name)
+	if err != nil {
+		return weberror.NewWebError(err, "unable to get experiment %s from store", name)
+	}
+
+	md, err := scorchmd.DecodeMetadata(exp)
+	if err != nil {
+		err := weberror.NewWebError(err, "unable to decode scorch metadata for experiment %s", name)
+
+		return err.SetStatus(http.StatusInternalServerError)
+	}
+
+	if run < 0 || run >= len(md.Runs) {
+		err := weberror.NewWebError(nil, "Scorch run %d not found for experiment %s", run, name)
+
+		return err.SetStatus(http.StatusNotFound)
+	}
+
+	if scorchexe.HasCanceler(name, run) {
+		err := weberror.NewWebError(nil, "Scorch run %d for experiment %s is executing", run, name)
+
+		return err.SetStatus(http.StatusConflict)
+	}
+
+	// rebuilding broadcasts each loop's cleared pipeline
+	DeletePipeline(name, run, -1, true)
+
+	w.WriteHeader(http.StatusNoContent)
+
+	return nil
+}
+
 // TODO: change this to `scorch/runs`
 
 // StartPipeline - POST /experiments/{name}/scorch/pipelines/{run}.
-//
-//nolint:funlen // handler
 func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "StartPipeline")
 
+	return startPipeline(w, r, false)
+}
+
+// CleanupPipeline - POST /experiments/{name}/scorch/pipelines/{run}/cleanup.
+//
+// Runs only the run's cleanup stage, for example to tear down what a canceled
+// run left behind.
+func CleanupPipeline(w http.ResponseWriter, r *http.Request) error {
+	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "CleanupPipeline")
+
+	return startPipeline(w, r, true)
+}
+
+//nolint:funlen // handler
+func startPipeline(w http.ResponseWriter, r *http.Request, cleanupOnly bool) error {
 	var (
 		ctx     = r.Context()
 		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
@@ -708,6 +851,26 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 		return weberror.NewWebError(err, "unable to get experiment %s from store", name)
 	}
 
+	if cleanupOnly {
+		md, err := scorchmd.DecodeMetadata(exp)
+		if err != nil {
+			err := weberror.NewWebError(err, "unable to decode scorch metadata for experiment %s", name)
+
+			return err.SetStatus(http.StatusInternalServerError)
+		}
+
+		if run < 0 || run >= len(md.Runs) || len(md.Runs[run].Cleanup) == 0 {
+			err := weberror.NewWebError(
+				nil,
+				"Scorch run %d for experiment %s has no cleanup components",
+				run,
+				name,
+			)
+
+			return err.SetStatus(http.StatusBadRequest)
+		}
+	}
+
 	if scorchexe.HasCanceler(name, run) {
 		return weberror.NewWebError(nil, "Scorch run already executing for experiment %s", name)
 	}
@@ -715,6 +878,10 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 	// We don't want to use the HTTP request's context here.
 	ctx = scorchexe.AddCanceler(context.Background(), name, run)
 	ctx = app.SetContextTriggerUI(ctx)
+
+	if cleanupOnly {
+		ctx = scorchexe.SetCleanupOnly(ctx)
+	}
 
 	go func() {
 		plog.Debug(plog.TypeSystem, "executing Scorch run for experiment", "exp", name, "run", run)
@@ -745,9 +912,10 @@ func StartPipeline(w http.ResponseWriter, r *http.Request) error {
 					Resource:   key,
 					State:      "error",
 					Error: fmt.Errorf(
-						"failed to execute Scorch run %d for experiment %s",
+						"failed to execute Scorch run %d for experiment %s: %w",
 						run,
 						name,
+						err,
 					),
 				})
 			}

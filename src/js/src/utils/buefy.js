@@ -26,6 +26,7 @@ import {
   Tooltip,
   Upload,
 } from 'buefy';
+import { setNotificationApp } from '@/utils/notify.js';
 
 // Register only the Buefy components the UI uses: app.use(Buefy) pulls every
 // component into the entry chunk. Add a plugin here before using a new b-* tag
@@ -61,6 +62,7 @@ export const buefyPlugins = [
 ];
 
 export function installBuefy(app) {
+  setNotificationApp(app);
   ConfigProgrammatic.setOptions({
     defaultIconComponent: 'font-awesome-icon',
     defaultIconPack: 'fas',

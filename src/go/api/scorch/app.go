@@ -122,6 +122,10 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 		return fmt.Errorf("invalid Scorch run ID for experiment %s", exp.Metadata.Name)
 	}
 
+	if scorchexe.CleanupOnly(ctx) {
+		return s.cleanupOnly(ctx, exp, runID, start)
+	}
+
 	if err := os.RemoveAll(runDir); err != nil {
 		return fmt.Errorf("removing existing contents of run directory at %s: %w", runDir, err)
 	}
@@ -203,6 +207,22 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 	_ = scorch.UpdatePipeline(update)
 
 	return errors
+}
+
+// cleanupOnly runs just the run's cleanup components, leaving the data an
+// earlier run collected in place.
+func (s *Scorch) cleanupOnly(
+	ctx context.Context,
+	exp *types.Experiment,
+	runID int,
+	start time.Time,
+) error {
+	opts := []Option{
+		Experiment(*exp), RunID(runID), StartTime(start.Format(time.RubyDate)),
+		LoopCount(0), CleanupOnly(),
+	}
+
+	return executor(ctx, s.md.ComponentSpecs(), s.md.Runs[runID], opts...)
 }
 
 func (Scorch) Cleanup(context.Context, *types.Experiment) error {
@@ -650,6 +670,10 @@ func executor(
 	start := func() error { return runStage(ActionStart, exe.Start, true) }
 	stop := func() error { return runStage(ActionStop, exe.Stop, false) }
 	cleanup := func() error { return runStage(ActionCleanup, exe.Cleanup, false) }
+
+	if options.CleanupOnly {
+		return cleanup()
+	}
 
 	if err := configure(); err != nil {
 		errors := multierror.Append(nil, err)

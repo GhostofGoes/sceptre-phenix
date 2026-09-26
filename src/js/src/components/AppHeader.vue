@@ -44,7 +44,7 @@ are only available to Global Administrator or Global Viewer.
         >Users</b-navbar-item
       >
       <b-navbar-item
-        v-if="auth && roleAllowed('logs', 'list')"
+        v-if="auth && roleAllowed('logs', 'get')"
         tag="router-link"
         :to="{ name: 'log' }"
         >Logs</b-navbar-item
@@ -56,7 +56,7 @@ are only available to Global Administrator or Global Viewer.
         >Scorch</b-navbar-item
       >
       <b-navbar-item
-        v-if="auth && roleAllowed('experiments', 'list')"
+        v-if="auth && roleAllowed('configs', 'list')"
         tag="a"
         :href="builderLoc()"
         target="_blank"
@@ -76,7 +76,7 @@ are only available to Global Administrator or Global Viewer.
         Tunneler
       </b-navbar-item>
       <b-navbar-item
-        v-if="auth && roleAllowed('settings', 'edit')"
+        v-if="auth && roleAllowed('settings', 'update')"
         tag="router-link"
         :to="{ name: 'settings' }"
         >Settings</b-navbar-item
@@ -84,6 +84,9 @@ are only available to Global Administrator or Global Viewer.
     </template>
 
     <template #end>
+      <b-navbar-item v-if="auth" tag="div">
+        <refresh-status></refresh-status>
+      </b-navbar-item>
       <b-navbar-item v-if="proxyAuth" class="navbar-item" @click="logout"
         >Reauthorize
       </b-navbar-item>
@@ -98,8 +101,10 @@ are only available to Global Administrator or Global Viewer.
   import { usePhenixStore } from '@/store.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import axiosInstance from '@/utils/axios.js';
+  import RefreshStatus from '@/components/RefreshStatus.vue';
 
   export default {
+    components: { RefreshStatus },
     setup() {
       return { roleAllowed };
     },

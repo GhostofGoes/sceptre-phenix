@@ -49,12 +49,19 @@ func StringToKind(kind string) Kind {
 }
 
 type Details struct {
-	Kind          Kind     `json:"kind"`
-	Name          string   `json:"name"`
-	FullPath      string   `json:"fullPath"`
-	Size          string   `json:"size"`
-	VirtualSize   string   `json:"virtualSize"`
-	Experiment    *string  `json:"experiment"`
-	BackingImages []string `json:"backingImages"`
-	InUse         bool     `json:"inUse"`
+	Kind          Kind            `json:"kind"`
+	Name          string          `json:"name"`
+	FullPath      string          `json:"fullPath"`
+	Size          string          `json:"size"`
+	VirtualSize   string          `json:"virtualSize"`
+	Experiments   []ExperimentUse `json:"experiments"`
+	BackingImages []string        `json:"backingImages"`
+	InUse         bool            `json:"inUse"`
+}
+
+// ExperimentUse names an experiment whose topology uses a disk, directly or
+// as the backing image of a disk it uses.
+type ExperimentUse struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
 }

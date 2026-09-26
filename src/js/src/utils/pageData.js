@@ -1,0 +1,182 @@
+// How each cached page fetches its data. They live here rather than in the
+// pages so the data can be preloaded before a page is ever opened.
+import axiosInstance from '@/utils/axios.js';
+import { useErrorNotification } from '@/utils/errorNotif.js';
+import {
+  cachedPage,
+  fetchIntoCache,
+  isLoadingPage,
+} from '@/utils/pageCache.js';
+import { roleAllowed } from '@/utils/rbac.js';
+import { usePhenixStore } from '@/store.js';
+
+// the Logs page's default range, in seconds
+export const DEFAULT_LOG_WINDOW = 10 * 60;
+
+// cache keys for an experiment's page, running and stopped
+export const experimentKey = (name) => `experiment/${name}`;
+export const stoppedExperimentKey = (name) => `experiment/${name}/stopped`;
+
+const get = async (url, signal, config = {}) =>
+  (await axiosInstance.get(url, { signal, ...config })).data;
+
+// An experiment list this recent is reused rather than asked for again.
+const EXPERIMENT_LIST_REUSE_MS = 5000;
+
+// The experiment list for pages built on it (SCORCH), sharing the Experiments
+// page's request or recent result: listing experiments has the server query
+// minimega for every running one.
+async function experimentList() {
+  const cached = cachedPage('experiments');
+  if (
+    cached &&
+    !isLoadingPage('experiments') &&
+    Date.now() - cached.at < EXPERIMENT_LIST_REUSE_MS
+  ) {
+    return cached.data;
+  }
+
+  const request = fetchIntoCache('experiments', pageFetchers.experiments);
+  try {
+    return await request.promise;
+  } finally {
+    request.release();
+  }
+}
+
+export const pageFetchers = {
+  experiments: async (signal) =>
+    // the list only shows VM counts, which need nothing from minimega
+    (await get('experiments?vms=false', signal)).experiments ?? [],
+
+  configs: async (signal) => (await get('configs', signal)).configs ?? [],
+
+  // rescan: have the server inspect every image again, not only changed ones
+  disks: async (signal, { rescan = false } = {}) =>
+    (await get(rescan ? 'disks?refresh=true' : 'disks', signal)).disks ?? [],
+
+  hosts: async (signal) => (await get('hosts', signal)).hosts ?? [],
+
+  users: async (signal) => {
+    // roles are only used for the role dropdown when creating/editing
+    const [users, roles] = await Promise.all([
+      get('users', signal),
+      roleAllowed('roles', 'list')
+        ? get('roles', signal).catch((err) => {
+            // the user list is still worth showing without roles
+            useErrorNotification(err);
+            return null;
+          })
+        : null,
+    ]);
+    users.users.forEach((u) => (u.role_name = u.role.name));
+    return {
+      users: users.users,
+      roleNames: roles ? roles.roles.map((r) => r.name) : [],
+    };
+  },
+
+  logs: async (signal) => {
+    const start = new Date(Date.now() - DEFAULT_LOG_WINDOW * 1000);
+    return (await get(`logs?start=${start.toISOString()}`, signal)) ?? [];
+  },
+
+  // experiments that have SCORCH configured, with their run state and run
+  // names
+  scorch: async (signal) => {
+    const json = { headers: { Accept: 'application/json' } };
+    const experiments = await experimentList();
+
+    // fetch every experiment's apps concurrently rather than one request
+    // after another
+    const scorchExps = await Promise.all(
+      experiments.map(async (exp) => {
+        // one forbidden experiment must not fail the whole list
+        if (
+          !roleAllowed('experiments/apps', 'get', exp.name) ||
+          !roleAllowed('experiments', 'get', exp.name)
+        ) {
+          return null;
+        }
+
+        const apps = await get(`experiments/${exp.name}/apps`, signal);
+
+        // only do stuff with this exp if it has scorch configured
+        if (!('scorch' in apps)) {
+          return null;
+        }
+
+        const pipelines = await get(
+          `experiments/${exp.name}/scorch/pipelines`,
+          signal,
+          json,
+        );
+        // a copy: the experiment objects are shared with the Experiments page
+        return {
+          ...exp,
+          scorch: {
+            running: apps['scorch'],
+            run: pipelines.running,
+            runs: (pipelines.pipelines ?? []).map((p) => p.name),
+            pending: false,
+          },
+        };
+      }),
+    );
+
+    return scorchExps.filter((exp) => exp !== null);
+  },
+
+  settings: async (signal) => await get('settings', signal),
+
+  vmtiles: async (signal) =>
+    (await get('vms?screenshot=500', signal)).vms ?? [],
+};
+
+// Tabs worth loading ahead of a visit, cheapest first, with who may see them
+// (mirrors the navbar). VM tiles are left out: they carry a screenshot per VM.
+const PRELOADS = [
+  ['experiments', () => roleAllowed('experiments', 'list')],
+  ['configs', () => roleAllowed('configs', 'list')],
+  ['users', () => usePhenixStore().role?.name !== 'Disabled'],
+  ['logs', () => roleAllowed('logs', 'get')],
+  ['hosts', () => roleAllowed('hosts', 'list')],
+  ['scorch', () => roleAllowed('experiments', 'list')],
+  ['settings', () => roleAllowed('settings', 'update')],
+  // last: the server inspects every disk image, one at a time
+  ['disks', () => roleAllowed('disks', 'list')],
+];
+
+// Loads every tab's data into the page cache in the background, a couple of
+// requests at a time so the page on screen keeps its share of the browser's
+// connections. Tabs already cached or loading are skipped. A failed preload
+// is not reported here; the page reports its own failure when opened.
+export async function preloadPages({ concurrency = 2 } = {}) {
+  const queue = PRELOADS.filter(
+    ([key, allowed]) => allowed() && !cachedPage(key) && !isLoadingPage(key),
+  ).map(([key]) => key);
+
+  const worker = async () => {
+    for (let key = queue.shift(); key; key = queue.shift()) {
+      const request = fetchIntoCache(key, pageFetchers[key]);
+      request.release(); // nothing waits on it; the background limit applies
+      await request.promise.catch(() => {});
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+}
+
+// Preloads once the browser is idle, so the page being opened loads first.
+export function schedulePagePreload(win = globalThis) {
+  if (win.navigator?.connection?.saveData) {
+    return;
+  }
+
+  const start = () => preloadPages();
+  if (typeof win.requestIdleCallback === 'function') {
+    win.requestIdleCallback(start, { timeout: 3000 });
+  } else {
+    win.setTimeout(start, 1000);
+  }
+}

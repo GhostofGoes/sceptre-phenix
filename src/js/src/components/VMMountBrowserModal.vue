@@ -152,7 +152,10 @@
         .post(`experiments/${this.targetExp}/vms/${this.targetVm}/mount`)
         .then((_) => {
           this.getFiles();
-          if (this.fileServerEnabled) {
+          if (
+            this.fileServerEnabled &&
+            roleAllowed('experiments/files', 'list', this.targetExp)
+          ) {
             this.getExperimentFiles();
           }
         })
@@ -166,11 +169,11 @@
     computed: {
       // split current path into list of directories
       pathParts() {
-        let parts = this.currentPath.split('/');
-        let p = parts.slice(1).map((p) => {
+        let parts = this.currentPath.split('/').filter((part) => part !== '');
+        let p = parts.map((part, i) => {
           return {
-            part: p,
-            upTo: parts.slice(0, parts.indexOf(p) + 1).join('/'),
+            part: part,
+            upTo: '/' + parts.slice(0, i + 1).join('/'),
           };
         });
         // prepend special entry for returning to base of mount
@@ -263,7 +266,6 @@
       },
 
       handleUpload(file) {
-        console.log(file);
         let formData = new FormData();
         formData.append('file', file);
         this.currentUploadFileName = file.name;
@@ -291,7 +293,6 @@
       },
 
       errorDialog(msg) {
-        console.error(msg);
         this.$buefy.toast.open({
           message: msg,
           type: 'is-danger',

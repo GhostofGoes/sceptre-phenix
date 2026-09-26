@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"phenix/api/experiment"
+	"phenix/types"
 	"phenix/util/common"
 	"phenix/util/file"
 	"phenix/util/mm"
@@ -54,7 +55,7 @@ func Count(expName string) (int, error) {
 // List collects VMs, combining topology settings with running VM details if the
 // experiment is running. It returns a slice of VM structs and any errors
 // encountered while gathering them.
-func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
+func List(expName string) ([]mm.VM, error) {
 	if expName == "" {
 		return nil, errors.New("no experiment name provided")
 	}
@@ -64,16 +65,27 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		return nil, fmt.Errorf("getting experiment %s: %w", expName, err)
 	}
 
-	var (
-		running = make(map[string]mm.VM)
-		vms     []mm.VM
-	)
+	running := make(map[string]mm.VM)
 
 	if exp.Running() {
 		for _, vm := range mm.GetVMInfo(mm.NS(expName)) {
 			running[vm.Name] = vm
 		}
 	}
+
+	return listVMs(*exp, running), nil
+}
+
+// ListConfigured lists the experiment's VMs as its topology configures them,
+// without asking minimega for their state, for when minimega is busy.
+func ListConfigured(exp types.Experiment) []mm.VM {
+	return listVMs(exp, nil)
+}
+
+// listVMs combines the topology's VMs with running (minimega's details for a
+// running experiment's VMs, or nil to leave them out).
+func listVMs(exp types.Experiment, running map[string]mm.VM) []mm.VM { //nolint:funlen // complex logic
+	var vms []mm.VM
 
 	for idx, node := range exp.Spec.Topology().Nodes() {
 		var (
@@ -127,7 +139,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		}
 
 		details, exists := running[vm.Name]
-		if exp.Running() && !exp.DryRun() && !node.External() && !dnb && !exists {
+		if running != nil && exp.Running() && !exp.DryRun() && !node.External() && !dnb && !exists {
 			continue
 		}
 
@@ -193,7 +205,7 @@ func List(expName string) ([]mm.VM, error) { //nolint:funlen // complex logic
 		vms = append(vms, vm)
 	}
 
-	return vms, nil
+	return vms
 }
 
 // Get retrieves the VM with the given name from the experiment with the given
@@ -1493,13 +1505,9 @@ func CaptureSubnet(expName, subnet string, vmList []string) ([]mm.Capture, error
 	// Find the interfaces that are in the
 	// specified subnet
 	for _, vm := range vms {
-		// Make sure the VM is running
-		state, err := mm.GetVMState(mm.NS(expName), mm.VMName(vm.Name))
-		if err != nil {
-			continue
-		}
-
-		if state != vmStateRunning {
+		// Make sure the VM is running. List already has its state from minimega
+		// (and none for a VM minimega doesn't have).
+		if vm.State != vmStateRunning {
 			continue
 		}
 
@@ -1528,16 +1536,30 @@ func CaptureSubnet(expName, subnet string, vmList []string) ([]mm.Capture, error
 		}
 	}
 
-	// Get all the captures for all the VMs
-	var allVMCaptures []mm.Capture
+	return capturesForVMs(expName, matchedVMs), nil
+}
 
-	for _, vmName := range matchedVMs {
-		vmCaptures := mm.GetVMCaptures(mm.NS(expName), mm.VMName(vmName))
-
-		allVMCaptures = append(allVMCaptures, vmCaptures...)
+// capturesForVMs returns the captures for each of the named VMs, in the order
+// named (repeating a VM's captures if it is named more than once), with one
+// `capture` listing for the experiment rather than one per VM.
+func capturesForVMs(expName string, vmNames []string) []mm.Capture {
+	if len(vmNames) == 0 {
+		return nil
 	}
 
-	return allVMCaptures, nil
+	byVM := make(map[string][]mm.Capture)
+
+	for _, capture := range mm.GetExperimentCaptures(mm.NS(expName)) {
+		byVM[capture.VM] = append(byVM[capture.VM], capture)
+	}
+
+	var captures []mm.Capture
+
+	for _, vmName := range vmNames {
+		captures = append(captures, byVM[vmName]...)
+	}
+
+	return captures
 }
 
 // StopCaptureSubnet will stop all captures for any VM
@@ -1596,13 +1618,8 @@ func StopCaptureSubnet(expName, subnet string, vmList []string) ([]string, error
 			continue
 		}
 
-		// Make sure the VM is running
-		state, err := mm.GetVMState(mm.NS(expName), mm.VMName(vm.Name))
-		if err != nil {
-			continue
-		}
-
-		if state != vmStateRunning {
+		// Make sure the VM is running. List already has its state from minimega.
+		if vm.State != vmStateRunning {
 			continue
 		}
 

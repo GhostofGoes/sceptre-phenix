@@ -4,6 +4,7 @@ import { ToastProgrammatic as Toast } from 'buefy';
 
 import { usePhenixStore } from '@/store.js';
 import axiosInstance from '@/utils/axios.js';
+import { roleAllowed } from '@/utils/rbac.js';
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -28,62 +29,84 @@ const router = createRouter({
       path: '/experiments',
       name: 'experiments',
       component: () => import('@/views/Experiments.vue'),
+      meta: { allowed: () => roleAllowed('experiments', 'list') },
     },
     {
       path: '/experiment/:id',
       name: 'experiment',
       component: () => import('@/views/experiment/Base.vue'),
+      meta: {
+        allowed: (to) => roleAllowed('experiments', 'get', to.params.id),
+      },
     },
     {
       path: '/hosts',
       name: 'hosts',
       component: () => import('@/views/Hosts.vue'),
+      meta: { allowed: () => roleAllowed('hosts', 'list') },
     },
     {
       path: '/configs/',
       name: 'configs',
       component: () => import('@/views/Configs.vue'),
+      meta: { allowed: () => roleAllowed('configs', 'list') },
     },
     {
       path: '/disks/',
       name: 'disks',
       component: () => import('@/views/Disks.vue'),
+      meta: { allowed: () => roleAllowed('disks', 'list') },
     },
     {
       path: '/vmtiles',
       name: 'vmtiles',
       component: () => import('@/views/experiment/VMtilesView.vue'),
+      meta: { allowed: () => roleAllowed('vms', 'list') },
     },
     {
       path: '/users',
       name: 'users',
       component: () => import('@/views/Users.vue'),
     },
-    { path: '/log', name: 'log', component: () => import('@/views/Logs.vue') },
+    {
+      path: '/log',
+      name: 'log',
+      component: () => import('@/views/Logs.vue'),
+      meta: { allowed: () => roleAllowed('logs', 'get') },
+    },
     {
       path: '/console',
       name: 'console',
       component: () => import('@/views/Console.vue'),
+      meta: { allowed: () => roleAllowed('miniconsole', 'post') },
     },
     {
       path: '/scorch',
       name: 'scorch',
       component: () => import('@/views/Scorch.vue'),
+      meta: { allowed: () => roleAllowed('experiments', 'list') },
     },
     {
       path: '/scorch/:id',
       name: 'scorchruns',
       component: () => import('@/views/ScorchRuns.vue'),
+      meta: {
+        allowed: (to) => roleAllowed('experiments', 'get', to.params.id),
+      },
     },
     {
       path: '/soh/:id',
       name: 'soh',
       component: () => import('@/views/StateOfHealth.vue'),
+      meta: {
+        allowed: (to) => roleAllowed('experiments', 'get', to.params.id),
+      },
     },
     {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/Settings.vue'),
+      meta: { allowed: () => roleAllowed('settings', 'update') },
     },
     {
       path: '/tunneler',
@@ -120,24 +143,6 @@ const router = createRouter({
 
     //console paths
     { path: '/api/v1/console/:pid/ws', name: 'console-ws' },
-
-    //tunneler paths
-    {
-      path: '/downloads/tunneler/phenix-tunneler-linux-amd64',
-      name: 'linux-tunneler',
-    },
-    {
-      path: '/downloads/tunneler/phenix-tunneler-darwin-arm64',
-      name: 'macos-arm-tunneler',
-    },
-    {
-      path: '/downloads/tunneler/phenix-tunneler-darwin-amd64',
-      name: 'macos-intel-tunneler',
-    },
-    {
-      path: '/downloads/tunneler/phenix-tunneler-windows-amd64.exe',
-      name: 'windows-tunneler',
-    },
   ],
 });
 
@@ -202,6 +207,16 @@ router.beforeEach(async (to, _, next) => {
         duration: 5000,
       });
       store.logout();
+    } else if (to.meta.allowed && !to.meta.allowed(to)) {
+      // a page the role cannot use (an old link or bookmark) would only show
+      // permission errors: go to the first page it can use instead
+      const fallback = ['experiments', 'vmtiles'].find(
+        (name) => name !== to.name && router.resolve({ name }).meta.allowed(),
+      );
+      if (fallback) {
+        next({ name: fallback });
+        return;
+      }
     }
 
     next();
@@ -210,9 +225,6 @@ router.beforeEach(async (to, _, next) => {
     store.next = to;
 
     if (import.meta.env.VITE_AUTH === 'proxy') {
-      // next(); //TODO
-      // return;
-
       axiosInstance
         .get('login')
         .then((response) => {

@@ -41,6 +41,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -48,6 +49,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -55,6 +57,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -70,6 +73,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -77,6 +81,7 @@
                   field="host"
                   label="Source"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.host }}
                 </b-table-column>
@@ -84,6 +89,7 @@
                   field="target"
                   label="Target"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.target }}
                 </b-table-column>
@@ -91,6 +97,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -98,6 +105,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -113,6 +121,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -120,6 +129,7 @@
                   field="process"
                   label="Process"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.proc }}
                 </b-table-column>
@@ -127,6 +137,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -134,6 +145,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -147,6 +159,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -154,6 +167,7 @@
                   field="path"
                   label="Path"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.path }}
                 </b-table-column>
@@ -161,6 +175,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -168,6 +183,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -183,6 +199,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -190,6 +207,7 @@
                   field="path"
                   label="Path"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.path }}
                 </b-table-column>
@@ -197,6 +215,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -204,6 +223,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -219,6 +239,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -226,6 +247,7 @@
                   field="service"
                   label="Service"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.service }}
                 </b-table-column>
@@ -233,6 +255,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -240,6 +263,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -255,6 +279,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -262,6 +287,7 @@
                   field="port"
                   label="Port"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.port }}
                 </b-table-column>
@@ -269,6 +295,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -276,6 +303,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -291,6 +319,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -298,6 +327,7 @@
                   field="container"
                   label="Container"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.container }}
                 </b-table-column>
@@ -305,6 +335,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -312,6 +343,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -325,6 +357,7 @@
                   field="test"
                   label="Test Name"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.test }}
                 </b-table-column>
@@ -332,6 +365,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -339,6 +373,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -346,6 +381,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -531,79 +567,58 @@
       <div class="column is-1" />
     </div>
     <div>
-      <b-tabs>
+      <!-- the tab bar only appears when there is a second tab to switch to -->
+      <b-tabs :class="{ 'single-tab': !flows }">
         <b-tab-item label="Topology Graph">
-          <div class="columns is-vcentered">
-            <div class="column" />
-            <div class="column">
-              <b-radio
-                v-model="radioButton"
-                native-value="running"
-                type="is-light"
-                >Running</b-radio
-              >
-            </div>
-            <div class="column">
-              <b-radio
-                v-model="radioButton"
-                native-value="notrunning"
-                type="is-light"
-                >Not running</b-radio
-              >
-            </div>
-            <div class="column">
-              <b-radio
-                v-model="radioButton"
-                native-value="notboot"
-                type="is-light"
-                >Not booted</b-radio
-              >
-            </div>
-            <div class="column">
-              <b-radio
-                v-model="radioButton"
-                native-value="notdeploy"
-                type="is-light"
-                >Not deployed</b-radio
-              >
-            </div>
-            <div class="column">
-              <b-radio
-                v-model="radioButton"
-                native-value="external"
-                type="is-light"
-                >External / HIL</b-radio
-              >
-            </div>
-            <div class="column">
-              <b-button @click="resetNetwork" type="is-light"
-                >Refresh Network</b-button
-              >
-            </div>
-            <div class="column">
-              <div v-if="!running">
-                <b-button type="is-light" disabled>Exp Not Running</b-button>
-              </div>
-              <div v-else-if="sohRunning">
-                <div v-if="sohInitialized">
-                  <b-button type="is-light" disabled>SOH Is Running</b-button>
-                </div>
-                <div v-else>
-                  <b-button type="is-light" disabled
-                    >SOH Is Initializing</b-button
-                  >
-                </div>
-              </div>
-              <div v-else-if="!sohInitialized">
-                <b-button type="is-light" disabled
-                  >SOH Not Initialized</b-button
-                >
-              </div>
-              <div v-else>
-                <b-button @click="execSoH" type="is-light">Run SOH</b-button>
-              </div>
-            </div>
-            <div class="column" />
+          <div class="soh-controls">
+            <b-radio v-model="radioButton" native-value="all" type="is-light"
+              >All</b-radio
+            >
+            <b-radio
+              v-model="radioButton"
+              native-value="running"
+              type="is-light"
+              >Running</b-radio
+            >
+            <b-radio
+              v-model="radioButton"
+              native-value="notrunning"
+              type="is-light"
+              >Not running</b-radio
+            >
+            <b-radio
+              v-model="radioButton"
+              native-value="notboot"
+              type="is-light"
+              >Not booted</b-radio
+            >
+            <b-radio
+              v-model="radioButton"
+              native-value="notdeploy"
+              type="is-light"
+              >Not deployed</b-radio
+            >
+            <b-radio
+              v-model="radioButton"
+              native-value="external"
+              type="is-light"
+              >External / HIL</b-radio
+            >
+            <b-button @click="reload" type="is-light">Refresh Network</b-button>
+            <b-button
+              v-if="!loaded || !running || sohRunning || !sohInitialized"
+              type="is-light"
+              disabled
+              >{{ sohState }}</b-button
+            >
+            <b-button
+              v-else-if="
+                roleAllowed('experiments/trigger', 'create', $route.params.id)
+              "
+              @click="execSoH"
+              type="is-light"
+              >Run SOH</b-button
+            >
           </div>
           <div
             style="
@@ -616,11 +631,8 @@
                 <div class="hero-body">
                   <div class="container" style="text-align: center">
                     <h1 class="title">
-                      There are no nodes matching your search criteria!
+                      There are no nodes matching your filter criteria!
                     </h1>
-                    <b-button type="is-success" outlined @click="resetNetwork()"
-                      >Refresh Network</b-button
-                    >
                   </div>
                 </div>
               </section>
@@ -728,6 +740,7 @@
 
   import axiosInstance from '@/utils/axios.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader } from '@/utils/pageLoader.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { usePhenixStore } from '@/store.js';
 
@@ -736,16 +749,35 @@
     setup() {
       return { roleAllowed };
     },
-    async beforeUnmount() {
+    beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.simulation?.stop();
+      this.loader.stop();
     },
 
     async created() {
       addWsHandler(this.handleWs);
-      await this.updateNetwork();
-      this.generateGraph();
-      this.generateChord();
+      this.statusFilter = '';
+      // not cached: the graph is redrawn from scratch on every load anyway
+      this.loader = createPageLoader({
+        fetch: async (signal) => {
+          let url = 'experiments/' + this.$route.params.id + '/soh';
+          if (this.statusFilter) {
+            url = url + '?statusFilter=' + this.statusFilter;
+          }
+          return (await axiosInstance.get(url, { signal })).data;
+        },
+        apply: (state) => {
+          this.applyNetwork(state);
+          this.loaded = true;
+          // the graph and chord containers render with the new data
+          this.$nextTick(() => {
+            this.generateGraph();
+            if (this.flows) this.generateChord();
+          });
+        },
+      });
+      await this.loader.start();
     },
 
     methods: {
@@ -757,13 +789,9 @@
             }
 
             switch (msg.resource.action) {
-              case 'stop': {
-                this.resetNetwork();
-                break;
-              }
-
+              case 'stop':
               case 'start': {
-                this.resetNetwork();
+                this.reload();
                 break;
               }
             }
@@ -787,7 +815,7 @@
 
               case 'triggerSuccess': {
                 if (msg.result && msg.result.app && msg.result.app === 'soh') {
-                  this.resetNetwork();
+                  this.reload();
                   this.sohRunning = false;
                 }
 
@@ -817,8 +845,9 @@
             let expName = resource[0];
             let vmName = resource[1];
 
-            // Ignore this broadcast if it's not for this experiment.
-            if (expName != this.$route.params.id) {
+            // Ignore this broadcast if it's not for this experiment, or
+            // arrives before the graph does.
+            if (expName != this.$route.params.id || !this.nodes) {
               return;
             }
 
@@ -827,7 +856,10 @@
                 for (let i = 0; i < this.nodes.length; i++) {
                   if (this.nodes[i].label == vmName) {
                     this.nodes[i].status = 'notrunning';
-                    d3.selectAll('circle').attr('fill', this.updateNodeColor);
+                    d3.selectAll('#graph circle').attr(
+                      'fill',
+                      this.updateNodeColor,
+                    );
                   }
                 }
 
@@ -837,7 +869,10 @@
                 for (let i = 0; i < this.nodes.length; i++) {
                   if (this.nodes[i].label == vmName) {
                     this.nodes[i].status = 'running';
-                    d3.selectAll('circle').attr('fill', this.updateNodeColor);
+                    d3.selectAll('#graph circle').attr(
+                      'fill',
+                      this.updateNodeColor,
+                    );
                   }
                 }
 
@@ -847,7 +882,10 @@
                 for (let i = 0; i < this.nodes.length; i++) {
                   if (this.nodes[i].label == vmName) {
                     this.nodes[i].status = 'notdeploy';
-                    d3.selectAll('circle').attr('fill', this.updateNodeColor);
+                    d3.selectAll('#graph circle').attr(
+                      'fill',
+                      this.updateNodeColor,
+                    );
                   }
                 }
 
@@ -858,45 +896,34 @@
         }
       },
 
+      // reloads the network, then redraws the graph and chord diagram
       async updateNetwork(filter = '') {
-        let url = 'experiments/' + this.$route.params.id + '/soh';
+        this.statusFilter = filter;
+        await this.loader.load();
+      },
 
-        if (filter) {
-          url = url + '?statusFilter=' + filter;
-        }
+      applyNetwork(state) {
+        this.running = state.started;
+        this.sohInitialized = state.soh_initialized;
+        this.sohRunning = state.soh_running;
 
-        try {
-          let resp = await axiosInstance.get(url);
-          let state = resp.data;
+        this.nodes = state.nodes;
+        this.edges = state.edges;
 
-          this.running = state.started;
-          this.sohInitialized = state.soh_initialized;
-          this.sohRunning = state.soh_running;
+        this.flows = state.host_flows != null;
+        this.volume = this.flows
+          ? Object.assign(state.host_flows, { names: state.hosts })
+          : [];
 
-          this.nodes = state.nodes;
-          this.edges = state.edges;
-
-          if (state.host_flows != null) {
-            this.volume = Object.assign(state.host_flows, {
-              names: state.hosts,
-            });
-            this.flows = true;
+        if (this.nodes) {
+          const detailsNode = this.nodes.find(
+            (n) => n.label === this.detailsModal.vm,
+          );
+          if (detailsNode) {
+            this.detailsModal.status = detailsNode.status;
+            this.detailsModal.soh = detailsNode.soh;
+            this.detailsModal.tags = detailsNode.tags;
           }
-
-          if (this.nodes) {
-            const detailsNode = this.nodes.find(
-              (n) => n.label === this.detailsModal.vm,
-            );
-            if (detailsNode) {
-              this.detailsModal.status = detailsNode.status;
-              this.detailsModal.soh = detailsNode.soh;
-              this.detailsModal.tags = detailsNode.tags;
-            }
-          }
-        } catch (err) {
-          useErrorNotification(err);
-        } finally {
-          this.isWaiting = false;
         }
       },
 
@@ -1151,20 +1178,14 @@
           return;
         }
 
-        if (n.status.toLowerCase() == 'notboot') {
-          this.detailsModal.active = true;
-        } else {
-          this.detailsModal.active = true;
-          this.detailsModal.vm = n.label;
-          this.detailsModal.status = n.status;
-          this.detailsModal.soh = n.soh;
-          this.detailsModal.tags = n.tags;
-        }
-      },
-
-      color(d) {
-        const scale = d3.scaleOrdinal(d3.schemeCategory10);
-        return scale(d);
+        // a node that has not booted has no state of health, which the
+        // dialog says; it used to show the previously opened node instead
+        this.detailsModal.active = true;
+        this.detailsModal.vm = n.label;
+        this.detailsModal.status = n.status;
+        this.detailsModal.soh =
+          n.status.toLowerCase() == 'notboot' ? null : n.soh;
+        this.detailsModal.tags = n.tags ?? {};
       },
 
       drag(simulation) {
@@ -1322,11 +1343,9 @@
           );
       },
 
-      async resetNetwork() {
-        this.radioButton = '';
-        await this.updateNetwork();
-        this.generateGraph();
-        this.generateChord();
+      // reloads the network, keeping the chosen filter
+      reload() {
+        return this.loader.load();
       },
 
       resetDetailsModal() {
@@ -1372,7 +1391,7 @@
           },
           events: {
             saved() {
-              self.resetNetwork();
+              self.reload();
             },
           },
         });
@@ -1433,7 +1452,7 @@
           .then(
             (_) => {
               this.resetStyleModal();
-              this.resetNetwork();
+              this.reload();
             },
             (err) => useErrorNotification(err),
           );
@@ -1456,12 +1475,8 @@
     },
 
     watch: {
-      radioButton: async function (filter) {
-        if (filter != '') {
-          await this.updateNetwork(filter);
-          this.generateGraph();
-          this.generateChord();
-        }
+      radioButton(filter) {
+        this.updateNetwork(filter === 'all' ? '' : filter);
       },
     },
 
@@ -1474,7 +1489,8 @@
         nodes: [],
         edges: [],
         volume: [],
-        radioButton: '',
+        radioButton: 'all',
+        loaded: false, // false until the first load arrives
         vlan: VLAN,
         detailsModal: {
           active: false,
@@ -1495,10 +1511,19 @@
           overrideStrokeStyle: false,
           strokeStyle: '',
         },
-        chordData: null,
       };
     },
     computed: {
+      // what the disabled SOH button says
+      sohState() {
+        if (!this.loaded) return 'Loading…';
+        if (!this.running) return 'Exp Not Running';
+        if (this.sohRunning) {
+          return this.sohInitialized ? 'SOH Is Running' : 'SOH Is Initializing';
+        }
+        return 'SOH Not Initialized';
+      },
+
       styleModalCustomStyle: function () {
         var css = '';
         if (this.styleModal.overrideFill)
@@ -1523,6 +1548,24 @@
 <style scoped>
   label.radio:hover {
     color: whitesmoke;
+  }
+
+  /* filters and actions on one row each, wrapping as a whole */
+  .soh-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem 1.5rem;
+  }
+
+  .soh-controls :deep(.radio) {
+    white-space: nowrap;
+    margin: 0;
+  }
+
+  .single-tab :deep(.tabs) {
+    display: none;
   }
 
   .modal-card-head {
