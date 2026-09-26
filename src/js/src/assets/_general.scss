@@ -130,3 +130,22 @@ input::placeholder,
 textarea::placeholder {
   opacity: 1;
 }
+
+// Tables: sort arrows sit next to their headings (header-class="sort-inline")
+// rather than at the far edge of the column, and never over centered text.
+.b-table .table th.sort-inline .th-wrap {
+  flex-wrap: nowrap;
+}
+
+.b-table .table th.sort-inline .th-wrap:not(.is-centered) {
+  justify-content: flex-start;
+}
+
+.b-table .table th.sort-inline .sort-icon {
+  position: static;
+  transform: none;
+}
+
+.b-table .table th.sort-inline .sort-icon.icon.is-desc {
+  transform: rotate(180deg) !important;
+}

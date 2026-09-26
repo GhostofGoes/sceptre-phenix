@@ -13,6 +13,10 @@ import { usePhenixStore } from '@/store.js';
 // the Logs page's default range, in seconds
 export const DEFAULT_LOG_WINDOW = 10 * 60;
 
+// cache keys for an experiment's page, running and stopped
+export const experimentKey = (name) => `experiment/${name}`;
+export const stoppedExperimentKey = (name) => `experiment/${name}/stopped`;
+
 const get = async (url, signal, config = {}) =>
   (await axiosInstance.get(url, { signal, ...config })).data;
 

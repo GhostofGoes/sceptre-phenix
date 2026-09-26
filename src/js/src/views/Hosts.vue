@@ -30,13 +30,19 @@ available for experiments, the number of VMs, and host uptime.
           </div>
         </section>
       </template>
-      <b-table-column field="name" label="Name" sortable v-slot="props">
+      <b-table-column
+        field="name"
+        label="Name"
+        sortable
+        header-class="sort-inline"
+        v-slot="props">
         {{ hostName(props.row) }}
       </b-table-column>
       <b-table-column
         field="cpus"
         label="CPUs"
         sortable
+        header-class="sort-inline"
         centered
         v-slot="props">
         {{ props.row.cpus }}
@@ -59,7 +65,13 @@ available for experiments, the number of VMs, and host uptime.
           {{ props.row.load[2] }}
         </span>
       </b-table-column>
-      <b-table-column field="mem_used" label="RAM Used" centered v-slot="props">
+      <b-table-column
+        field="memused"
+        label="RAM Used"
+        sortable
+        header-class="sort-inline"
+        centered
+        v-slot="props">
         <span
           class="tag"
           :class="decorator(props.row.memused, props.row.memtotal)">
@@ -67,8 +79,10 @@ available for experiments, the number of VMs, and host uptime.
         </span>
       </b-table-column>
       <b-table-column
-        field="mem_total"
+        field="memtotal"
         label="RAM Total"
+        sortable
+        header-class="sort-inline"
         centered
         v-slot="props">
         {{ formatRAM(props.row.memtotal) }}
@@ -98,14 +112,20 @@ available for experiments, the number of VMs, and host uptime.
         {{ props.row.bandwidth }}
       </b-table-column>
       <b-table-column
-        field="no_vms"
-        label="# of VMs"
+        field="vms"
+        label="VMs"
         sortable
+        header-class="sort-inline"
         centered
         v-slot="props">
         {{ props.row.vms }}
       </b-table-column>
-      <b-table-column field="uptime" label="Uptime" v-slot="props">
+      <b-table-column
+        field="uptime"
+        label="Uptime"
+        sortable
+        header-class="sort-inline"
+        v-slot="props">
         {{ formatUptime(props.row.uptime) }}
       </b-table-column>
     </b-table>
@@ -188,3 +208,10 @@ available for experiments, the number of VMs, and host uptime.
     },
   };
 </script>
+
+<style scoped>
+  /* headings stay on one line, wrapping only when the table runs out of room */
+  :deep(th) {
+    white-space: nowrap;
+  }
+</style>

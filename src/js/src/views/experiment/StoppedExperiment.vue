@@ -669,9 +669,11 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { stoppedExperimentKey } from '@/utils/pageData.js';
   import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
 
   export default {
+    emits: ['running'],
     mixins: [formattingMixin],
     setup() {
       return { roleAllowed, tagCount };
@@ -684,6 +686,12 @@
     async created() {
       addWsHandler(this.handleWs);
       this.loader = createPageLoader({
+        // only the default view is cached, as its request is the same each
+        // visit
+        key: () =>
+          this.searchName || this.table.isPaginated || !this.defaultSort
+            ? null
+            : stoppedExperimentKey(this.$route.params.id),
         fetch: async (signal) => {
           let params = '?show_dnb=true&filter=' + this.searchName;
           params = params + '&sortCol=' + this.table.sortColumn;
@@ -701,6 +709,11 @@
           return resp.data;
         },
         apply: (experiment) => {
+          if (experiment.running) {
+            // started since the page was opened; Base shows the running view
+            this.$emit('running', true);
+            return;
+          }
           this.experiment = experiment;
           this.table.total = this.experiment.vms.length;
 
@@ -727,6 +740,12 @@
     },
 
     computed: {
+      defaultSort() {
+        return (
+          this.table.sortColumn === 'name' &&
+          this.table.defaultSortDirection === 'asc'
+        );
+      },
       vmsEmptyText() {
         if (!this.experiment.name) return loadingText('VMs');
         if (this.searchName) return 'No VMs match your search';

@@ -1,5 +1,46 @@
 <template>
   <div class="content">
+    <!-- UPLOAD MODAL -->
+    <b-modal v-model="uploader.active" has-modal-card>
+      <div class="modal-card" style="width: auto">
+        <header class="modal-card-head">
+          <p class="modal-card-title">Upload a Disk</p>
+        </header>
+        <section class="modal-card-body">
+          <b-field v-if="currentUploadProgress == null">
+            <b-upload
+              :model-value="null"
+              drag-drop
+              :accept="uploadAccept"
+              @update:modelValue="uploadDisk">
+              <section class="section">
+                <div class="content has-text-centered">
+                  <p>
+                    <b-icon icon="upload" size="is-large"></b-icon>
+                  </p>
+                  <p>Drop your disk here or click to upload</p>
+                  <p>(Valid file types are {{ uploadTypesText }})</p>
+                </div>
+              </section>
+            </b-upload>
+          </b-field>
+          <template v-else>
+            <p>Uploading {{ uploader.name }}</p>
+            <b-progress
+              :value="currentUploadProgress"
+              show-value
+              format="percent"
+              type="is-success"
+              size="is-medium" />
+            <p class="is-size-7">
+              Closing this window does not stop the upload; the upload button
+              shows its progress.
+            </p>
+          </template>
+        </section>
+      </div>
+    </b-modal>
+
     <!-- DETAILS MODAL -->
     <b-modal
       v-model="detailsModal.active"
@@ -231,19 +272,18 @@
       </b-field>
       <b-tooltip
         v-if="roleAllowed('disks', 'upload')"
-        label="Upload a disk"
+        :label="
+          currentUploadProgress == null ? 'Upload a disk' : 'Upload progress'
+        "
         type="is-light is-left">
-        <b-upload
-          class="file-label"
+        <button
+          class="button is-light"
           style="margin-left: 8px"
-          @update:modelValue="uploadDisk"
-          accept=".qcow2,.qc2,.tgz,.hdd,.iso"
-          :disabled="currentUploadProgress != null">
-          <span class="file-cta">
-            <b-icon v-if="currentUploadProgress == null" icon="upload"></b-icon>
-            <p v-else style="width: 32px">{{ currentUploadProgress }}%</p>
-          </span>
-        </b-upload>
+          aria-label="Upload a disk"
+          @click="uploader.active = true">
+          <b-icon v-if="currentUploadProgress == null" icon="upload"></b-icon>
+          <span v-else style="width: 32px">{{ currentUploadProgress }}%</span>
+        </button>
       </b-tooltip>
     </b-field>
 
@@ -299,13 +339,17 @@
 
 <script>
   import axiosInstance from '@/utils/axios.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { usePhenixStore } from '@/store.js';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
+
+  // the disk kinds phenix recognizes, see knownImageExtensions in
+  // src/go/api/disk/details.go
+  const UPLOAD_TYPES = ['.qcow2', '.qc2', '_rootfs.tgz', '.hdd', '.iso'];
 
   export default {
     setup() {
@@ -341,6 +385,16 @@
     },
 
     computed: {
+      // file pickers match extensions only, so rootfs archives show as .tgz
+      uploadAccept() {
+        return UPLOAD_TYPES.map((t) => t.replace('_rootfs', '')).join(',');
+      },
+      uploadTypesText() {
+        const types = UPLOAD_TYPES.map((t) =>
+          t.startsWith('.') ? t : `*${t}`,
+        );
+        return `${types.slice(0, -1).join(', ')}, and ${types.at(-1)}`;
+      },
       emptyText() {
         if (!this.loaded) return loadingText('disks');
         if (this.disks.length === 0) return 'No disk images found';
@@ -557,8 +611,18 @@
         });
       },
       uploadDisk(file) {
+        if (!file) return;
+        if (!UPLOAD_TYPES.some((ext) => file.name.endsWith(ext))) {
+          showError(
+            `Cannot upload ${file.name}`,
+            `Valid disk file types are ${this.uploadTypesText}.`,
+          );
+          return;
+        }
+
         let formData = new FormData();
         formData.append('file', file);
+        this.uploader.name = file.name;
         this.currentUploadProgress = 0;
         axiosInstance
           .post(`disks`, formData, {
@@ -571,6 +635,7 @@
           })
           .then(() => {
             this.currentUploadProgress = null;
+            this.uploader.active = false;
             this.updateDisks();
           })
           .catch((err) => {
@@ -601,6 +666,7 @@
     data() {
       return {
         currentUploadProgress: null,
+        uploader: { active: false, name: null },
         disks: [],
         filterString: '',
         loaded: false, // false until the first list arrives

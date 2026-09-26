@@ -116,6 +116,17 @@
               <b-icon :icon="props.row.scorch.running ? 'stop' : 'play'" />
             </button>
           </b-tooltip>
+          <b-tooltip
+            v-if="roleAllowed('experiments', 'get', props.row.name)"
+            label="Go to SCORCH pipelines"
+            type="is-dark">
+            <router-link
+              class="button is-small is-white"
+              aria-label="Go to SCORCH pipelines"
+              :to="{ name: 'scorchruns', params: { id: props.row.name } }">
+              <b-icon icon="arrow-right" />
+            </router-link>
+          </b-tooltip>
         </div>
       </b-table-column>
       <b-table-column label="Terminal" centered v-slot="props">
@@ -680,21 +691,6 @@
   /* headings stay on one line, wrapping only when the table runs out of room */
   :deep(th) {
     white-space: nowrap;
-  }
-
-  /* the name column's sort arrow sits next to its heading rather than at the
-     far edge of the column */
-  :deep(th.sort-inline .th-wrap) {
-    justify-content: flex-start;
-  }
-
-  :deep(th.sort-inline .sort-icon) {
-    position: static;
-    transform: none;
-  }
-
-  :deep(th.sort-inline .sort-icon.icon.is-desc) {
-    transform: rotate(180deg) !important;
   }
 
   /* a status tag with its buttons beside it */

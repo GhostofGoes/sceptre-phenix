@@ -1454,6 +1454,8 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { cachePage } from '@/utils/pageCache.js';
+  import { experimentKey } from '@/utils/pageData.js';
   import { loadPaginate, savePaginate } from '@/utils/paginatePref.js';
   import { partitionSnapshotVMNames } from '@/utils/vmSnapshot.js';
   import {
@@ -1497,9 +1499,10 @@
       this.features = usePhenixStore().features;
       addWsHandler(this.handleWs);
       this.loadColumnVisibility();
-      // not cached: a running experiment's VM states change too often for a
-      // stale copy to help
+      // cached so the page opens at once; the header shows how old the copy
+      // is while a fresh one loads
       this.loader = createPageLoader({
+        key: experimentKey(this.$route.params.id),
         fetch: async (signal) =>
           (
             await axiosInstance.get('experiments/' + this.$route.params.id, {
@@ -1507,6 +1510,11 @@
             })
           ).data,
         apply: (experiment) => {
+          if (!experiment.running) {
+            // stopped since the page was opened; Base shows the stopped view
+            this.$emit('running', false);
+            return;
+          }
           this.experiment = experiment;
           this.search.vms = experiment.vms.map((vm) => {
             return vm.name;
@@ -1763,6 +1771,13 @@
 
             this.experiment.vms = [...msg.result.vms];
             this.table.total = msg.result.total;
+
+            // keep the cached page current, unless it is a filtered view
+            if (!this.search.filter && !this.table.isPaginated) {
+              cachePage(experimentKey(this.$route.params.id), {
+                ...this.experiment,
+              });
+            }
 
             if (this.search.filter) {
               // Only add successful searches to the search history

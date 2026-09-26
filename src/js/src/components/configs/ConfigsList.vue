@@ -103,6 +103,7 @@
           </b-field>
           <b-field>
             <b-select placeholder="Filter on Kind" v-model="filterKind">
+              <option :value="null">All kinds</option>
               <option
                 v-for="(k, index) in filterOptions"
                 :key="index"
@@ -592,21 +593,6 @@
   };
 </script>
 <style scoped>
-  /* sort arrows sit next to their headings rather than at the far edge of
-     the column */
-  :deep(th.sort-inline .th-wrap) {
-    justify-content: flex-start;
-  }
-
-  :deep(th.sort-inline .sort-icon) {
-    position: static;
-    transform: none;
-  }
-
-  :deep(th.sort-inline .sort-icon.icon.is-desc) {
-    transform: rotate(180deg) !important;
-  }
-
   .x-modal-dark :deep(textarea) {
     background-color: #686868;
     color: whitesmoke;

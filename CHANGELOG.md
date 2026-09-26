@@ -6,12 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: Disks has an upload dialog like Configs, with drag and drop and the accepted file types listed; unsupported files are rejected with an error.
+- **Web UI**: Hosts can sort by RAM Used, RAM Total and Uptime, the "# of VMs" column is now "VMs", and sort arrows sit beside headings instead of over them.
+- **Web UI**: The experiment page is cached, so it opens at once from any page, and shows "Loading experiment…" when nothing is cached yet.
+- **Web UI**: The Scorch page has a button beside each SCORCH start/stop button that opens the experiment's pipelines. The Configs kind filter has an "All kinds" option.
 - **Web UI**: The Configs table can sort by Name and Last Updated, sort arrows sit next to the column titles, and Last Updated also shows how long ago the config changed, for example "(3 hours ago)". The kind filter and search box are visibly separate.
 - **Web UI**: Leaving the config editor, or a new config, without changing anything no longer asks about discarding edits.
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
 
 ### Fixed
 
+- **Web UI**: Sorting Hosts by number of VMs now works.
 - **Web UI**: Configs open for viewing and editing in well under a second instead of several. The viewer reuses the config data it already fetched (and fetches on hover), the editor reuses the viewer's copy, and the Ace editor loads in the background in one round of requests. Download buttons show a spinner at once.
 - **Web UI**: Viewing a Topology config with builder data no longer errors, an invalid upload now reports its error, and the config search treats characters such as `(` literally.
 - **Web UI**: The Builder tab opens several times faster on a remote server (about 3.4 s to 0.7 s over a 100 ms link). mxGraph's loader fetched each of its ~140 source files separately, so the page made 182 requests; the server now serves the builder's scripts as one bundle it builds from the same files, leaving 26 requests.
