@@ -70,8 +70,8 @@
               <dd>{{ detailsModal.disk.virtualSize }}</dd>
             </div>
             <div>
-              <dt>Experiment:</dt>
-              <dd>{{ detailsModal.disk.experiment || 'N/A' }}</dd>
+              <dt>Experiments:</dt>
+              <dd>{{ experimentsText(detailsModal.disk) }}</dd>
             </div>
             <div>
               <dt>In Use:</dt>
@@ -261,7 +261,7 @@
           icon="search"
           @select="(option) => (selected = option)"
           :data="filteredDisks.map((d) => d.name)"
-          style="width: 512px">
+          style="width: 307px">
         </b-autocomplete>
 
         <p class="control">
@@ -308,30 +308,72 @@
         </section>
       </template>
 
-      <b-table-column field="name" label="Name" sortable v-slot="props">
+      <b-table-column
+        field="name"
+        label="Name"
+        width="27%"
+        sortable
+        header-class="sort-inline"
+        v-slot="props">
         {{ props.row.name }}
       </b-table-column>
 
-      <b-table-column field="kind" label="Kind" sortable v-slot="props">
+      <b-table-column
+        field="kind"
+        label="Kind"
+        sortable
+        header-class="sort-inline"
+        v-slot="props">
         {{ props.row.kind }}
       </b-table-column>
 
       <b-table-column
         field="inUse"
         label="In Use"
+        width="7em"
         centered
         sortable
+        header-class="sort-inline"
         v-slot="props">
         <b-icon v-if="props.row.inUse" icon="play-circle" size="is-small" />
       </b-table-column>
 
       <b-table-column
         field="size"
-        label="Size"
+        label="Size on Disk"
         sortable
-        :custom-sort="sortBySize"
+        header-class="sort-inline"
+        :custom-sort="sortBy('size')"
         v-slot="props">
         {{ props.row.size }}
+      </b-table-column>
+
+      <b-table-column
+        field="virtualSize"
+        label="Virtual Size"
+        sortable
+        header-class="sort-inline"
+        :custom-sort="sortBy('virtualSize')"
+        v-slot="props">
+        {{ props.row.virtualSize }}
+      </b-table-column>
+
+      <b-table-column label="Actions" centered v-slot="props">
+        <div class="row-actions" @click.stop>
+          <b-tooltip
+            v-for="action in rowActions"
+            :key="action.name"
+            :label="action.label"
+            type="is-dark">
+            <button
+              class="button is-light is-small action"
+              :aria-label="action.label"
+              :disabled="shouldDisableAction(action.name, props.row)"
+              @click="action.run(props.row.fullPath)">
+              <b-icon :icon="action.icon" />
+            </button>
+          </b-tooltip>
+        </div>
       </b-table-column>
     </b-table>
   </div>
@@ -445,8 +487,7 @@
         this.detailsModal.disk = row;
         this.detailsModal.active = true;
       },
-      shouldDisableAction(action) {
-        let disk = this.detailsModal.disk;
+      shouldDisableAction(action, disk = this.detailsModal.disk) {
         switch (action) {
           case 'snapshot':
             return (
@@ -647,19 +688,24 @@
       },
       // converts a human-readable string in IEC format to a byte count
       toByteCount(s) {
-        const units = 'KMGTPE';
-        const base = s.match(/[/.0-9]*/);
-        const unit = s[s.indexOf(' ') + 1];
-        if (unit == 'B') {
-          return parseFloat(base);
-        }
-        return parseFloat(base) * Math.pow(1024, units.indexOf(unit));
+        // "512 B", "2.1 GiB" or minimega's "2.1G"; unknown sizes sort first
+        const match = /([\d.]+)\s*([KMGTPE])?/.exec(s ?? '');
+        if (!match) return -1;
+        const power = match[2] ? 'KMGTPE'.indexOf(match[2]) + 1 : 0;
+        return parseFloat(match[1]) * Math.pow(1024, power);
       },
-      sortBySize(diskA, diskB, isAsc) {
-        return (
-          (this.toByteCount(diskA.size) - this.toByteCount(diskB.size)) *
-          (isAsc ? 1 : -1)
-        );
+      // sorts by a human-readable size field
+      sortBy(field) {
+        return (diskA, diskB, isAsc) =>
+          (this.toByteCount(diskA[field]) - this.toByteCount(diskB[field])) *
+          (isAsc ? 1 : -1);
+      },
+      // the experiments using a disk, noting the stopped ones
+      experimentsText(disk) {
+        if (!disk.experiments?.length) return 'None';
+        return disk.experiments
+          .map((exp) => (exp.running ? exp.name : `${exp.name} (stopped)`))
+          .join(', ');
       },
     },
 
@@ -668,6 +714,34 @@
         currentUploadProgress: null,
         uploader: { active: false, name: null },
         disks: [],
+        // the actions offered on each row, as in the details window
+        rowActions: [
+          {
+            name: 'snapshot',
+            label: 'Snapshot',
+            icon: 'camera',
+            run: this.snapshotDisk,
+          },
+          { name: 'clone', label: 'Clone', icon: 'copy', run: this.cloneDisk },
+          {
+            name: 'download',
+            label: 'Download',
+            icon: 'download',
+            run: this.downloadDisk,
+          },
+          {
+            name: 'rename',
+            label: 'Rename',
+            icon: 'pencil',
+            run: this.renameDisk,
+          },
+          {
+            name: 'delete',
+            label: 'Delete',
+            icon: 'trash',
+            run: this.deleteDisk,
+          },
+        ],
         filterString: '',
         loaded: false, // false until the first list arrives
         detailsModal: {
@@ -726,6 +800,11 @@
 
   .action-button:hover {
     background-color: #ddd;
+  }
+
+  .row-actions {
+    display: inline-flex;
+    gap: 5px;
   }
 
   .action-separator {

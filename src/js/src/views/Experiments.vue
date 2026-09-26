@@ -215,7 +215,12 @@
               </div>
             </section>
           </template>
-          <b-table-column field="name" label="Name" sortable v-slot="props">
+          <b-table-column
+            field="name"
+            label="Name"
+            sortable
+            header-class="sort-inline"
+            v-slot="props">
             <template v-if="updating(props.row.status)">
               {{ props.row.name }}
             </template>
@@ -236,6 +241,7 @@
             label="Status"
             width="100"
             sortable
+            header-class="sort-inline"
             centered
             v-slot="props">
             <template v-if="props.row.status == 'starting'">
@@ -286,6 +292,7 @@
             field="start_time"
             label="Start Time"
             sortable
+            header-class="sort-inline"
             v-slot="props">
             {{ props.row.start_time }}
           </b-table-column>
@@ -295,6 +302,7 @@
             width="50"
             centered
             sortable
+            header-class="sort-inline"
             v-slot="props">
             {{ props.row.vm_count }}
           </b-table-column>

@@ -57,6 +57,7 @@
         field="status"
         label="Experiment Status"
         sortable
+        header-class="sort-inline"
         centered
         v-slot="props">
         <section v-if="props.row.status == 'starting'">

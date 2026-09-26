@@ -52,6 +52,15 @@
         Once a local port is activated, either automatically or manually, users
         can connect to the local port with the appropriate application and
         traffic will be forwarded through the phēnix UI server to the VM.
+
+        <br />
+        <br />
+
+        See the
+        <a :href="docsPage('tunneler')" target="_blank" rel="noopener"
+          >Tunneler documentation</a
+        >
+        for more.
       </p>
     </div>
     <hr />
@@ -72,7 +81,12 @@
 </template>
 
 <script>
+  import { docsPage } from '@/utils/docs.js';
+
   export default {
+    setup() {
+      return { docsPage };
+    },
     data() {
       return {
         data: [

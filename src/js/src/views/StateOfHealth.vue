@@ -41,6 +41,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -48,6 +49,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -55,6 +57,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -70,6 +73,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -77,6 +81,7 @@
                   field="host"
                   label="Source"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.host }}
                 </b-table-column>
@@ -84,6 +89,7 @@
                   field="target"
                   label="Target"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.target }}
                 </b-table-column>
@@ -91,6 +97,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -98,6 +105,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -113,6 +121,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -120,6 +129,7 @@
                   field="process"
                   label="Process"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.proc }}
                 </b-table-column>
@@ -127,6 +137,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -134,6 +145,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -147,6 +159,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -154,6 +167,7 @@
                   field="path"
                   label="Path"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.path }}
                 </b-table-column>
@@ -161,6 +175,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -168,6 +183,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -183,6 +199,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -190,6 +207,7 @@
                   field="path"
                   label="Path"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.path }}
                 </b-table-column>
@@ -197,6 +215,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -204,6 +223,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -219,6 +239,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -226,6 +247,7 @@
                   field="service"
                   label="Service"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.service }}
                 </b-table-column>
@@ -233,6 +255,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -240,6 +263,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -255,6 +279,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -262,6 +287,7 @@
                   field="port"
                   label="Port"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.port }}
                 </b-table-column>
@@ -269,6 +295,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -276,6 +303,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -291,6 +319,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -298,6 +327,7 @@
                   field="container"
                   label="Container"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.container }}
                 </b-table-column>
@@ -305,6 +335,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -312,6 +343,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>
@@ -325,6 +357,7 @@
                   field="test"
                   label="Test Name"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.metadata.test }}
                 </b-table-column>
@@ -332,6 +365,7 @@
                   field="timestamp"
                   label="Timestamp"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.timestamp }}
                 </b-table-column>
@@ -339,6 +373,7 @@
                   field="success"
                   label="Success"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.success }}
                 </b-table-column>
@@ -346,6 +381,7 @@
                   field="error"
                   label="Error"
                   sortable
+                  header-class="sort-inline"
                   v-slot="props">
                   {{ props.row.error }}
                 </b-table-column>

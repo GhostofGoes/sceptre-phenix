@@ -1016,6 +1016,7 @@
               label="Node"
               width="150"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -1131,6 +1132,7 @@
               label="Host"
               width="150"
               sortable
+              header-class="sort-inline"
               v-slot="props">
               <template v-if="props.row.external"> EXTERNAL </template>
               <template v-else>
@@ -1303,7 +1305,12 @@
                 </div>
               </section>
             </template>
-            <b-table-column field="name" label="Name" sortable v-slot="props">
+            <b-table-column
+              field="name"
+              label="Name"
+              sortable
+              header-class="sort-inline"
+              v-slot="props">
               <template v-if="props.row.plainText">
                 <b-tooltip label="view file" type="is-dark">
                   <div class="field is-clickable">
@@ -1343,6 +1350,7 @@
               field="date"
               label="Date"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ props.row.date }}
@@ -1351,6 +1359,7 @@
               field="size"
               label="Size"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ formatFileSize(props.row.size) }}

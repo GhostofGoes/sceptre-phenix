@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: The Disks table has Size on Disk and a sortable Virtual Size column, an Actions column (snapshot, clone, download, rename, delete), and a narrower Name, In Use and search box. Sort arrows now sit beside the heading in every table.
+- **Web UI**: A help button in the footer links to the phēnix documentation, and the Tunneler page links to its documentation page.
+- **API**: Disk listings name the experiments that use each disk (`experiments`, with whether each is running), including disks that back the images an experiment uses. This replaces the `experiment` field, which was never set.
 - **Web UI**: The SCORCH pipelines page can clear the status of a run that is not running, with a Clear button per run and Clear all beside Stop all (`POST /experiments/{name}/scorch/pipelines/{run}/clear`). Go to experiment now sits next to Back to SCORCH.
 - **Web UI**: The SCORCH component output window shows the component name on its own line, with the experiment, run name, stage and live status beneath it, so long titles no longer get cut off.
 - **Web UI**: Disks has an upload dialog like Configs, with drag and drop and the accepted file types listed; unsupported files are rejected with an error.
@@ -18,6 +21,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: A disk's details now show the experiments using it, marking stopped ones, instead of always "N/A". Size sorting on Disks is correct for sizes in bytes and minimega's size format.
 - **Web UI**: Sorting Hosts by number of VMs now works.
 - **Web UI**: Configs open for viewing and editing in well under a second instead of several. The viewer reuses the config data it already fetched (and fetches on hover), the editor reuses the viewer's copy, and the Ace editor loads in the background in one round of requests. Download buttons show a spinner at once.
 - **Web UI**: Viewing a Topology config with builder data no longer errors, an invalid upload now reports its error, and the config search treats characters such as `(` literally.

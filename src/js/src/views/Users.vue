@@ -226,7 +226,12 @@
             </div>
           </section>
         </template>
-        <b-table-column field="username" label="User" sortable v-slot="props">
+        <b-table-column
+          field="username"
+          label="User"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
           <b-tooltip label="change user settings" type="is-dark">
             <div class="field">
               <div @click="editUser(props.row.username)">
@@ -242,10 +247,16 @@
           field="last_name"
           label="Last Name"
           sortable
+          header-class="sort-inline"
           v-slot="props">
           {{ props.row.last_name }}
         </b-table-column>
-        <b-table-column field="role" label="Role" sortable v-slot="props">
+        <b-table-column
+          field="role"
+          label="Role"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
           {{ props.row.role_name ? props.row.role_name : 'Not yet assigned' }}
         </b-table-column>
         <b-table-column label="Actions" width="150" centered v-slot="props">

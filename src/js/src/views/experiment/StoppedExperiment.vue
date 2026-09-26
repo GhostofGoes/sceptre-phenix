@@ -271,7 +271,12 @@
                 </div>
               </template>
             </b-table-column>
-            <b-table-column field="name" label="Node" sortable v-slot="props">
+            <b-table-column
+              field="name"
+              label="Node"
+              sortable
+              header-class="sort-inline"
+              v-slot="props">
               <template
                 v-if="
                   !props.row.external &&
@@ -305,6 +310,7 @@
               label="Host"
               width="200"
               sortable
+              header-class="sort-inline"
               v-slot="props">
               <template
                 v-if="
@@ -357,6 +363,7 @@
               label="CPUs"
               width="100"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -391,6 +398,7 @@
               label="Memory"
               width="112"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -459,6 +467,7 @@
               field="inject_partition"
               label="Partition"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               <template
@@ -582,7 +591,12 @@
                 </div>
               </section>
             </template>
-            <b-table-column field="name" label="Name" sortable v-slot="props">
+            <b-table-column
+              field="name"
+              label="Name"
+              sortable
+              header-class="sort-inline"
+              v-slot="props">
               <template v-if="props.row.plainText">
                 <b-tooltip label="view file" type="is-dark">
                   <div class="field is-clickable">
@@ -622,6 +636,7 @@
               field="date"
               label="Date"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ props.row.date }}
@@ -630,6 +645,7 @@
               field="size"
               label="Size"
               sortable
+              header-class="sort-inline"
               centered
               v-slot="props">
               {{ formatFileSize(props.row.size) }}

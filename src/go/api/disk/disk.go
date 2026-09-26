@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"phenix/api/experiment"
+	"phenix/types"
 	"phenix/util/mm"
 	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
@@ -90,39 +91,81 @@ func (MMDiskFiles) GetImages(expName string) ([]Details, error) {
 	// Using a map here to weed out duplicates.
 	details := make(map[string]Details)
 
-	if LocalInspection() {
-		return getImagesLocal(expName, details)
+	// the experiment given, or else every experiment
+	var experiments []types.Experiment
+
+	if len(expName) > 0 {
+		exp, err := experiment.Get(expName)
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve %v", expName)
+		}
+
+		experiments = []types.Experiment{*exp}
+	} else {
+		var err error
+
+		experiments, err = experiment.List()
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Add all the files from the minimega files directory
-	getAllFiles(details)
-
-	// Add all files defined in the experiment topology if given; otherwise check all experiments
-	if len(expName) > 0 {
-		err := getTopologyFiles(expName, details)
-		if err != nil {
+	if LocalInspection() {
+		if err := getImagesLocal(experiments, details); err != nil {
 			return nil, err
 		}
 	} else {
-		experiments, err := experiment.List()
-		if err != nil {
-			return nil, err
-		}
+		// Add all the files from the minimega files directory
+		getAllFiles(details)
 
+		// Add all files defined in the experiment topologies
 		for _, exp := range experiments {
-			err = getTopologyFiles(exp.Metadata.Name, details)
-			if err != nil {
-				return nil, err
-			}
+			getTopologyFiles(exp, details)
 		}
 	}
 
-	var images []Details
-	for name := range details {
-		images = append(images, details[name])
+	addExperimentUses(experiments, details)
+
+	images := make([]Details, 0, len(details))
+	for _, image := range details {
+		images = append(images, image)
 	}
 
 	return images, nil
+}
+
+// addExperimentUses records which experiments use each disk: the images their
+// topologies name, and the images backing those.
+func addExperimentUses(experiments []types.Experiment, details map[string]Details) {
+	for _, exp := range experiments {
+		use := ExperimentUse{Name: exp.Metadata.Name, Running: exp.Running()}
+		used := make(map[string]bool)
+
+		for _, node := range exp.Spec.Topology().Nodes() {
+			for _, drive := range node.Hardware().Drives() {
+				if drive.Image() == "" {
+					continue
+				}
+
+				image, ok := details[filepath.Base(drive.Image())]
+				if !ok {
+					continue
+				}
+
+				used[image.Name] = true
+				for _, backing := range image.BackingImages {
+					used[backing] = true
+				}
+			}
+		}
+
+		for name := range used {
+			if image, ok := details[name]; ok {
+				image.Experiments = append(image.Experiments, use)
+				details[name] = image
+			}
+		}
+	}
 }
 
 func (MMDiskFiles) GetImage(path string) (Details, error) {
@@ -153,34 +196,15 @@ func (MMDiskFiles) GetImage(path string) (Details, error) {
 
 // getImagesLocal is GetImages with images inspected by phenix itself (see
 // local.go): the files directory first, then images the experiments use.
-func getImagesLocal(expName string, details map[string]Details) ([]Details, error) {
+func getImagesLocal(experiments []types.Experiment, details map[string]Details) error {
 	dir := mm.GetMMFullPath("")
 
 	paths, err := imageFiles(dir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var names []string
-	if len(expName) > 0 {
-		names = []string{expName}
-	} else {
-		experiments, err := experiment.List()
-		if err != nil {
-			return nil, err
-		}
-
-		for _, exp := range experiments {
-			names = append(names, exp.Metadata.Name)
-		}
-	}
-
-	for _, name := range names {
-		exp, err := experiment.Get(name)
-		if err != nil {
-			return nil, fmt.Errorf("unable to retrieve %v", name)
-		}
-
+	for _, exp := range experiments {
 		for _, node := range exp.Spec.Topology().Nodes() {
 			for _, drive := range node.Hardware().Drives() {
 				if path := drive.Image(); path != "" && knownImage(path) {
@@ -192,12 +216,7 @@ func getImagesLocal(expName string, details map[string]Details) ([]Details, erro
 
 	resolveLocal(uniq(paths), details)
 
-	images := make([]Details, 0, len(details))
-	for _, image := range details {
-		images = append(images, image)
-	}
-
-	return images, nil
+	return nil
 }
 
 func uniq(paths []string) []string {
@@ -232,13 +251,7 @@ func getAllFiles(details map[string]Details) {
 }
 
 // Retrieves all the unique image names defined in the topology.
-func getTopologyFiles(expName string, details map[string]Details) error {
-	// Retrieve the experiment
-	exp, err := experiment.Get(expName)
-	if err != nil {
-		return fmt.Errorf("unable to retrieve %v", expName)
-	}
-
+func getTopologyFiles(exp types.Experiment, details map[string]Details) {
 	for _, node := range exp.Spec.Topology().Nodes() {
 		for _, drive := range node.Hardware().Drives() {
 			if len(drive.Image()) == 0 {
@@ -259,8 +272,6 @@ func getTopologyFiles(expName string, details map[string]Details) error {
 			}
 		}
 	}
-
-	return nil
 }
 
 func resolveImage(path string) []Details {
