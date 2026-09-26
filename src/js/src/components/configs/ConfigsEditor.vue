@@ -145,7 +145,7 @@
 </template>
 <script>
   import { useErrorNotification } from '@/utils/errorNotif';
-  import YAML from 'js-yaml';
+  import { CORE_SCHEMA, dump, load, mergeTag } from 'js-yaml';
   import AceEditor from './AceEditor.vue';
   import { sample } from 'openapi-sampler';
   import { debounce } from 'lodash-es';
@@ -354,7 +354,8 @@
           }
         } else if (lang == 'yaml') {
           try {
-            obj = YAML.load(str);
+            // js-yaml 5 loads YAML 1.2 core without merge keys; keep `<<` working
+            obj = load(str, { schema: CORE_SCHEMA.withTags(mergeTag) });
           } catch {
             return null;
           }
@@ -385,7 +386,7 @@
             return JSON.stringify(obj, '', 2);
           }
           case 'yaml': {
-            return YAML.dump(obj);
+            return dump(obj);
           }
         }
       },

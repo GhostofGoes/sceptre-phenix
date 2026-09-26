@@ -69,9 +69,11 @@ npm run test
 - `axios`: http library. Replaces `vue resource` in vue2. Make calls using `axiosInstance`
 - `vue-router`: handles routing within app
 - `vite`: build tools. Replaces `vue-cli` in vue2
-- `Buefy`: UI library. Recently upgraded to support vue3
-- `Bulma`: css library used by Buefy
-  - Note: currently Buefy uses Bulma 0.9.4. See docs here: <https://versions.bulma.io/0.9.4/documentation/>
+- `Buefy`: UI library (v3, built on Bulma 1)
+- `Bulma`: css library used by Buefy. See docs here: <https://bulma.io/documentation/>
+  - The dark theme lives in `src/assets/main.scss`. Bulma 1 computes colors from
+    CSS variables at runtime, so theme colors are set through the Sass module
+    configuration and the `--bulma-*` variable overrides there.
 
 ### Notes
 

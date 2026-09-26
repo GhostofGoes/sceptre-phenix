@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - **CLI / Web UI**: Display the release version or source branch alongside the commit hash and build timestamp in the version output and footer.
+- **Web UI**: Updated frontend dependencies to their latest releases from on or before 2026-08-26, including Bulma 1 with Buefy 3, Vite 8, Vitest 4, Pinia 4, Vue Router 5, xterm.js 6, Font Awesome 7, js-yaml 5, and vue-virtual-scroller 3. The dark theme was ported to Bulma 1's CSS variables and keeps the previous look. Removed the unused `mitt` dependency.
 
 ## [1.0.0]
 

@@ -269,7 +269,7 @@
 
 <script>
   import axiosInstance from '@/utils/axios.js';
-  import YAML from 'js-yaml';
+  import { dump } from 'js-yaml';
 
   import FileSaver from 'file-saver';
   import { roleAllowed } from '@/utils/rbac.js';
@@ -530,7 +530,7 @@
               }
             }
 
-            this.viewer.obj = YAML.dump(obj);
+            this.viewer.obj = dump(obj);
             this.viewer.isActive = true;
           })
           .catch((err) => {
