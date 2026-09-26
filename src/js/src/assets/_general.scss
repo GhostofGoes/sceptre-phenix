@@ -155,3 +155,25 @@ textarea::placeholder {
   white-space: nowrap;
   width: 1%;
 }
+
+// Error notifications: wide enough that a long server error doesn't wrap
+// into a narrow column, with each step of the error chain on its own line.
+.notices .notification {
+  max-width: min(56rem, calc(100vw - 2rem));
+  overflow-wrap: anywhere;
+}
+
+.notification .error-title {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.notification .error-step {
+  display: block;
+  padding-left: 1.25rem;
+  text-indent: -1.25rem;
+}
+
+.notification .error-step::before {
+  content: '↳ ';
+}

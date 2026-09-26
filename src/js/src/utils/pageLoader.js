@@ -25,7 +25,9 @@ let owner = null;
 // button reloads it.
 //
 //   fetch(signal) resolves to the data; signal aborts the request.
-//   apply(data) puts the data on the page.
+//   apply(data, { requestedAt }) puts the data on the page; requestedAt is
+//     when the data was requested, so updates the page received since then
+//     can be kept (see liveRows.js).
 //   key is the cache key; pass a function to decide per load, returning
 //     null to skip caching (e.g. for non-default filters), or omit it for
 //     live pages whose cached copy would mislead.
@@ -64,7 +66,7 @@ export function createPageLoader({ key = null, fetch, apply, refresh }) {
       const k = cacheKey();
       const cached = k ? cachedPage(k) : undefined;
       if (cached) {
-        apply(cached.data);
+        apply(cached.data, { requestedAt: cached.at });
         pageStatus.updatedAt = cached.at;
       }
 
@@ -83,6 +85,7 @@ export function createPageLoader({ key = null, fetch, apply, refresh }) {
         const controller = new AbortController();
         request = {
           promise: new Promise((resolve) => resolve(fetch(controller.signal))),
+          startedAt: Date.now(),
           release: () => controller.abort(),
         };
       }
@@ -94,7 +97,7 @@ export function createPageLoader({ key = null, fetch, apply, refresh }) {
         const data = await request.promise;
         if (current !== request) return false;
 
-        apply(data);
+        apply(data, { requestedAt: request.startedAt });
 
         if (owner === loader) {
           pageStatus.updatedAt = Date.now();

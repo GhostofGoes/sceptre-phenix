@@ -14,7 +14,11 @@
           <b-icon icon="arrow-right" />
         </router-link>
       </div>
-      <span class="runs-title">Experiment: {{ expName }}</span>
+      <b-tooltip :label="`The experiment is ${expState.label}`" type="is-dark">
+        <span class="runs-title tag is-large" :class="expState.tag">
+          Experiment: {{ expName }}
+        </span>
+      </b-tooltip>
       <div class="buttons">
         <button
           v-if="roleAllowed('experiments/trigger', 'create', expName)"
@@ -131,11 +135,13 @@
             </div>
           </dl>
         </header>
-        <section class="modal-card-body x-modal-dark">
+        <section class="modal-card-body x-modal-dark output-body">
+          <b-loading :is-full-page="false" :model-value="output.loading" />
           <div class="control">
             <textarea
               class="textarea x-config-text has-fixed-size"
               rows="30"
+              :placeholder="output.loading ? 'Loading output…' : ''"
               v-model="output.msg"
               readonly />
           </div>
@@ -175,6 +181,14 @@
     paused: { label: 'paused', tag: 'is-warning' },
   };
 
+  // how the header shows the experiment's state
+  const EXPERIMENT_STATES = {
+    started: { label: 'running', tag: 'is-success' },
+    stopped: { label: 'stopped', tag: 'is-danger' },
+    starting: { label: 'starting', tag: 'is-warning' },
+    stopping: { label: 'stopping', tag: 'is-warning' },
+  };
+
   // whether any component of the pipeline has run
   const hasStatus = (nodes) =>
     (nodes ?? []).some((node) => node.status && node.status !== 'unknown');
@@ -206,6 +220,9 @@
           return resp.data;
         },
         apply: (pipelines) => {
+          if (pipelines.experiment?.status) {
+            this.expStatus = pipelines.experiment.status;
+          }
           this.runs = (pipelines.pipelines ?? []).map((p, i) => ({
             name: p.name,
             running: i == pipelines.running,
@@ -271,6 +288,16 @@
               )
             : null;
         return STATUS_LABELS[(node ?? comp).status] ?? null;
+      },
+
+      // how the header shows the experiment's state
+      expState() {
+        return (
+          EXPERIMENT_STATES[this.expStatus] ?? {
+            label: 'loading',
+            tag: 'is-dark',
+          }
+        );
       },
 
       canClearAll() {
@@ -435,24 +462,33 @@
               return;
             }
 
-            let endpoint = `experiments/${comp.exp}/scorch/components/${comp.run}/${comp.loop}/${comp.stage}/${comp.name}`;
+            const endpoint = `experiments/${comp.exp}/scorch/components/${comp.run}/${comp.loop}/${comp.stage}/${comp.name}`;
+
+            // Open the output window at once, loading, so the click shows it
+            // was taken; a terminal or a node without output closes it again.
+            this.exitOutput();
+            const request = ++this.output.request;
+            this.output.title = comp.name;
+            this.output.comp = comp;
+            this.output.loading = true;
+            this.output.modal = true;
 
             axiosInstance
               .get(endpoint, {
                 headers: { Accept: 'application/json' },
               })
               .then((resp) => {
-                if (resp.data.output || resp.data.stream) {
-                  this.output.title = comp.name;
-                  this.output.comp = comp;
-                }
+                // closed, or another node opened, while this one loaded
+                if (this.output.request !== request) return;
+                this.output.loading = false;
+
                 if (resp.data.output) {
                   this.output.msg = resp.data.output;
-                  this.output.modal = true;
                 } else if (resp.data.stream) {
                   this.getOutputStream(resp.data.stream);
-                  this.output.modal = true;
                 } else if (resp.data.terminal) {
+                  this.exitOutput();
+
                   let t = resp.data.terminal;
 
                   this.terminal.loc = t.loc;
@@ -461,6 +497,7 @@
                   this.terminal.ro = t.readOnly;
                   this.terminal.modal = true;
                 } else {
+                  this.exitOutput();
                   this.$buefy.toast.open({
                     message: `There is no output available for the ${comp.name} node in the ${comp.stage} stage`,
                     type: 'is-info',
@@ -469,6 +506,8 @@
                 }
               })
               .catch((err) => {
+                if (this.output.request !== request) return;
+                this.exitOutput();
                 useErrorNotification(err);
               });
           }
@@ -565,6 +604,9 @@
         this.output.comp = null;
         this.output.msg = '';
         this.output.modal = false;
+        this.output.loading = false;
+        // outdates any fetch still running
+        this.output.request++;
       },
 
       handle(msg) {
@@ -632,6 +674,7 @@
 
             switch (msg.resource.action) {
               case 'start': {
+                this.expStatus = 'started';
                 this.exitOutput();
                 this.resetTerminal(true);
                 this.runsView();
@@ -639,7 +682,24 @@
               }
 
               case 'stop': {
+                this.expStatus = 'stopped';
                 this.runsView();
+                break;
+              }
+
+              case 'starting':
+              case 'stopping': {
+                this.expStatus = msg.resource.action;
+                break;
+              }
+
+              case 'errorStarting': {
+                this.expStatus = 'stopped';
+                break;
+              }
+
+              case 'errorStopping': {
+                this.expStatus = 'started';
                 break;
               }
 
@@ -679,7 +739,13 @@
           comp: null,
           msg: '',
           socket: null,
+          // set while the output is being fetched
+          loading: false,
+          // counts output fetches, so an outdated one is ignored
+          request: 0,
         },
+        // the experiment's state: started, stopped, starting or stopping
+        expStatus: null,
       };
     },
   };
@@ -732,8 +798,17 @@
     gap: 0.5rem;
   }
 
+  /* outlined, so it reads as the name of the node */
   .output-head .modal-card-title {
     overflow-wrap: anywhere;
+    flex-grow: 0;
+    border: 2px solid whitesmoke;
+    border-radius: 6px;
+    padding: 0.2rem 0.6rem;
+  }
+
+  .output-body {
+    position: relative;
   }
 
   .output-details {

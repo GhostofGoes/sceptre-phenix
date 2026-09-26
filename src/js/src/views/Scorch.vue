@@ -191,6 +191,7 @@
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
+  import { createLiveRows } from '@/utils/liveRows.js';
 
   // how long a SCORCH button spins waiting for the server to report that the
   // run started or stopped, in case that update never arrives
@@ -207,11 +208,16 @@
 
     async created() {
       addWsHandler(this.handle);
+      this.liveRows = createLiveRows();
       this.loader = createPageLoader({
         key: 'scorch',
         fetch: pageFetchers.scorch,
-        apply: (experiments) => {
-          this.experiments = experiments;
+        apply: (experiments, { requestedAt }) => {
+          this.experiments = this.liveRows.merge(
+            experiments,
+            this.experiments,
+            requestedAt,
+          );
           this.loaded = true;
           this.getTerminals();
         },
@@ -655,10 +661,12 @@
       handle(msg) {
         switch (msg.resource.type) {
           case 'apps/scorch': {
+            this.liveRows.touch(msg.resource.name.split('/')[0]);
             this.wsHandleScorch(msg);
             break;
           }
           case 'experiment': {
+            this.liveRows.touch(msg.resource.name);
             this.wsHandleExperiment(msg);
             break;
           }

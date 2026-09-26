@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Web UI**: Users has a search box and can sort by First Name. Error popups are wider and show each step of a nested server error on its own line, the root cause last in bold.
+- **Web UI**: On the SCORCH pipelines page the experiment name sits in a box colored by the experiment's state (green running, red stopped, yellow starting or stopping), clicking a node opens its output window at once with a loading spinner, and the node name in that window is outlined.
+- **API**: The SCORCH pipelines response includes the experiment's state (`experiment.status`). SCORCH component output and terminal endpoints now require permission to get the experiment.
+- **Hosts**: Disk usage for each host is measured at most once a minute, so the Hosts page no longer queues two minimega mesh commands per host every 10 seconds. Disk usage shows as a percentage.
 - **Web UI**: On the experiment page the VM rows appear first and screenshots fill in as the server takes them, with a loading image meanwhile. Uptime is narrower, and Uptime and Delay can be sorted. The Netflow tab is always shown (saying when there are no captures yet), the netflow button shows a spinner while a capture starts and sits left of the State of Health button.
 - **API**: Experiment listings report start progress (`percent`) for starting experiments. VM lists sent over the WebSocket no longer carry screenshots; they follow as `experiment/vm/screenshot` updates. VM lists can sort by `delayed`.
 - **Web UI**: Disks explain in tooltips which experiments use a disk and why an action is unavailable. The footer documentation button uses a book icon.
@@ -24,6 +28,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Web UI**: Stopping an experiment from the SCORCH page (or the Experiments page) no longer flips back to "started" when a list requested before the stop arrives after it.
+- **Web UI**: Users: Role sorting works; editing a user and closing the dialog no longer changes the row; a rejected edit keeps the dialog open; a failed delete no longer leaves a spinner; roles stay shown after updates from other sessions; resource names are no longer split into characters after a user is created; password errors are highlighted.
+- **Web UI**: Server error text in popups is escaped rather than rendered as HTML.
+- **SCORCH**: Fixed a data race between component output updates and new output streams, and on terminal ownership checks.
 - **Web UI**: Refreshing the Experiments page while a large experiment starts no longer hangs on "Loading experiments": the list no longer waits on minimega while an experiment starts or stops, and shows the starting experiment's progress.
 - **Web UI**: Sorting VMs on the experiment page no longer waits for every VM to be screenshotted.
 - **Web UI**: A disk's details now show the experiments using it, marking stopped ones, instead of always "N/A". Size sorting on Disks is correct for sizes in bytes and minimega's size format.

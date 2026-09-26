@@ -89,19 +89,19 @@ available for experiments, the number of VMs, and host uptime.
       </b-table-column>
       <b-table-column
         field="disk_used"
-        label="Disk Used (% phenix/minimega base)"
+        label="Disk Used (phenix / minimega base)"
         centered
         v-slot="props">
         <span
           class="tag"
           :class="decorator(props.row.diskusage.diskphenix, 100.0)">
-          {{ props.row.diskusage.diskphenix }}
+          {{ props.row.diskusage.diskphenix }}%
         </span>
         /
         <span
           class="tag"
           :class="decorator(props.row.diskusage.diskminimega, 100.0)">
-          {{ props.row.diskusage.diskminimega }}
+          {{ props.row.diskusage.diskminimega }}%
         </span>
       </b-table-column>
       <b-table-column

@@ -27,15 +27,16 @@ export function isLoadingPage(key) {
 }
 
 // Starts fetch(signal) for key, or joins the request already running for it,
-// and caches the result. Returns a handle with the result promise and
-// release(), which a page calls when it stops waiting on the result.
+// and caches the result. Returns a handle with the result promise, when the
+// request was sent, and release(), which a page calls when it stops waiting
+// on the result.
 export function fetchIntoCache(key, fetch) {
   let entry = inflight.get(key);
 
   // an abandoned request that timed out is not worth joining
   if (!entry || entry.controller.signal.aborted) {
     const controller = new AbortController();
-    entry = { controller, waiting: 0, expired: false };
+    entry = { controller, waiting: 0, expired: false, startedAt: Date.now() };
 
     // the executor runs fetch now, turning a synchronous throw into a rejection
     entry.promise = new Promise((resolve) => resolve(fetch(controller.signal)))
@@ -62,6 +63,8 @@ export function fetchIntoCache(key, fetch) {
   return {
     promise: entry.promise,
     signal: entry.controller.signal,
+    // when the shared request was sent, which may be before this call
+    startedAt: entry.startedAt,
     release() {
       if (released) return;
       released = true;

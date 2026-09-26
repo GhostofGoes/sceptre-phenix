@@ -143,11 +143,7 @@
         <section class="modal-card-body">
           <template v-if="user.token">
             <b-field label="Token">
-              <b-input
-                type="text"
-                ref="clone"
-                v-model="user.token"
-                readonly></b-input>
+              <b-input type="text" v-model="user.token" readonly></b-input>
             </b-field>
 
             <b-button size="is-small" icon-left="copy" @click="copy">
@@ -201,6 +197,18 @@
           >Paginate</b-switch
         >
       </div>
+      <b-field>
+        <b-input
+          v-model="searchText"
+          placeholder="Find a user"
+          icon="search"
+          aria-label="Find a user"></b-input>
+        <p class="control">
+          <button class="button input-button" @click="searchText = ''">
+            <b-icon icon="window-close"></b-icon>
+          </button>
+        </p>
+      </b-field>
       <p v-if="roleAllowed('users', 'create')" class="control">
         <b-tooltip label="create a new user" type="is-light is-left">
           <button class="button is-light" @click="isCreateActive = true">
@@ -211,7 +219,7 @@
     </b-field>
     <div>
       <b-table
-        :data="users"
+        :data="filteredUsers"
         :paginated="table.isPaginated && paginationNeeded"
         :per-page="table.perPage"
         v-model:current-page="table.currentPage"
@@ -222,7 +230,13 @@
         <template #empty>
           <section class="section">
             <div class="content has-text-white has-text-centered">
-              {{ loaded ? 'No users found' : loadingText('users') }}
+              {{
+                !loaded
+                  ? loadingText('users')
+                  : searchText
+                    ? 'No users match the search'
+                    : 'No users found'
+              }}
             </div>
           </section>
         </template>
@@ -232,15 +246,22 @@
           sortable
           header-class="sort-inline"
           v-slot="props">
-          <b-tooltip label="change user settings" type="is-dark">
-            <div class="field">
-              <div @click="editUser(props.row.username)">
-                {{ props.row.username }}
-              </div>
-            </div>
+          <b-tooltip
+            v-if="roleAllowed('users', 'patch', props.row.username)"
+            label="change user settings"
+            type="is-dark">
+            <a @click="editUser(props.row.username)">
+              {{ props.row.username }}
+            </a>
           </b-tooltip>
+          <template v-else>{{ props.row.username }}</template>
         </b-table-column>
-        <b-table-column field="first_name" label="First Name" v-slot="props">
+        <b-table-column
+          field="first_name"
+          label="First Name"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
           {{ props.row.first_name }}
         </b-table-column>
         <b-table-column
@@ -252,7 +273,7 @@
           {{ props.row.last_name }}
         </b-table-column>
         <b-table-column
-          field="role"
+          field="role_name"
           label="Role"
           sortable
           header-class="sort-inline"
@@ -273,26 +294,26 @@
             </button>
           </b-tooltip>
           <b-tooltip
+            v-if="roleAllowed('users', 'delete', props.row.username)"
             class="action"
             :delay="500"
             label="delete user"
             type="is-light"
             multilined>
             <button
-              v-if="roleAllowed('users', 'delete', props.row.username)"
               class="button is-light is-small"
               @click="deleteUser(props.row.username)">
               <b-icon icon="trash"></b-icon>
             </button>
           </b-tooltip>
           <b-tooltip
+            v-if="roleAllowed('users', 'patch', props.row.username)"
             class="action"
             :delay="500"
             label="edit user"
             type="is-light"
             multilined>
             <button
-              v-if="roleAllowed('users', 'patch', props.row.username)"
               class="button is-light is-small"
               @click="editUser(props.row.username)">
               <b-icon icon="pencil"></b-icon>
@@ -319,6 +340,11 @@
   import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
   import { pageFetchers } from '@/utils/pageData.js';
 
+  // Resource names are typed space-separated and sent as a list.
+  function splitResourceNames(names) {
+    return (names ?? '').split(/\s+/).filter(Boolean);
+  }
+
   export default {
     setup() {
       return { ...useTable({ name: 'users' }), roleAllowed };
@@ -342,8 +368,28 @@
       this.getPasswordRequirements();
     },
     computed: {
+      filteredUsers() {
+        const text = this.searchText.trim().toLowerCase();
+        if (!text) {
+          return this.users;
+        }
+
+        return this.users.filter((u) =>
+          [u.username, u.first_name, u.last_name, u.role_name].some((v) =>
+            v?.toLowerCase().includes(text),
+          ),
+        );
+      },
       paginationNeeded() {
-        return this.users.length > this.table.perPage;
+        return this.filteredUsers.length > this.table.perPage;
+      },
+    },
+    watch: {
+      searchText() {
+        this.table.currentPage = 1;
+      },
+      'user.username'() {
+        this.userExists = false;
       },
     },
 
@@ -362,8 +408,11 @@
           case 'create': {
             let user = msg.result;
 
-            user.resource_names = user.resource_names.join(' ');
-            user.role_name = user.role.name;
+            if (users.some((u) => u.username == user.username)) {
+              break;
+            }
+
+            user.role_name = user.role?.name;
             users.push(user);
 
             this.users = [...users];
@@ -381,10 +430,7 @@
               if (users[i].username == msg.resource.name) {
                 let user = msg.result;
 
-                user.resource_names =
-                  user.resource_names === null
-                    ? null
-                    : user.resource_names.join(' ');
+                user.role_name = user.role?.name;
                 users[i] = user;
 
                 break;
@@ -498,8 +544,6 @@
           return;
         }
 
-        delete this.user.confirmPassword;
-
         if (!this.user.role_name) {
           this.$buefy.toast.open({
             message: 'You must select a role',
@@ -510,14 +554,14 @@
           return;
         }
 
-        if (this.user.resource_names) {
-          this.user.resource_names = this.user.resource_names.split(' ');
-        }
+        // send a copy, so a failed request leaves the form as it was
+        const { confirmPassword: _, ...user } = this.user;
+        user.resource_names = splitResourceNames(user.resource_names);
 
         this.isWaiting = true;
 
         axiosInstance
-          .post('users', this.user)
+          .post('users', user)
           .then((_) => {
             this.isWaiting = false;
             this.resetLocalUser();
@@ -529,14 +573,16 @@
           });
       },
       editUser(username) {
-        for (let i = 0; i < this.users.length; i++) {
-          if (this.users[i].username == username) {
-            this.user = this.users[i];
-            break;
-          }
+        const row = this.users.find((u) => u.username == username);
+        if (!row) {
+          return;
         }
 
-        this.user.resource_names = uniq(this.user.resource_names).join(' ');
+        // edit a copy, so closing the dialog without saving changes nothing
+        this.user = {
+          ...row,
+          resource_names: uniq(row.resource_names ?? []).join(' '),
+        };
 
         this.isEditActive = true;
       },
@@ -561,39 +607,27 @@
           return;
         }
 
-        delete this.user.id;
+        const { id: _, ...user } = this.user;
+        user.resource_names = splitResourceNames(user.resource_names);
 
-        let user = this.user;
-
-        user.resource_names = user.resource_names.split(' ');
-
-        this.isEditActive = false;
         this.isWaiting = true;
 
+        // the dialog stays open until the change is saved, so a rejected
+        // change can be corrected rather than typed again
         axiosInstance
           .patch('users/' + user.username, user)
-          .then((_) => {
+          .then(() => {
             delete user.password;
             delete user.new_password;
 
-            let users = this.users;
-
-            for (let i = 0; i < users.length; i++) {
-              if (users[i].username == user.username) {
-                users[i] = user;
-                break;
-              }
-            }
-
-            this.users = [...users];
-            this.isWaiting = false;
+            this.users = this.users.map((u) =>
+              u.username == user.username ? { ...u, ...user } : u,
+            );
+            this.isEditActive = false;
+            this.resetLocalUser();
           })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isWaiting = false;
-          });
-
-        this.resetLocalUser();
+          .catch((err) => useErrorNotification(err))
+          .finally(() => (this.isWaiting = false));
       },
 
       deleteUser(username) {
@@ -637,6 +671,7 @@
               })
               .catch((err) => {
                 useErrorNotification(err);
+                this.isWaiting = false;
               });
           },
         });
@@ -692,6 +727,7 @@
 
       resetLocalUser() {
         this.user = {};
+        this.userExists = false;
       },
       check_password_validity() {
         const password = this.user.password;
@@ -709,31 +745,31 @@
             'Password must be longer than ' +
             this.passwordReqs.min_length +
             ' characters.';
-          this.createModalErrors.passwordErrorLevel = 'is-dangeer';
+          this.createModalErrors.passwordErrorLevel = 'is-danger';
           return false;
         }
         if (!/[a-z]/.test(password) && this.passwordReqs.lowercase_req) {
           this.createModalErrors.passwordErrorMessage =
             'Password must contain a lowercase letter';
-          this.createModalErrors.passwordErrorLevel = 'is-dangeer';
+          this.createModalErrors.passwordErrorLevel = 'is-danger';
           return false;
         }
         if (!/[A-Z]/.test(password) && this.passwordReqs.uppercase_req) {
           this.createModalErrors.passwordErrorMessage =
             'Password must contain an uppercase letter';
-          this.createModalErrors.passwordErrorLevel = 'is-dangeer';
+          this.createModalErrors.passwordErrorLevel = 'is-danger';
           return false;
         }
         if (!/\d/.test(password) && this.passwordReqs.number_req) {
           this.createModalErrors.passwordErrorMessage =
             'Password must contain a number';
-          this.createModalErrors.passwordErrorLevel = 'is-dangeer';
+          this.createModalErrors.passwordErrorLevel = 'is-danger';
           return false;
         }
         if (!/\W/.test(password) && this.passwordReqs.symbol_req) {
           this.createModalErrors.passwordErrorMessage =
             'Password must contain a symbol';
-          this.createModalErrors.passwordErrorLevel = 'is-dangeer';
+          this.createModalErrors.passwordErrorLevel = 'is-danger';
           return false;
         }
 
@@ -752,6 +788,7 @@
       return {
         roleNames: [],
         users: [],
+        searchText: '',
         loaded: false,
         user: {},
         userExists: false,

@@ -26,13 +26,13 @@ test('shows cached data at once and replaces it when fresh data arrives', async 
   const loader = createPageLoader({ key: 'hosts', fetch, apply });
 
   const done = loader.start();
-  expect(apply).toHaveBeenCalledWith(['cached']);
+  expect(apply).toHaveBeenCalledWith(['cached'], expect.anything());
   expect(pageStatus.loading).toBe(true);
   expect(pageStatus.updatedAt).not.toBeNull();
 
   calls[0].resolve(['fresh']);
   await done;
-  expect(apply).toHaveBeenLastCalledWith(['fresh']);
+  expect(apply).toHaveBeenLastCalledWith(['fresh'], expect.anything());
   expect(pageStatus.loading).toBe(false);
   loader.stop();
 });
@@ -67,7 +67,7 @@ test('revisiting a page joins its background load', async () => {
 
   calls[0].resolve(['h1']);
   expect(await done).toBe(true);
-  expect(apply).toHaveBeenCalledWith(['h1']);
+  expect(apply).toHaveBeenCalledWith(['h1'], expect.anything());
   again.stop();
 });
 
@@ -129,7 +129,7 @@ test('a newer load supersedes an older one', async () => {
   calls[0].resolve('old');
   await Promise.all([first, second]);
   expect(apply).toHaveBeenCalledTimes(1);
-  expect(apply).toHaveBeenCalledWith('new');
+  expect(apply).toHaveBeenCalledWith('new', expect.anything());
   loader.stop();
 });
 

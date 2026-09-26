@@ -374,6 +374,7 @@
 </template>
 
 <script>
+  import { createLiveRows } from '@/utils/liveRows.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import axiosInstance from '@/utils/axios.js';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
@@ -397,15 +398,21 @@
 
     async created() {
       addWsHandler(this.handleWs);
+      this.liveRows = createLiveRows();
       this.loader = createPageLoader({
         key: 'experiments',
         fetch: pageFetchers.experiments,
-        apply: (experiments) => {
+        apply: (experiments, { requestedAt }) => {
           // the server reports a starting experiment's progress from 0 to 1
-          this.experiments = experiments.map((exp) => ({
+          const loaded = experiments.map((exp) => ({
             ...exp,
             percent: Math.round((exp.percent ?? 0) * 100),
           }));
+          this.experiments = this.liveRows.merge(
+            loaded,
+            this.experiments,
+            requestedAt,
+          );
           this.loaded = true;
         },
       });
@@ -471,6 +478,7 @@
           return;
         }
 
+        this.liveRows.touch(msg.resource.name);
         let exp = this.experiments;
 
         switch (msg.resource.action) {

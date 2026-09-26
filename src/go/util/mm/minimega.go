@@ -1746,18 +1746,59 @@ func processNamespaceHosts(namespace string) Hosts {
 	return hosts
 }
 
-// Run shell command to get disk usage for `path` on `host`.
-func (m Minimega) getDiskUsage(host, path string) float64 {
-	diskUsage := 0.0
+// diskUsageTTL is how long a host's disk usage is reused. The Hosts page
+// polls every few seconds, and each measurement is a mesh command that waits
+// in minimega's command queue behind experiment work.
+const diskUsageTTL = time.Minute
 
+type diskUsageEntry struct {
+	value float64
+	at    time.Time
+}
+
+var (
+	diskUsageMu    sync.Mutex                    //nolint:gochecknoglobals // cache shared across requests
+	diskUsageCache = map[string]diskUsageEntry{} //nolint:gochecknoglobals // cache shared across requests
+)
+
+// getDiskUsage returns the percent of the disk holding `path` on `host` that
+// is in use, measured at most once per diskUsageTTL.
+func (m Minimega) getDiskUsage(host, path string) float64 {
+	key := host + "\x00" + path
+
+	diskUsageMu.Lock()
+	entry, ok := diskUsageCache[key]
+	diskUsageMu.Unlock()
+
+	if ok && time.Since(entry.at) < diskUsageTTL {
+		return entry.value
+	}
+
+	value, ok := m.measureDiskUsage(host, path)
+	if !ok {
+		return 0
+	}
+
+	diskUsageMu.Lock()
+	diskUsageCache[key] = diskUsageEntry{value: value, at: time.Now()}
+	diskUsageMu.Unlock()
+
+	return value
+}
+
+// Run shell command to get disk usage for `path` on `host`.
+func (m Minimega) measureDiskUsage(host, path string) (float64, bool) {
 	cmd := fmt.Sprintf(`bash -c "echo $(df %s | awk '{print $(NF-1)}' | tail -1)"`, path)
 	resp, err := m.MeshShellResponse(host, cmd)
 
 	if (resp == "") || (err != nil) {
-		return diskUsage
+		return 0, false
 	}
 
-	diskUsage, _ = strconv.ParseFloat(strings.TrimSuffix(resp, "%"), 64)
+	diskUsage, err := strconv.ParseFloat(strings.TrimSuffix(resp, "%"), 64)
+	if err != nil {
+		return 0, false
+	}
 
-	return diskUsage
+	return diskUsage, true
 }
