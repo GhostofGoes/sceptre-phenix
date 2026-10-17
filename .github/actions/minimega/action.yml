@@ -67,11 +67,15 @@ runs:
       run: |
         set -euo pipefail
         sudo apt-get update -q
+        # qemu-system-modules-spice provides the QXL VGA device that phenix
+        # requests for Linux guests (`vm config qemu-append -vga qxl`); on
+        # Ubuntu 24.04 it is packaged separately from qemu-system-x86.
         # dnsmasq's service fights systemd-resolved for port 53 on the runner;
         # minimega only needs the binary, so stop the service after install.
         sudo apt-get install -y --no-install-recommends \
           build-essential libpcap-dev \
           openvswitch-switch qemu-system-x86 qemu-kvm qemu-utils \
+          qemu-system-modules-spice socat \
           dnsmasq iproute2 isc-dhcp-client ntfs-3g cpu-checker
         sudo systemctl disable --now dnsmasq 2>/dev/null || true
 
@@ -93,6 +97,8 @@ runs:
       run: |
         set -euo pipefail
         sudo modprobe openvswitch || echo "::warning::openvswitch kernel module did not load"
+        # nbd is used by `disk inject` and the minitest disk tests
+        sudo modprobe nbd || echo "::warning::nbd kernel module did not load"
         sudo systemctl start openvswitch-switch \
           || sudo /usr/share/openvswitch/scripts/ovs-ctl start
         for i in $(seq 1 30); do

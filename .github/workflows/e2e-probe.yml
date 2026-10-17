@@ -155,20 +155,25 @@ jobs:
           ref: ${{ env.MINIMEGA_REF }}
 
       - name: Runtime facts from inside minimega
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set +e
-          mm() { sudo minimega -base /tmp/minimega -e "$@"; }
+          # sudo resets PATH (secure_path), so call the binary by absolute path
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           echo "::group::host"; mm host; echo "::endgroup::"
           echo "::group::namespace"; mm namespace; echo "::endgroup::"
           echo "::group::vlans"; mm vlans; echo "::endgroup::"
           true
 
-      - name: VM state transitions with KVM and TCG, container attempt
+      - name: VM state transitions with KVM and TCG
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set +e
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
           { echo "## minimega VM lifecycle on the runner"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
-          mm() { sudo minimega -base /tmp/minimega -e "$@"; }
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           mm 'vm config memory 128'
           mm 'vm config net LAN'
           mm 'vm launch kvm probe-kvm'
@@ -198,19 +203,7 @@ jobs:
           mm 'vm launch kvm alpine'
           mm 'vm start alpine'; sleep 15
           row "alpine kernel/initrd guest via minimega" "$(mm '.columns name,state,uptime vm info')"
-          row "alpine serial output" "$(sudo timeout 5 sh -c 'cat /tmp/minimega/*/serial0' 2>/dev/null | tail -c 200; mm 'vm info' >/dev/null)"
-          mm 'clear all'
-          # container type on this (cgroup v2) host
-          sudo apt-get install -y -q busybox-static >/dev/null 2>&1
-          sudo mkdir -p /tmp/cfs/bin /tmp/cfs/proc /tmp/cfs/sys /tmp/cfs/dev /tmp/cfs/tmp
-          sudo cp /bin/busybox /tmp/cfs/bin/busybox 2>/dev/null || sudo cp /usr/bin/busybox /tmp/cfs/bin/busybox
-          sudo ln -sf busybox /tmp/cfs/bin/sh; sudo ln -sf busybox /tmp/cfs/bin/sleep
-          printf '#!/bin/sh\nexec /bin/sleep 3600\n' | sudo tee /tmp/cfs/init >/dev/null; sudo chmod +x /tmp/cfs/init
-          mm 'vm config filesystem /tmp/cfs'
-          mm 'vm launch container probe-c'
-          row "launch container" "$(mm '.columns name,state,type vm info')"
-          row "start container" "$(mm 'vm start probe-c' 2>&1; mm '.columns name,state,type vm info')"
-          row "container errors in log" "$(sudo grep -i -E 'cgroup|container' /tmp/minimega/minimega.log | tail -3)"
+          row "alpine serial output" "$(for f in /tmp/minimega/*/serial0; do sudo timeout 3 socat -u UNIX-CONNECT:$f - 2>/dev/null; done | tail -c 200)"
           mm 'clear all'
           true
 
@@ -220,10 +213,14 @@ jobs:
           set +e
           # Excluded: tests that need a container filesystem ($images/minicccfs),
           # a guest OS with miniccc (cc*, vnc*), routers, plumbing, or the mesh.
-          TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_lifecycle_net|vm_add_nic|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|disk|diskconfig|file|file_glob|shell)$'
+          # Also excluded: vm_lifecycle_net and vm_net (launch containers, which
+          # need cgroup v1 and currently take the whole daemon down on a cgroup
+          # v2 host) and vm_add_nic (needs a miniccc guest).
+          TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|disk|diskconfig|file|file_glob|shell)$'
           echo "$TESTS" > /tmp/minitest.regex
           sudo timeout 900 bin/minitest -base /tmp/minimega -dir tests -run "$TESTS" 2>&1 | tee /tmp/minitest.log
           echo "minitest exit: ${PIPESTATUS[0]}"
+          if pgrep -x minimega >/dev/null; then echo "minimega daemon alive after minitest"; else echo "::error::minimega daemon died during minitest"; sudo grep -E 'FATAL|panic' /tmp/minimega/minimega.log | tail -5; fi
           pass=0; fail=0; notrun=0
           { echo "## minitest subset results"; echo; echo "| test | result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
           for want in tests/*.want; do
@@ -239,6 +236,29 @@ jobs:
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "pass=$pass fail=$fail notrun=$notrun" | tee -a "$GITHUB_STEP_SUMMARY"
           sudo chmod -R a+r tests
+          true
+
+      - name: Container VM attempt on a cgroup v2 host (expected to fail; runs last)
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## minimega container type on the runner"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
+          sudo apt-get install -y -q busybox-static >/dev/null 2>&1
+          sudo mkdir -p /tmp/cfs/bin /tmp/cfs/proc /tmp/cfs/sys /tmp/cfs/dev /tmp/cfs/tmp
+          sudo cp /bin/busybox /tmp/cfs/bin/busybox 2>/dev/null || sudo cp /usr/bin/busybox /tmp/cfs/bin/busybox
+          sudo ln -sf busybox /tmp/cfs/bin/sh; sudo ln -sf busybox /tmp/cfs/bin/sleep
+          printf '#!/bin/sh\nexec /bin/sleep 3600\n' | sudo tee /tmp/cfs/init >/dev/null; sudo chmod +x /tmp/cfs/init
+          row "cgroup v2 children created by minimega" "$(ls -d /sys/fs/cgroup/freezer /sys/fs/cgroup/memory/minimega 2>&1)"
+          mm 'vm config filesystem /tmp/cfs'
+          mm 'vm launch container probe-c'
+          row "launch container" "$(mm '.columns name,state,type vm info' 2>&1)"
+          row "start container" "$(mm 'vm start probe-c' 2>&1; mm '.columns name,state,type vm info' 2>&1)"
+          sleep 2
+          row "daemon alive after container launch" "$(pgrep -x minimega >/dev/null && echo yes || echo NO)"
+          row "container errors in log" "$(sudo grep -i -E 'cgroup|FATAL' /tmp/minimega/minimega.log | tail -3)"
           true
 
       - name: Collect minimega logs
@@ -417,7 +437,7 @@ jobs:
           row "RUNNING count (expect 3)" "$running"
           row "taps on OVS (expect 3)" "$(sudo ovs-vsctl list-ports mega_bridge 2>/dev/null | wc -l) on mega_bridge; $(sudo ovs-vsctl list-ports phenix 2>/dev/null | wc -l) on phenix"
           row "vlans" "$(mm 'namespace e2e vlans')"
-          row "alpine serial tail" "$(sudo sh -c 'for f in /tmp/minimega/*/serial0; do timeout 3 cat $f; done' 2>/dev/null | tail -c 200)"
+          row "alpine serial tail" "$(for f in /tmp/minimega/*/serial0; do sudo timeout 3 socat -u UNIX-CONNECT:$f - 2>/dev/null; done | tail -c 200)"
 
           $PHENIX vm pause e2e hollow1
           row "vm pause hollow1" "$(mm 'namespace e2e .filter name=hollow1 .columns name,state vm info')"
