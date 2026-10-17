@@ -275,6 +275,7 @@ components:
               enum:
               - kvm
               - container
+              - stub
               - ""
               default: kvm
               example: kvm

@@ -1,4 +1,4 @@
-From f5270d27ad632618d219c4f5fe9b2a360a9acfe0 Mon Sep 17 00:00:00 2001
+From a1b5a38290485969c0be03c34feed9daf3124192 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sat, 17 Oct 2026 22:42:58 +0000
 Subject: [PATCH] feat(stub): add stub VM type for hypervisor-free testing
@@ -18,8 +18,8 @@ Co-authored-by: Claude Fable 5.1 <noreply@anthropic.com>
  cmd/minimega/container.go       |   2 +
  cmd/minimega/kvm.go             |   2 +
  cmd/minimega/namespace.go       |   7 +
- cmd/minimega/stub.go            | 523 ++++++++++++++++++++++++++++++++
- cmd/minimega/stub_test.go       | 411 +++++++++++++++++++++++++
+ cmd/minimega/stub.go            | 530 ++++++++++++++++++++++++++++++++
+ cmd/minimega/stub_test.go       | 441 ++++++++++++++++++++++++++
  cmd/minimega/vm.go              |   8 +
  cmd/minimega/vm_cli.go          |  14 +-
  cmd/minimega/vmconfig_cli.go    |   3 +
@@ -30,7 +30,7 @@ Co-authored-by: Claude Fable 5.1 <noreply@anthropic.com>
  tests/stub_info.want            |   9 +
  tests/stub_lifecycle            |  32 ++
  tests/stub_lifecycle.want       |  78 +++++
- 16 files changed, 1181 insertions(+), 8 deletions(-)
+ 16 files changed, 1218 insertions(+), 8 deletions(-)
  create mode 100644 cmd/minimega/stub.go
  create mode 100644 cmd/minimega/stub_test.go
  create mode 100644 tests/stub_info
@@ -97,10 +97,10 @@ index f8aa13a..e82ef21 100644
  			}
 diff --git a/cmd/minimega/stub.go b/cmd/minimega/stub.go
 new file mode 100644
-index 0000000..cae5d0b
+index 0000000..4290e50
 --- /dev/null
 +++ b/cmd/minimega/stub.go
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,530 @@
 +// Copyright 2026 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 +// Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains certain
 +// rights in this software.
@@ -120,7 +120,7 @@ index 0000000..cae5d0b
 +//     started as a stand-in "guest" when the VM starts, for example a wrapper
 +//     around the real miniccc binary. The process runs in the instance
 +//     directory and receives the MM_STUB_* environment variables documented
-+//     on StubVM.Start.
++//     on StubVM.Start. The container default, "/init", means no stand-in.
 +//   - `vm config hostname` is informational only.
 +//   - `vm config filesystem` is not required and is ignored, as are
 +//     `preinit`, `fifos`, and `volume`.
@@ -146,6 +146,10 @@ index 0000000..cae5d0b
 +	"github.com/sandia-minimega/minimega/v2/internal/ron"
 +	log "github.com/sandia-minimega/minimega/v2/pkg/minilog"
 +)
++
++// containerDefaultInit is the default of `vm config init` (see
++// ContainerConfig.Init), which stubs treat as "no stand-in process".
++const containerDefaultInit = "/init"
 +
 +type StubVM struct {
 +	*BaseVM         // embed
@@ -364,7 +368,10 @@ index 0000000..cae5d0b
 +// any, and hands it to the lifecycle goroutine. The caller must hold the VM
 +// lock.
 +func (vm *StubVM) startProcess() error {
-+	if len(vm.Init) == 0 {
++	// ContainerConfig defaults Init to "/init", a path inside a container
++	// filesystem. A stub has no filesystem, so that default means "no
++	// stand-in process".
++	if len(vm.Init) == 0 || (len(vm.Init) == 1 && vm.Init[0] == containerDefaultInit) {
 +		return nil
 +	}
 +
@@ -626,10 +633,10 @@ index 0000000..cae5d0b
 +}
 diff --git a/cmd/minimega/stub_test.go b/cmd/minimega/stub_test.go
 new file mode 100644
-index 0000000..d4691e0
+index 0000000..290ccdf
 --- /dev/null
 +++ b/cmd/minimega/stub_test.go
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,441 @@
 +// Copyright 2026 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 +// Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains certain
 +// rights in this software.
@@ -1039,6 +1046,36 @@ index 0000000..d4691e0
 +
 +	if copied.GetName() != "foo" || copied.Hostname != "foo" || len(copied.Init) != 3 {
 +		t.Fatalf("Copy() lost fields: %+v", copied)
++	}
++}
++
++// TestStubDefaultInitIsNoStandIn verifies that the ContainerConfig default of
++// "/init" does not make a stub try to exec /init on the host.
++func TestStubDefaultInitIsNoStandIn(t *testing.T) {
++	*f_base = t.TempDir()
++
++	config := NewVMConfig()
++	config.Init = []string{"/init"}
++
++	vm, err := NewStub("defaultinit", "", config)
++	if err != nil {
++		t.Fatalf("NewStub: %v", err)
++	}
++
++	if err := vm.Launch(); err != nil {
++		t.Fatalf("Launch: %v", err)
++	}
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start with default init: %v", err)
++	}
++
++	if vm.GetState() != VM_RUNNING || vm.GetPID() != 0 {
++		t.Fatalf("state %v pid %d, want RUNNING and no stand-in process", vm.GetState(), vm.GetPID())
++	}
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("Kill: %v", err)
 +	}
 +}
 diff --git a/cmd/minimega/vm.go b/cmd/minimega/vm.go

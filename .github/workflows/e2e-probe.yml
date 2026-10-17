@@ -11,6 +11,7 @@ on:
       - '.github/workflows/e2e-probe.yml'
       - '.github/actions/minimega/**'
       - '.github/e2e/**'
+      - 'src/go/types/version/schemas/*.yaml'
   workflow_dispatch:
     inputs:
       minimega_repository:
@@ -221,6 +222,10 @@ jobs:
           # cgroup v2 host) and vm_add_nic (needs a miniccc guest).
           TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|diskconfig|file|file_glob|shell)$'
           echo "$TESTS" > /tmp/minitest.regex
+          # minitest matches the regex against file names and recurses into
+          # subdirectories, so tests/distributed/vm_lifecycle matches and its
+          # `enter` script launches containers (which kill the daemon here).
+          rm -rf tests/distributed
           sudo timeout 900 bin/minitest -base /tmp/minimega -dir tests -run "$TESTS" 2>&1 | tee /tmp/minitest.log
           echo "minitest exit: ${PIPESTATUS[0]}"
           if pgrep -x minimega >/dev/null; then echo "minimega daemon alive after minitest"; else echo "::error::minimega daemon died during minitest"; sudo grep -E 'FATAL|panic' /tmp/minimega/minimega.log | tail -5; fi
@@ -410,7 +415,7 @@ jobs:
           MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set -euo pipefail
-          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all"
+          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all --store.endpoint bolt:///etc/phenix/store.bdb"
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
           { echo "## phenix lifecycle against real minimega"; echo; echo "| Step | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
@@ -469,7 +474,8 @@ jobs:
           set -euo pipefail
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
-          sudo setsid nohup $PWD/src/go/bin/phenix ui --deploy-mode all --listen-endpoint 127.0.0.1:3000 >/tmp/phenix-ui.log 2>&1 &
+          # Same store as the CLI steps above, so the topology they created is visible to the server.
+          sudo setsid nohup $PWD/src/go/bin/phenix ui --deploy-mode all --store.endpoint bolt:///etc/phenix/store.bdb --listen-endpoint 127.0.0.1:3000 >/tmp/phenix-ui.log 2>&1 &
           timeout 60 bash -c 'until curl -sf http://127.0.0.1:3000/api/v1/experiments >/dev/null; do sleep 1; done'
           set +e
           api() { curl -sS -X "$1" "http://127.0.0.1:3000/api/v1$2" "${@:3}" -w ' [HTTP %{http_code}]'; }
@@ -635,7 +641,7 @@ jobs:
           MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set -euo pipefail
-          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all"
+          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all --store.endpoint bolt:///etc/phenix/store.bdb"
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
           { echo "## stub VM type: phenix lifecycle and C2"; echo; echo "| Step | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
