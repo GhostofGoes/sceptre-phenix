@@ -415,6 +415,9 @@ jobs:
           MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set -euo pipefail
+          # phenix only creates its default directories when it picks the default
+          # store, so create the store directory for the explicit endpoint.
+          sudo mkdir -p /etc/phenix /var/log/phenix
           PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all --store.endpoint bolt:///etc/phenix/store.bdb"
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
@@ -641,6 +644,9 @@ jobs:
           MM_BIN: ${{ steps.mm.outputs.bin }}
         run: |
           set -euo pipefail
+          # phenix only creates its default directories when it picks the default
+          # store, so create the store directory for the explicit endpoint.
+          sudo mkdir -p /etc/phenix /var/log/phenix
           PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all --store.endpoint bolt:///etc/phenix/store.bdb"
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
