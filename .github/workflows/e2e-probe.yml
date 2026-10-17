@@ -10,6 +10,7 @@ on:
     paths:
       - '.github/workflows/e2e-probe.yml'
       - '.github/actions/minimega/**'
+      - '.github/e2e/**'
   workflow_dispatch:
     inputs:
       minimega_repository:
@@ -185,6 +186,8 @@ jobs:
           mm 'clear all'
           mm 'vm config memory 128'
           mm 'vm config qemu /usr/bin/qemu-system-x86_64'
+          # minimega defaults to `-cpu host`, which QEMU rejects without KVM
+          mm 'vm config cpu qemu64'
           mm 'vm launch kvm probe-tcg'
           mm 'vm start probe-tcg'; sleep 4
           row "start with qemu-system-x86_64 (TCG, no -enable-kvm)" "$(mm '.columns name,state vm info')"
@@ -213,10 +216,10 @@ jobs:
           set +e
           # Excluded: tests that need a container filesystem ($images/minicccfs),
           # a guest OS with miniccc (cc*, vnc*), routers, plumbing, or the mesh.
-          # Also excluded: vm_lifecycle_net and vm_net (launch containers, which
-          # need cgroup v1 and currently take the whole daemon down on a cgroup
-          # v2 host) and vm_add_nic (needs a miniccc guest).
-          TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|disk|diskconfig|file|file_glob|shell)$'
+          # Also excluded: vm_lifecycle_net, vm_net and disk (launch containers,
+          # which need cgroup v1 and currently take the whole daemon down on a
+          # cgroup v2 host) and vm_add_nic (needs a miniccc guest).
+          TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|diskconfig|file|file_glob|shell)$'
           echo "$TESTS" > /tmp/minitest.regex
           sudo timeout 900 bin/minitest -base /tmp/minimega -dir tests -run "$TESTS" 2>&1 | tee /tmp/minitest.log
           echo "minitest exit: ${PIPESTATUS[0]}"
@@ -246,6 +249,11 @@ jobs:
           row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
           { echo "## minimega container type on the runner"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
+          if ! pgrep -x minimega >/dev/null; then
+            row "daemon before container probe" "dead; restarting"
+            sudo bash -c "setsid nohup '$MM_BIN/minimega' -nostdin -force -base /tmp/minimega -filepath /tmp/minimega/files -level info -logfile /tmp/minimega/minimega.log >/tmp/minimega/minimega.stdout 2>&1 &"
+            for i in $(seq 1 30); do [ -S /tmp/minimega/minimega ] && break; sleep 1; done
+          fi
           sudo apt-get install -y -q busybox-static >/dev/null 2>&1
           sudo mkdir -p /tmp/cfs/bin /tmp/cfs/proc /tmp/cfs/sys /tmp/cfs/dev /tmp/cfs/tmp
           sudo cp /bin/busybox /tmp/cfs/bin/busybox 2>/dev/null || sudo cp /usr/bin/busybox /tmp/cfs/bin/busybox
@@ -463,11 +471,11 @@ jobs:
           mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
           sudo setsid nohup $PWD/src/go/bin/phenix ui --deploy-mode all --listen-endpoint 127.0.0.1:3000 >/tmp/phenix-ui.log 2>&1 &
           timeout 60 bash -c 'until curl -sf http://127.0.0.1:3000/api/v1/experiments >/dev/null; do sleep 1; done'
-          api() { curl -sS -f -X "$1" "http://127.0.0.1:3000/api/v1$2" "${@:3}"; }
+          set +e
+          api() { curl -sS -X "$1" "http://127.0.0.1:3000/api/v1$2" "${@:3}" -w ' [HTTP %{http_code}]'; }
           row "GET /experiments" "$(api GET /experiments)"
-          api POST /experiments -H 'Content-Type: application/json' -d '{"name":"e2e-api","topology":"e2e-hollow"}' >/dev/null
-          row "POST /experiments" "created"
-          api POST /experiments/e2e-api/start >/dev/null
+          row "POST /experiments" "$(api POST /experiments -H 'Content-Type: application/json' -d '{"name":"e2e-api","topology":"e2e-hollow"}')"
+          row "POST /experiments/e2e-api/start" "$(api POST /experiments/e2e-api/start)"
           for i in $(seq 1 60); do
             if api GET /experiments/e2e-api | grep -q '"running":true'; then break; fi; sleep 2
           done
@@ -475,10 +483,9 @@ jobs:
           sleep 8
           row "GET /experiments/e2e-api/vms" "$(api GET /experiments/e2e-api/vms | grep -o '"state":"[A-Z]*"' | sort | uniq -c | tr '\n' ' ')"
           row "GET /vms/e2e-api/hollow1/screenshot.png" "$(curl -s -o /tmp/shot.png -w '%{http_code} %{size_download}B' 'http://127.0.0.1:3000/api/v1/experiments/e2e-api/vms/hollow1/screenshot.png?size=small')"
-          api POST /experiments/e2e-api/stop >/dev/null
-          row "POST /experiments/e2e-api/stop" "$(mm namespace)"
-          api DELETE /experiments/e2e-api >/dev/null
-          row "DELETE /experiments/e2e-api" "ok"
+          row "POST /experiments/e2e-api/stop" "$(api POST /experiments/e2e-api/stop); $(mm namespace)"
+          row "DELETE /experiments/e2e-api" "$(api DELETE /experiments/e2e-api)"
+          true
 
       - name: Collect logs
         if: always()
@@ -499,4 +506,205 @@ jobs:
             /tmp/phenix.log
             /tmp/phenix-ui.log
             /tmp/e2e/topology.yaml
+          if-no-files-found: ignore
+
+  phenix-stub:
+    name: phenix lifecycle and C2 with the stub VM type (patched minimega)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: src/go/go.sum
+
+      - name: Build phenix (CLI/API only, no web UI bundle)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+          make -C src/go generate
+          make -C src/go phenix
+          src/go/bin/phenix version
+
+      # The stub VM type is an unmerged spike carried as a patch in this repo
+      # (.github/e2e/minimega-stub-vm.patch); the ref is the upstream commit the
+      # patch was authored against.
+      - name: Build and start minimega with the stub VM type
+        id: mm
+        uses: ./.github/actions/minimega
+        with:
+          repository: sandia-minimega/minimega
+          ref: 66ed1aacc8107f00cb003a512e835d6f32886dda
+          patch: .github/e2e/minimega-stub-vm.patch
+          filepath: /phenix/images
+
+      - name: minitest stub cases
+        working-directory: minimega
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## stub VM type: minitest"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          sudo timeout 300 bin/minitest -base /tmp/minimega -dir tests -run '^stub_(lifecycle|info)$' 2>&1 | tee /tmp/minitest-stub.log
+          for t in stub_lifecycle stub_info; do
+            if sudo diff -u "tests/$t.want" "tests/$t.got"; then row "minitest $t" "pass"; else row "minitest $t" "FAIL (diff above)"; fi
+          done
+          row "daemon alive after stub minitest" "$(pgrep -x minimega >/dev/null && echo yes || echo NO)"
+          sudo chmod -R a+r tests
+          true
+
+      - name: Prepare stand-in miniccc wrapper, disk image, and stub topology
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /phenix/images
+          mkdir -p /tmp/e2e
+          sudo qemu-img create -f qcow2 /phenix/images/blank.qc2 32M
+          # Host process standing in for the guest: the real miniccc, dialing the
+          # stub's cc socket over unix and reporting the VM's UUID.
+          sudo tee /usr/local/bin/stub-miniccc.sh >/dev/null <<SH
+          #!/bin/sh
+          while [ ! -S "\$MM_STUB_CC" ]; do sleep 0.2; done
+          exec $MM_BIN/miniccc -family unix -parent "\$MM_STUB_CC" -uuid "\$MM_STUB_UUID" -path "\$MM_STUB_INSTANCE/miniccc"
+          SH
+          sudo chmod +x /usr/local/bin/stub-miniccc.sh
+          cat /usr/local/bin/stub-miniccc.sh
+          cat > /tmp/e2e/stub-topology.yaml <<'YAML'
+          apiVersion: phenix.sandia.gov/v1
+          kind: Topology
+          metadata:
+            name: e2e-stub
+          spec:
+            nodes:
+            # stub1 runs the real miniccc as its stand-in guest, so C2 works.
+            - type: VirtualMachine
+              annotations:
+                phenix/default-apps: false
+              general:
+                hostname: stub1
+                vm_type: stub
+              hardware:
+                vcpus: 1
+                memory: 64
+                os_type: linux
+                drives:
+                - image: blank.qc2
+              advanced:
+                init: /usr/local/bin/stub-miniccc.sh
+              network:
+                interfaces:
+                - name: if0
+                  type: ethernet
+                  proto: static
+                  address: 10.0.0.1
+                  mask: 24
+                  vlan: LAN
+              commands:
+              - exec echo hello-from-stub1
+            # stub2 has no stand-in process: pure lifecycle/state/tap coverage.
+            - type: VirtualMachine
+              annotations:
+                phenix/default-apps: false
+              general:
+                hostname: stub2
+                vm_type: stub
+              hardware:
+                vcpus: 1
+                memory: 64
+                os_type: linux
+                drives:
+                - image: blank.qc2
+              network:
+                interfaces:
+                - name: if0
+                  type: ethernet
+                  proto: static
+                  address: 10.0.0.2
+                  mask: 24
+                  vlan: LAN
+          YAML
+
+      - name: Experiment lifecycle and C2 through phenix with stub VMs
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set -euo pipefail
+          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all"
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## stub VM type: phenix lifecycle and C2"; echo; echo "| Step | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+
+          $PHENIX config create /tmp/e2e/stub-topology.yaml
+          $PHENIX experiment create e2e-stub -t e2e-stub
+          row "experiment create" "ok"
+          start=$(date +%s)
+          $PHENIX experiment start e2e-stub
+          row "experiment start" "ok in $(( $(date +%s) - start ))s"
+          echo "::group::rendered minimega script"; sudo cat /phenix/experiments/e2e-stub/mm_files/e2e-stub.mm; sudo cat /phenix/experiments/e2e-stub/mm_files/e2e-stub-cc.mm 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::phenix vm info"; $PHENIX vm info e2e-stub; echo "::endgroup::"
+
+          sleep 6
+          states=$(mm 'namespace e2e-stub .columns name,state,type,cc_active,vlan,tap vm info')
+          row "vm info after start" "$states"
+          running=$(echo "$states" | grep -c RUNNING || true)
+          row "RUNNING stubs (expect 2)" "$running"
+          row "taps on bridge phenix (expect 2)" "$(sudo ovs-vsctl list-ports phenix | grep -c mega_tap || true)"
+          row "cc clients (expect stub1)" "$(mm 'namespace e2e-stub cc clients')"
+          row "miniccc processes" "$(pgrep -af miniccc | grep -v pgrep | cut -c1-160)"
+          row "stub1 stand-in log" "$(sudo tail -c 300 /tmp/minimega/*/stub.log 2>/dev/null)"
+
+          # C2 round trip that phenix queued from the topology `commands` field
+          for i in $(seq 1 15); do
+            if mm 'namespace e2e-stub cc responses all' | grep -q hello-from-stub1; then break; fi; sleep 2
+          done
+          row "cc commands" "$(mm 'namespace e2e-stub cc commands')"
+          row "cc responses (expect hello-from-stub1)" "$(mm 'namespace e2e-stub cc responses all')"
+          cc_ok=$(mm 'namespace e2e-stub cc responses all' | grep -c hello-from-stub1 || true)
+
+          # A second C2 round trip issued directly, filtered by UUID like phenix's C2 helpers do
+          uuid=$(mm 'namespace e2e-stub .filter name=stub1 .columns uuid vm info' | tail -1 | tr -d ' ')
+          mm "namespace e2e-stub cc filter uuid=$uuid"
+          mm 'namespace e2e-stub cc exec uname -a'
+          sleep 4
+          row "cc exec uname -a via uuid filter" "$(mm 'namespace e2e-stub cc responses all' | tail -3)"
+          mm 'namespace e2e-stub clear cc filter'
+
+          row "screenshot of a stub (PNG header)" "$(mm 'namespace e2e-stub vm screenshot stub2 100' >/dev/null 2>&1; sudo xxd -l 4 /tmp/minimega/*/screenshot.png 2>/dev/null | head -1 || echo 'n/a')"
+
+          $PHENIX vm pause e2e-stub stub1
+          row "vm pause stub1" "$(mm 'namespace e2e-stub .filter name=stub1 .columns name,state vm info')"
+          $PHENIX vm resume e2e-stub stub1
+          row "vm resume stub1" "$(mm 'namespace e2e-stub .filter name=stub1 .columns name,state vm info')"
+
+          $PHENIX experiment stop e2e-stub
+          row "namespaces right after stop" "$(mm namespace)"
+          row "miniccc processes after stop (expect 0)" "$(pgrep -c -f 'miniccc -family' || true)"
+          row "taps after stop (expect 0)" "$(sudo ovs-vsctl list-ports phenix 2>/dev/null | grep -c mega_tap || true)"
+          $PHENIX experiment delete e2e-stub
+          row "experiment delete" "ok"
+          [ "$running" -eq 2 ] || { echo "::error::expected 2 RUNNING stubs, got $running"; exit 1; }
+          [ "$cc_ok" -ge 1 ] || { echo "::error::C2 round trip through the stub did not produce a response"; exit 1; }
+
+      - name: Collect logs
+        if: always()
+        run: |
+          sudo cp /tmp/minimega/minimega.log /tmp/minimega-stub-daemon.log 2>/dev/null || true
+          sudo chmod a+r /tmp/minimega-stub-daemon.log /tmp/minitest-stub.log 2>/dev/null || true
+          echo "::group::minimega log tail"; tail -80 /tmp/minimega-stub-daemon.log || true; echo "::endgroup::"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: phenix-stub-probe
+          path: |
+            /tmp/minimega-stub-daemon.log
+            /tmp/minitest-stub.log
+            minimega/tests/stub_*.got
+            /tmp/e2e/stub-topology.yaml
           if-no-files-found: ignore

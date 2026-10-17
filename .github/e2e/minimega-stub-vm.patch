@@ -1,0 +1,1438 @@
+From f5270d27ad632618d219c4f5fe9b2a360a9acfe0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 17 Oct 2026 22:42:58 +0000
+Subject: [PATCH] feat(stub): add stub VM type for hypervisor-free testing
+
+Add an experimental `stub` VM type that follows the normal VM lifecycle and
+state machine, creates real taps, appears in `vm info`, and offers the miniccc
+backchannel over a unix socket, but runs no QEMU process and no container, so
+that minimega and orchestrators such as phenix can be tested end to end on CI
+hosts without a hypervisor. Stub VMs reuse ContainerConfig, so `vm config init`
+optionally names a host process that is started as a stand-in guest with
+MM_STUB_* environment variables, and `vm config filesystem` is ignored. Add
+unit tests, stub_lifecycle and stub_info minitests, and documentation.
+
+Co-authored-by: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ cmd/minimega/android.go         |   2 +
+ cmd/minimega/container.go       |   2 +
+ cmd/minimega/kvm.go             |   2 +
+ cmd/minimega/namespace.go       |   7 +
+ cmd/minimega/stub.go            | 523 ++++++++++++++++++++++++++++++++
+ cmd/minimega/stub_test.go       | 411 +++++++++++++++++++++++++
+ cmd/minimega/vm.go              |   8 +
+ cmd/minimega/vm_cli.go          |  14 +-
+ cmd/minimega/vmconfig_cli.go    |   3 +
+ cmd/minimega/vms_test.go        |   2 +
+ doc/content/articles/vmtypes.md |  81 ++++-
+ skills/minimega/SKILL.md        |   8 +-
+ tests/stub_info                 |   7 +
+ tests/stub_info.want            |   9 +
+ tests/stub_lifecycle            |  32 ++
+ tests/stub_lifecycle.want       |  78 +++++
+ 16 files changed, 1181 insertions(+), 8 deletions(-)
+ create mode 100644 cmd/minimega/stub.go
+ create mode 100644 cmd/minimega/stub_test.go
+ create mode 100644 tests/stub_info
+ create mode 100644 tests/stub_info.want
+ create mode 100644 tests/stub_lifecycle
+ create mode 100644 tests/stub_lifecycle.want
+
+diff --git a/cmd/minimega/android.go b/cmd/minimega/android.go
+index fe8a1d0..5ab2107 100644
+--- a/cmd/minimega/android.go
++++ b/cmd/minimega/android.go
+@@ -283,6 +283,8 @@ func (vm *AndroidVM) Conflicts(vm2 VM) error {
+ 		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	case *ContainerVM:
+ 		return vm.BaseVM.conflicts(vm2.BaseVM)
++	case *StubVM:
++		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	}
+ 
+ 	return errors.New("unknown VM type")
+diff --git a/cmd/minimega/container.go b/cmd/minimega/container.go
+index 5caa185..e3848cc 100644
+--- a/cmd/minimega/container.go
++++ b/cmd/minimega/container.go
+@@ -785,6 +785,8 @@ func (vm *ContainerVM) Conflicts(vm2 VM) error {
+ 		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	case *AndroidVM:
+ 		return vm.BaseVM.conflicts(vm2.BaseVM)
++	case *StubVM:
++		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	}
+ 
+ 	return errors.New("unknown VM type")
+diff --git a/cmd/minimega/kvm.go b/cmd/minimega/kvm.go
+index 80d6562..c6c90fd 100644
+--- a/cmd/minimega/kvm.go
++++ b/cmd/minimega/kvm.go
+@@ -559,6 +559,8 @@ func (vm *KvmVM) Conflicts(vm2 VM) error {
+ 		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	case *AndroidVM:
+ 		return vm.ConflictsAndroid(vm2)
++	case *StubVM:
++		return vm.BaseVM.conflicts(vm2.BaseVM)
+ 	}
+ 
+ 	return errors.New("unknown VM type")
+diff --git a/cmd/minimega/namespace.go b/cmd/minimega/namespace.go
+index f8aa13a..e82ef21 100644
+--- a/cmd/minimega/namespace.go
++++ b/cmd/minimega/namespace.go
+@@ -806,6 +806,13 @@ func (n *Namespace) Save(dir string) error {
+ 			log.Warn("Saving configuration only for container: %q\n", vm.GetName())
+ 			fmt.Fprintf(f, "clear vm config\n")
+ 
++			if err := vm.WriteConfig(f); err != nil {
++				return err
++			}
++		} else if vm.GetType() == STUB {
++			log.Warn("Saving configuration only for stub VM: %q\n", vm.GetName())
++			fmt.Fprintf(f, "clear vm config\n")
++
+ 			if err := vm.WriteConfig(f); err != nil {
+ 				return err
+ 			}
+diff --git a/cmd/minimega/stub.go b/cmd/minimega/stub.go
+new file mode 100644
+index 0000000..cae5d0b
+--- /dev/null
++++ b/cmd/minimega/stub.go
+@@ -0,0 +1,523 @@
++// Copyright 2026 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
++// Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains certain
++// rights in this software.
++
++// Stub VMs are an experimental VM type for end-to-end testing of minimega and
++// of orchestrators that drive it, such as phenix, on hosts where QEMU/KVM and
++// containers are unavailable or too slow. A stub VM takes part in the normal
++// VM lifecycle and state machine, creates real taps on the configured bridges,
++// shows up in `vm info`, carries tags, and offers the miniccc backchannel over
++// a unix socket in its instance directory, but runs no hypervisor and no
++// container.
++//
++// Stub VMs deliberately reuse ContainerConfig so that no vmconfiger
++// regeneration is needed:
++//
++//   - `vm config init <cmd...>` optionally names a host process that is
++//     started as a stand-in "guest" when the VM starts, for example a wrapper
++//     around the real miniccc binary. The process runs in the instance
++//     directory and receives the MM_STUB_* environment variables documented
++//     on StubVM.Start.
++//   - `vm config hostname` is informational only.
++//   - `vm config filesystem` is not required and is ignored, as are
++//     `preinit`, `fifos`, and `volume`.
++
++package main
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"image"
++	"image/color"
++	"image/draw"
++	"image/png"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"syscall"
++
++	"github.com/sandia-minimega/minimega/v2/internal/bridge"
++	"github.com/sandia-minimega/minimega/v2/internal/ron"
++	log "github.com/sandia-minimega/minimega/v2/pkg/minilog"
++)
++
++type StubVM struct {
++	*BaseVM         // embed
++	ContainerConfig // embed
++
++	// proc is the running stand-in process, if any. Guarded by lock.
++	proc *os.Process
++
++	// started hands the stand-in process to the lifecycle goroutine spawned
++	// at launch. Replaced on every (re)launch. Guarded by lock.
++	started chan *os.Process
++}
++
++// Ensure that StubVM implements the VM interface
++var _ VM = (*StubVM)(nil)
++
++func NewStub(name, namespace string, config VMConfig) (*StubVM, error) {
++	vm := new(StubVM)
++
++	vm.BaseVM = NewBaseVM(name, namespace, config)
++	vm.Type = STUB
++
++	vm.ContainerConfig = config.ContainerConfig.Copy() // deep-copy configured fields
++
++	// set hostname to VM's name if it's unspecified. note that the name arg
++	// may be the empty string but NewBaseVM populates vm.Name with a default
++	// value if that's the case.
++	if vm.Hostname == "" {
++		vm.Hostname = vm.Name
++	}
++
++	return vm, nil
++}
++
++func (vm *StubVM) Config() *BaseConfig {
++	return &vm.BaseConfig
++}
++
++func (vm *StubVM) Copy() VM {
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	vm2 := new(StubVM)
++
++	// Make shallow copies of all fields
++	*vm2 = *vm
++
++	// Make deep copies
++	vm2.BaseVM = vm.BaseVM.copy()
++	vm2.ContainerConfig = vm.ContainerConfig.Copy()
++
++	// Copies are read-only and must not share lifecycle handles
++	vm2.proc = nil
++	vm2.started = nil
++
++	return vm2
++}
++
++// Launch a new stub VM. The VM is returned pre-locked by NewBaseVM.
++func (vm *StubVM) Launch() error {
++	defer vm.lock.Unlock()
++
++	return vm.launch()
++}
++
++// Recover an existing stub VM. This resets the ID and PID for the VM and
++// unlocks the VM (since VMs come pre-locked when created via NewBaseVM).
++func (vm *StubVM) Recover(id string, pid int) error {
++	vm.ID, _ = strconv.Atoi(id)
++	vm.Pid = pid
++	vm.instancePath = filepath.Join(*f_base, id)
++
++	vm.lock.Unlock()
++	return nil
++}
++
++// launch is the low-level launch function for stub VMs. The caller should
++// hold the VM's lock. It is safe to call again when relaunching a VM from the
++// QUIT or ERROR state.
++func (vm *StubVM) launch() error {
++	log.Info("launching vm: %v", vm.ID)
++
++	// If this is the first time launching the VM, create directories for it.
++	if vm.State == VM_BUILDING {
++		if err := os.MkdirAll(vm.instancePath, os.FileMode(0700)); err != nil {
++			return vm.setErrorf("unable to create VM dir: %v", err)
++		}
++
++		if err := vm.createInstancePathAlias(); err != nil {
++			return vm.setErrorf("createInstancePathAlias: %v", err)
++		}
++	}
++
++	mustWrite(vm.path("name"), vm.Name)
++
++	if err := vm.createTaps(); err != nil {
++		return err
++	}
++
++	// The lifecycle goroutine is started at launch, not at start, so that a
++	// stub that is still BUILDING can be killed.
++	vm.started = make(chan *os.Process, 1)
++	go vm.lifecycle(vm.kill, vm.started)
++
++	return nil
++}
++
++// createTaps does the work of adding any taps if we are associated with any
++// networks. It mirrors KvmVM.createTaps: stubs own their taps from launch
++// until flush, so taps that already exist are left alone on relaunch.
++func (vm *StubVM) createTaps() error {
++	for i := range vm.Networks {
++		nic := &vm.Networks[i]
++		if nic.Tap != "" {
++			// tap has already been created, don't need to do again
++			continue
++		}
++
++		br, err := getBridge(nic.Bridge)
++		if err != nil {
++			return vm.setErrorf("unable to get bridge %v: %v", nic.Bridge, err)
++		}
++
++		tap, err := br.CreateTap("", nic.MAC, nic.VLAN)
++		if err != nil {
++			return vm.setErrorf("unable to create tap %v: %v", i, err)
++		}
++
++		nic.Tap = tap
++
++		if nic.QinQ {
++			if err := br.SetTapQinQ(tap, nic.VLAN); err != nil {
++				return vm.setErrorf("unable to set QinQ on tap %v: %v", i, err)
++			}
++		}
++	}
++
++	if len(vm.Networks) > 0 {
++		if err := vm.writeTaps(); err != nil {
++			return vm.setErrorf("unable to write taps: %v", err)
++		}
++	}
++
++	return nil
++}
++
++// lifecycle moves the VM to QUIT once it is killed or once its stand-in
++// process exits. It is bound to the kill channel of one launch; Start hands
++// over the stand-in process, if any, through started.
++func (vm *StubVM) lifecycle(kill chan bool, started chan *os.Process) {
++	var p *os.Process
++
++	// closed once the stand-in process has been reaped
++	exited := make(chan struct{})
++
++	select {
++	case p = <-started:
++		go func() {
++			defer close(exited)
++
++			if _, err := p.Wait(); err != nil {
++				log.Debug("vm %v: stand-in process: %v", vm.ID, err)
++			}
++		}()
++
++		select {
++		case <-exited:
++			log.Info("vm %v: stand-in process exited", vm.ID)
++		case <-kill:
++			log.Info("killing VM %v", vm.ID)
++
++			// Kill the whole process group so that children of a wrapper
++			// script die along with it.
++			if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
++				log.Error("vm %v: unable to kill process group %v: %v", vm.ID, p.Pid, err)
++				p.Kill()
++			}
++
++			<-exited
++		}
++	case <-kill:
++		log.Info("killing VM %v", vm.ID)
++	}
++
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	// A relaunch replaces the kill channel, so only the lifecycle goroutine of
++	// the current launch may update the VM.
++	if vm.kill != kill {
++		return
++	}
++
++	vm.proc = nil
++
++	// Set to QUIT unless we've already been put into the error state
++	if vm.State&VM_KILLABLE != 0 {
++		vm.setState(VM_QUIT)
++	}
++
++	vm.cond.Broadcast()
++}
++
++// closeKill closes the kill channel unless it is already closed, which ends
++// the lifecycle goroutine of the current launch. Nothing ever sends on the
++// kill channel, so the check is race-free. The caller must hold the VM lock.
++func (vm *StubVM) closeKill() {
++	select {
++	case <-vm.kill:
++	default:
++		close(vm.kill)
++	}
++}
++
++// startProcess starts the stand-in process named by `vm config init`, if
++// any, and hands it to the lifecycle goroutine. The caller must hold the VM
++// lock.
++func (vm *StubVM) startProcess() error {
++	if len(vm.Init) == 0 {
++		return nil
++	}
++
++	logFile, err := os.OpenFile(vm.path("stub.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
++	if err != nil {
++		return fmt.Errorf("unable to create stub log: %v", err)
++	}
++	defer logFile.Close()
++
++	cmd := exec.Command(vm.Init[0], vm.Init[1:]...)
++	cmd.Dir = vm.instancePath
++	cmd.Stdout = logFile
++	cmd.Stderr = logFile
++	cmd.Env = append(os.Environ(),
++		"MM_STUB_NAME="+vm.Name,
++		"MM_STUB_UUID="+vm.UUID,
++		"MM_STUB_NAMESPACE="+vm.Namespace,
++		"MM_STUB_INSTANCE="+vm.instancePath,
++		"MM_STUB_CC="+vm.path("cc"),
++	)
++
++	// Run in a new process group so that stop, start, and kill reach a wrapper
++	// script and everything it starts.
++	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
++
++	if err := cmd.Start(); err != nil {
++		return fmt.Errorf("unable to start %v: %v", vm.Init[0], err)
++	}
++
++	vm.proc = cmd.Process
++	vm.Pid = cmd.Process.Pid
++	log.Debug("vm %v has pid %v", vm.ID, vm.Pid)
++
++	vm.started <- cmd.Process
++
++	return nil
++}
++
++// Start a stub VM. On the first start, or after QUIT or ERROR, the stand-in
++// process named by `vm config init` (if any) is started in the instance
++// directory with these environment variables in addition to minimega's own:
++//
++//	MM_STUB_NAME      the VM name
++//	MM_STUB_UUID      the VM UUID, to pass to miniccc as -uuid
++//	MM_STUB_NAMESPACE the VM's namespace
++//	MM_STUB_INSTANCE  the instance directory
++//	MM_STUB_CC        the cc unix socket, to pass to miniccc as -parent
++//
++// The cc socket is created by Connect after Start returns, so a stand-in that
++// dials MM_STUB_CC must wait for it to appear. Starting a PAUSED VM resumes
++// the stand-in process instead.
++func (vm *StubVM) Start() (err error) {
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	if vm.State&VM_RUNNING != 0 {
++		return nil
++	}
++
++	if vm.State == VM_QUIT || vm.State == VM_ERROR {
++		log.Info("relaunching VM: %v", vm.ID)
++
++		// End the previous lifecycle goroutine, which may still be waiting if
++		// the previous start failed, before creating the channel for the new
++		// launch.
++		vm.closeKill()
++		vm.kill = make(chan bool)
++
++		// Launch handles setting the VM to error state
++		if err := vm.launch(); err != nil {
++			return err
++		}
++	}
++
++	log.Info("starting VM: %v", vm.ID)
++
++	if vm.State == VM_PAUSED {
++		if vm.proc != nil {
++			if err := syscall.Kill(-vm.proc.Pid, syscall.SIGCONT); err != nil {
++				return vm.setErrorf("unable to resume: %v", err)
++			}
++		}
++	} else if err := vm.startProcess(); err != nil {
++		return vm.setErrorf("unable to start: %v", err)
++	}
++
++	vm.setState(VM_RUNNING)
++
++	return nil
++}
++
++func (vm *StubVM) Stop() error {
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	if vm.State != VM_RUNNING {
++		return vmNotRunning(strconv.Itoa(vm.ID))
++	}
++
++	log.Info("stopping VM: %v", vm.ID)
++
++	if vm.proc != nil {
++		if err := syscall.Kill(-vm.proc.Pid, syscall.SIGSTOP); err != nil {
++			return vm.setErrorf("unstoppable: %v", err)
++		}
++	}
++
++	vm.setState(VM_PAUSED)
++
++	return nil
++}
++
++// Flush cleans up all resources allocated to the VM which includes all the
++// network taps.
++func (vm *StubVM) Flush() error {
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	// Make sure no lifecycle goroutine outlives the VM, e.g. after a failed
++	// start left the VM in the error state.
++	vm.closeKill()
++
++	for _, net := range vm.Networks {
++		// Stub VMs can enter ERROR before all taps are created.
++		if net.Tap == "" {
++			continue
++		}
++
++		// Handle already disconnected taps differently since they aren't
++		// assigned to any bridges.
++		if net.VLAN == DisconnectedVLAN {
++			if err := bridge.DestroyTap(net.Tap); err != nil {
++				log.Error("leaked tap %v: %v", net.Tap, err)
++			}
++
++			continue
++		}
++
++		br, err := getBridge(net.Bridge)
++		if err != nil {
++			return err
++		}
++
++		if err := br.DestroyTap(net.Tap); err != nil {
++			log.Error("leaked tap %v: %v", net.Tap, err)
++		}
++	}
++
++	return vm.BaseVM.Flush()
++}
++
++func (vm *StubVM) String() string {
++	return fmt.Sprintf("%s:%d:stub", hostname, vm.ID)
++}
++
++func (vm *StubVM) Info(field string) (string, error) {
++	// If the field is handled by BaseVM, return it
++	if v, err := vm.BaseVM.Info(field); err == nil {
++		return v, nil
++	}
++
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	return vm.ContainerConfig.Info(field)
++}
++
++func (vm *StubVM) Conflicts(vm2 VM) error {
++	switch vm2 := vm2.(type) {
++	case *StubVM:
++		return vm.conflictsBase(vm2.BaseVM)
++	case *KvmVM:
++		return vm.conflictsBase(vm2.BaseVM)
++	case *ContainerVM:
++		return vm.conflictsBase(vm2.BaseVM)
++	case *AndroidVM:
++		return vm.conflictsBase(vm2.BaseVM)
++	}
++
++	return errors.New("unknown VM type")
++}
++
++// conflictsBase checks whether the BaseVMs conflict. Only the receiver is
++// locked: vm2 is a newly created VM that is still locked by NewBaseVM.
++func (vm *StubVM) conflictsBase(vm2 *BaseVM) error {
++	vm.lock.Lock()
++	defer vm.lock.Unlock()
++
++	return vm.BaseVM.conflicts(vm2)
++}
++
++// Screenshot returns a solid-colour PNG so that tools which fetch screenshots
++// of every VM receive a valid image.
++func (vm *StubVM) Screenshot(size int) ([]byte, error) {
++	width, height := 64, 48
++	if size > 0 {
++		width, height = size, size*3/4
++		if height < 1 {
++			height = 1
++		}
++	}
++
++	img := image.NewRGBA(image.Rect(0, 0, width, height))
++	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{R: 0x3b, G: 0x4a, B: 0x5a, A: 0xff}), image.Point{}, draw.Src)
++
++	var buf bytes.Buffer
++	if err := png.Encode(&buf, img); err != nil {
++		return nil, err
++	}
++
++	return buf.Bytes(), nil
++}
++
++func (vm *StubVM) Connect(cc *ron.Server, reconnect bool) error {
++	if !vm.Backchannel || reconnect {
++		return nil
++	}
++
++	cc.RegisterVM(vm)
++
++	return cc.ListenUnix(vm.path("cc"))
++}
++
++func (vm *StubVM) Disconnect(cc *ron.Server) error {
++	if !vm.Backchannel {
++		return nil
++	}
++
++	cc.UnregisterVM(vm)
++
++	return cc.CloseUnix(vm.path("cc"))
++}
++
++// ProcStats reports the stand-in process while it is running. A stub without
++// a stand-in process has no processes to report.
++func (vm *StubVM) ProcStats() (map[int]*ProcStats, error) {
++	vm.lock.Lock()
++	proc := vm.proc
++	vm.lock.Unlock()
++
++	if proc == nil {
++		return map[int]*ProcStats{}, nil
++	}
++
++	p, err := GetProcStats(proc.Pid)
++	if err != nil {
++		return nil, err
++	}
++
++	return map[int]*ProcStats{proc.Pid: p}, nil
++}
++
++func (vm *StubVM) WriteConfig(w io.Writer) error {
++	if err := vm.BaseConfig.WriteConfig(w); err != nil {
++		return err
++	}
++
++	return vm.ContainerConfig.WriteConfig(w)
++}
+diff --git a/cmd/minimega/stub_test.go b/cmd/minimega/stub_test.go
+new file mode 100644
+index 0000000..d4691e0
+--- /dev/null
++++ b/cmd/minimega/stub_test.go
+@@ -0,0 +1,411 @@
++// Copyright 2026 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
++// Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains certain
++// rights in this software.
++
++package main
++
++import (
++	"bytes"
++	"image/png"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++)
++
++// newTestStub points the base directory at a temporary directory, creates a
++// stub VM with the given init command, and launches it. Launch unlocks the VM.
++func newTestStub(t *testing.T, name string, init ...string) *StubVM {
++	t.Helper()
++
++	originalBase := *f_base
++	*f_base = t.TempDir()
++	t.Cleanup(func() { *f_base = originalBase })
++
++	cfg := NewVMConfig()
++	cfg.ContainerConfig.Init = init
++
++	vm, err := NewStub(name, DefaultNamespace, cfg)
++	if err != nil {
++		t.Fatalf("NewStub: %v", err)
++	}
++
++	if err := vm.Launch(); err != nil {
++		t.Fatalf("Launch: %v", err)
++	}
++
++	return vm
++}
++
++func expectState(t *testing.T, vm VM, want VMState) {
++	t.Helper()
++
++	if got := vm.GetState(); got != want {
++		t.Fatalf("state = %v, want %v", got, want)
++	}
++}
++
++// waitForState polls until the VM reaches want or the deadline passes.
++func waitForState(t *testing.T, vm VM, want VMState) {
++	t.Helper()
++
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		if vm.GetState() == want {
++			return
++		}
++
++		time.Sleep(10 * time.Millisecond)
++	}
++
++	t.Fatalf("state = %v after timeout, want %v", vm.GetState(), want)
++}
++
++func TestStubVMType(t *testing.T) {
++	if got := STUB.String(); got != "stub" {
++		t.Fatalf("STUB.String() = %q, want %q", got, "stub")
++	}
++
++	got, err := ParseVMType("stub")
++	if err != nil || got != STUB {
++		t.Fatalf("ParseVMType(stub) = %v, %v; want STUB, nil", got, err)
++	}
++
++	got, err = findVMType(map[string]bool{"stub": true})
++	if err != nil || got != STUB {
++		t.Fatalf("findVMType(stub) = %v, %v; want STUB, nil", got, err)
++	}
++}
++
++func TestNewStubDoesNotRequireFilesystem(t *testing.T) {
++	cfg := NewVMConfig()
++
++	vm, err := NewStub("foo", DefaultNamespace, cfg)
++	if err != nil {
++		t.Fatalf("NewStub: %v", err)
++	}
++	defer vm.lock.Unlock()
++
++	if vm.GetType() != STUB {
++		t.Fatalf("type = %v, want %v", vm.GetType(), STUB)
++	}
++
++	if vm.Hostname != "foo" {
++		t.Fatalf("hostname = %q, want VM name", vm.Hostname)
++	}
++
++	if !strings.HasSuffix(vm.String(), ":stub") {
++		t.Fatalf("String() = %q, want :stub suffix", vm.String())
++	}
++}
++
++func TestStubLifecycle(t *testing.T) {
++	vm := newTestStub(t, "foo")
++	expectState(t, vm, VM_BUILDING)
++
++	instance := vm.GetInstancePath()
++	if _, err := os.Stat(filepath.Join(instance, "name")); err != nil {
++		t.Fatalf("name file: %v", err)
++	}
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	if err := vm.Stop(); err != nil {
++		t.Fatalf("Stop: %v", err)
++	}
++	expectState(t, vm, VM_PAUSED)
++
++	if err := vm.Stop(); err == nil {
++		t.Fatal("Stop on a paused VM should fail")
++	}
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start from paused: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("Kill: %v", err)
++	}
++	expectState(t, vm, VM_QUIT)
++
++	if got, err := vm.Info("state"); err != nil || got != "QUIT" {
++		t.Fatalf("Info(state) = %q, %v; want QUIT", got, err)
++	}
++
++	// relaunch after quit
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start after quit: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("second Kill: %v", err)
++	}
++	expectState(t, vm, VM_QUIT)
++
++	if err := vm.Flush(); err != nil {
++		t.Fatalf("Flush: %v", err)
++	}
++
++	if _, err := os.Stat(instance); !os.IsNotExist(err) {
++		t.Fatalf("instance path still exists after flush: %v", err)
++	}
++}
++
++func TestStubKillWhileBuilding(t *testing.T) {
++	vm := newTestStub(t, "foo")
++
++	done := make(chan error, 1)
++	go func() { done <- vm.Kill() }()
++
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatalf("Kill: %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("Kill of a BUILDING stub did not return")
++	}
++
++	expectState(t, vm, VM_QUIT)
++}
++
++func TestStubStandInProcess(t *testing.T) {
++	vm := newTestStub(t, "foo", "/bin/sh", "-c", "sleep 30")
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	pid := vm.GetPID()
++	if pid == 0 {
++		t.Fatal("stand-in process has no PID")
++	}
++
++	if got, err := vm.Info("pid"); err != nil || got == "0" {
++		t.Fatalf("Info(pid) = %q, %v; want non-zero", got, err)
++	}
++
++	stats, err := vm.ProcStats()
++	if err != nil {
++		t.Fatalf("ProcStats: %v", err)
++	}
++	if _, ok := stats[pid]; !ok {
++		t.Fatalf("ProcStats = %v, want entry for %d", stats, pid)
++	}
++
++	if _, err := os.Stat(filepath.Join(vm.GetInstancePath(), "stub.log")); err != nil {
++		t.Fatalf("stub.log: %v", err)
++	}
++
++	// pausing and resuming must keep the process alive
++	if err := vm.Stop(); err != nil {
++		t.Fatalf("Stop: %v", err)
++	}
++	expectState(t, vm, VM_PAUSED)
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start from paused: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	if err := syscall.Kill(pid, 0); err != nil {
++		t.Fatalf("stand-in process %d is gone before kill: %v", pid, err)
++	}
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("Kill: %v", err)
++	}
++	expectState(t, vm, VM_QUIT)
++
++	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
++		t.Fatalf("stand-in process %d still exists after kill: %v", pid, err)
++	}
++
++	stats, err = vm.ProcStats()
++	if err != nil || len(stats) != 0 {
++		t.Fatalf("ProcStats after kill = %v, %v; want empty", stats, err)
++	}
++}
++
++func TestStubKillPausedStandInProcess(t *testing.T) {
++	vm := newTestStub(t, "foo", "/bin/sh", "-c", "sleep 30")
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++
++	if err := vm.Stop(); err != nil {
++		t.Fatalf("Stop: %v", err)
++	}
++	expectState(t, vm, VM_PAUSED)
++
++	pid := vm.GetPID()
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("Kill: %v", err)
++	}
++	expectState(t, vm, VM_QUIT)
++
++	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
++		t.Fatalf("stand-in process %d still exists after kill: %v", pid, err)
++	}
++}
++
++func TestStubStandInProcessExit(t *testing.T) {
++	vm := newTestStub(t, "foo", "/bin/true")
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++
++	waitForState(t, vm, VM_QUIT)
++
++	// the VM can be started again once its stand-in has exited
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start after exit: %v", err)
++	}
++
++	waitForState(t, vm, VM_QUIT)
++}
++
++func TestStubStandInProcessStartFailure(t *testing.T) {
++	vm := newTestStub(t, "foo", filepath.Join(t.TempDir(), "missing-binary"))
++
++	if err := vm.Start(); err == nil {
++		t.Fatal("Start with a missing stand-in binary should fail")
++	}
++	expectState(t, vm, VM_ERROR)
++
++	if vm.Tag("error") == "" {
++		t.Fatal("error tag not set")
++	}
++
++	// recover by clearing the stand-in and relaunching from ERROR
++	vm.lock.Lock()
++	vm.Init = nil
++	vm.lock.Unlock()
++
++	if err := vm.Start(); err != nil {
++		t.Fatalf("Start from error: %v", err)
++	}
++	expectState(t, vm, VM_RUNNING)
++
++	if err := vm.Kill(); err != nil {
++		t.Fatalf("Kill: %v", err)
++	}
++	expectState(t, vm, VM_QUIT)
++}
++
++func TestStubScreenshot(t *testing.T) {
++	vm := newTestStub(t, "foo")
++
++	tests := []struct {
++		size          int
++		width, height int
++	}{
++		{0, 64, 48},
++		{100, 100, 75},
++		{1, 1, 1},
++	}
++
++	for _, tt := range tests {
++		data, err := vm.Screenshot(tt.size)
++		if err != nil {
++			t.Fatalf("Screenshot(%d): %v", tt.size, err)
++		}
++
++		img, err := png.Decode(bytes.NewReader(data))
++		if err != nil {
++			t.Fatalf("Screenshot(%d) is not a PNG: %v", tt.size, err)
++		}
++
++		b := img.Bounds()
++		if b.Dx() != tt.width || b.Dy() != tt.height {
++			t.Fatalf("Screenshot(%d) = %dx%d, want %dx%d", tt.size, b.Dx(), b.Dy(), tt.width, tt.height)
++		}
++	}
++}
++
++func TestStubConflicts(t *testing.T) {
++	vm := newTestStub(t, "foo")
++
++	cfg := NewVMConfig()
++
++	// new VMs are returned locked, so only call Conflicts on the launched VM
++	// with the new VM as the argument, as VMs.Launch does
++	dup, err := NewStub("foo", DefaultNamespace, cfg)
++	if err != nil {
++		t.Fatalf("NewStub: %v", err)
++	}
++	defer dup.lock.Unlock()
++
++	if err := vm.Conflicts(dup); err == nil || !strings.Contains(err.Error(), "duplicate VM name") {
++		t.Fatalf("Conflicts(duplicate stub) = %v, want duplicate name error", err)
++	}
++
++	kvm, err := NewKVM("foo", DefaultNamespace, cfg)
++	if err != nil {
++		t.Fatalf("NewKVM: %v", err)
++	}
++	defer kvm.lock.Unlock()
++
++	if err := vm.Conflicts(kvm); err == nil || !strings.Contains(err.Error(), "duplicate VM name") {
++		t.Fatalf("Conflicts(duplicate kvm) = %v, want duplicate name error", err)
++	}
++
++	if err := kvm.Conflicts(vm); err == nil || !strings.Contains(err.Error(), "duplicate VM name") {
++		t.Fatalf("KvmVM.Conflicts(stub) = %v, want duplicate name error", err)
++	}
++
++	other, err := NewStub("bar", DefaultNamespace, cfg)
++	if err != nil {
++		t.Fatalf("NewStub: %v", err)
++	}
++	defer other.lock.Unlock()
++
++	if err := vm.Conflicts(other); err != nil {
++		t.Fatalf("Conflicts(distinct stub) = %v, want nil", err)
++	}
++}
++
++func TestStubInfoAndConfig(t *testing.T) {
++	vm := newTestStub(t, "foo", "/bin/sh", "-c", "sleep 30")
++
++	if got, err := vm.Info("type"); err != nil || got != "stub" {
++		t.Fatalf("Info(type) = %q, %v; want stub", got, err)
++	}
++
++	if got, err := vm.Info("hostname"); err != nil || got != "foo" {
++		t.Fatalf("Info(hostname) = %q, %v; want foo", got, err)
++	}
++
++	if got, err := vm.Info("init"); err != nil || got != "[/bin/sh -c sleep 30]" {
++		t.Fatalf("Info(init) = %q, %v", got, err)
++	}
++
++	var buf bytes.Buffer
++	if err := vm.WriteConfig(&buf); err != nil {
++		t.Fatalf("WriteConfig: %v", err)
++	}
++
++	if !strings.Contains(buf.String(), "vm config init /bin/sh -c \"sleep 30\"") {
++		t.Fatalf("WriteConfig output missing init:\n%s", buf.String())
++	}
++
++	copied, ok := vm.Copy().(*StubVM)
++	if !ok {
++		t.Fatalf("Copy() returned %T, want *StubVM", vm.Copy())
++	}
++
++	if copied.GetName() != "foo" || copied.Hostname != "foo" || len(copied.Init) != 3 {
++		t.Fatalf("Copy() lost fields: %+v", copied)
++	}
++}
+diff --git a/cmd/minimega/vm.go b/cmd/minimega/vm.go
+index 45eb79b..6a7b08b 100644
+--- a/cmd/minimega/vm.go
++++ b/cmd/minimega/vm.go
+@@ -32,6 +32,7 @@ const (
+ 	KVM
+ 	CONTAINER
+ 	ANDROID
++	STUB
+ )
+ 
+ type VM interface {
+@@ -173,6 +174,7 @@ func init() {
+ 	gob.Register(&KvmVM{})
+ 	gob.Register(&ContainerVM{})
+ 	gob.Register(&AndroidVM{})
++	gob.Register(&StubVM{})
+ }
+ 
+ func NewVM(name, namespace string, vmType VMType, config VMConfig) (VM, error) {
+@@ -183,6 +185,8 @@ func NewVM(name, namespace string, vmType VMType, config VMConfig) (VM, error) {
+ 		return NewContainer(name, namespace, config)
+ 	case ANDROID:
+ 		return NewAndroid(name, namespace, config)
++	case STUB:
++		return NewStub(name, namespace, config)
+ 	}
+ 
+ 	return nil, errors.New("unknown VM type")
+@@ -267,6 +271,8 @@ func (s VMType) String() string {
+ 		return "container"
+ 	case ANDROID:
+ 		return "android"
++	case STUB:
++		return "stub"
+ 	default:
+ 		return "???"
+ 	}
+@@ -280,6 +286,8 @@ func ParseVMType(s string) (VMType, error) {
+ 		return CONTAINER, nil
+ 	case "android":
+ 		return ANDROID, nil
++	case "stub":
++		return STUB, nil
+ 	default:
+ 		return 0, errors.New("invalid VMType")
+ 	}
+diff --git a/cmd/minimega/vm_cli.go b/cmd/minimega/vm_cli.go
+index 4d65efb..372eff7 100644
+--- a/cmd/minimega/vm_cli.go
++++ b/cmd/minimega/vm_cli.go
+@@ -37,7 +37,7 @@ info include:
+ - state*     : one of (building, running, paused, quit, error)
+ - uptime     : amount of time since the VM was launched
+ - namespace* : namespace the VM belongs to
+-- type*      : one of (kvm, container, android)
++- type*      : one of (kvm, container, android, stub)
+ - uuid*      : QEMU system uuid
+ - cc_active* : indicates whether cc is connected
+ - vcpus      : the number of allocated CPUs
+@@ -113,6 +113,7 @@ supported VM types are:
+ - kvm : QEMU-based vms
+ - container: Linux containers
+ - android : Android emulator-based VMs
++- stub : hypervisor-free VMs for testing
+ 
+ If you supply a name instead of a number of VMs, one VM with that name will be
+ launched. You may also supply a range expression to launch VMs with a specific
+@@ -135,12 +136,21 @@ better allocate resources across the cluster.
+ 
+ Android VMs use host-side emulator console/ADB port pairs. minimega currently
+ uses 64 valid port pairs per host, so each host can run at most 64 Android VMs
+-concurrently, and fewer if some of those ports are already in use.`,
++concurrently, and fewer if some of those ports are already in use.
++
++Stub VMs are an experimental type for testing minimega and the tools that drive
++it on hosts without a hypervisor. A stub VM follows the normal VM lifecycle and
++creates real network taps, but runs no QEMU process and no container. The
++optional "vm config init" command names a host process that is started as a
++stand-in guest when the VM starts (for example a miniccc wrapper), and "vm
++config backchannel" controls whether a cc unix socket is created for it. The
++"vm config filesystem" setting is ignored.`,
+ 		Patterns: []string{
+ 			"vm launch",
+ 			"vm launch <kvm,> <name or count> [config]",
+ 			"vm launch <container,> <name or count> [config]",
+ 			"vm launch <android,> <name or count> [config]",
++			"vm launch <stub,> <name or count> [config]",
+ 		},
+ 		Call: wrapSimpleCLI(cliVMLaunch),
+ 	},
+diff --git a/cmd/minimega/vmconfig_cli.go b/cmd/minimega/vmconfig_cli.go
+index 24ac0f4..a5ec943 100644
+--- a/cmd/minimega/vmconfig_cli.go
++++ b/cmd/minimega/vmconfig_cli.go
+@@ -333,6 +333,9 @@ func cliVMConfig(ns *Namespace, c *minicli.Command, resp *minicli.Response) erro
+ 		case *ContainerVM:
+ 			ns.vmConfig.BaseConfig = vm.BaseConfig.Copy()
+ 			ns.vmConfig.ContainerConfig = vm.ContainerConfig.Copy()
++		case *StubVM:
++			ns.vmConfig.BaseConfig = vm.BaseConfig.Copy()
++			ns.vmConfig.ContainerConfig = vm.ContainerConfig.Copy()
+ 		case *AndroidVM:
+ 			ns.vmConfig.BaseConfig = vm.BaseVM.BaseConfig.Copy()
+ 			ns.vmConfig.KVMConfig = vm.KVMConfig.Copy()
+diff --git a/cmd/minimega/vms_test.go b/cmd/minimega/vms_test.go
+index 53d4322..91f1476 100644
+--- a/cmd/minimega/vms_test.go
++++ b/cmd/minimega/vms_test.go
+@@ -15,6 +15,8 @@ func testVM(vmType VMType, state VMState) VM {
+ 		return &ContainerVM{BaseVM: base}
+ 	case ANDROID:
+ 		return &AndroidVM{BaseVM: base}
++	case STUB:
++		return &StubVM{BaseVM: base}
+ 	default:
+ 		panic("unknown VM type")
+ 	}
+diff --git a/doc/content/articles/vmtypes.md b/doc/content/articles/vmtypes.md
+index 8ce224e..eea2052 100644
+--- a/doc/content/articles/vmtypes.md
++++ b/doc/content/articles/vmtypes.md
+@@ -6,8 +6,8 @@
+ ## Introduction
+ 
+ This document describes the virtual machine (VM) types minimega is capable
+-of launching — QEMU/KVM virtual machines, containers, and Android emulator
+-instances. minimega uses a common API to describe features and supports
++of launching — QEMU/KVM virtual machines, containers, Android emulator
++instances, and hypervisor-free stub VMs for testing. minimega uses a common API to describe features and supports
+ launching experiments consisting of any combination of VM types.
+ 
+ <a id="TOC_2."></a>
+@@ -33,7 +33,7 @@ which allows you to launch multiple copies of a VM easily.
+ 
+ Also notice that in the `vm launch` command, we specify that we want to
+ launch a `kvm` type VM. minimega currently supports the `kvm`, `container`,
+-and `android` types, described in detail below.
++`android`, and `stub` types, described in detail below.
+ 
+ <a id="TOC_3."></a>
+ 
+@@ -315,3 +315,78 @@ When launching `android` type VMs, the following occurs, in order:
+ - The Android Emulator process is started with the appropriate SDK environment
+ - A QMP connection is established for lifecycle management
+ - Handlers are created to watch the emulator state and handle shutdown
++
++<a id="TOC_4.4."></a>
++
++### Stub VMs
++
++The `stub` type is an experimental VM type for testing minimega itself and the
++tools that drive it, such as phenix, on hosts where QEMU/KVM and containers are
++unavailable or too slow, for example in continuous integration. A stub VM needs
++no hypervisor: it follows the normal VM lifecycle and state machine, creates
++real network taps on the configured bridges, appears in `vm info` with its
++tags, and offers the miniccc backchannel, but it runs no QEMU process and no
++container.
++
++Stub VMs reuse the `container` configuration parameters:
++
++- `init` - Optional host command, started as a stand-in for the guest when the VM is started.
++- `hostname` - Informational only.
++- `filesystem`, `preinit`, `fifo`, and `volume` - Ignored.
++
++When a stub VM is started, the `init` command runs on the host with the
++instance directory as its working directory and its output in `stub.log` in
++that directory. `vm stop` and `vm start` pause and resume the process with
++`SIGSTOP` and `SIGCONT`, and `vm kill` kills its process group. If the process
++exits on its own, the VM moves to the `QUIT` state. The process receives these
++environment variables in addition to minimega's own:
++
++- `MM_STUB_NAME` - The VM name.
++- `MM_STUB_UUID` - The VM UUID.
++- `MM_STUB_NAMESPACE` - The VM's namespace.
++- `MM_STUB_INSTANCE` - The VM instance directory.
++- `MM_STUB_CC` - The path of the cc unix socket for this VM.
++
++When `vm config backchannel` is enabled (the default), minimega listens for
++miniccc on the `MM_STUB_CC` unix socket after the VM is started. Running the
++real `miniccc` binary as the stand-in therefore makes `cc exec` and the other
++`cc` commands work end to end. minimega does not expand environment variables
++in `vm config init`, so wrap miniccc in a script. The socket is created just
++after the stand-in process starts, so the script should wait for it instead of
++relying on miniccc's 15-second reconnect interval:
++
++```bash title="/usr/local/bin/stub-miniccc.sh"
++#!/bin/sh
++while [ ! -S "$MM_STUB_CC" ]; do sleep 0.2; done
++exec /opt/minimega/bin/miniccc -family unix -parent "$MM_STUB_CC" -uuid "$MM_STUB_UUID" -path "$MM_STUB_INSTANCE/miniccc"
++```
++
++```text
++vm config net LAN
++vm config init /usr/local/bin/stub-miniccc.sh
++vm launch stub node[0-2]
++vm start all
++cc exec hostname
++```
++
++Without `init`, a stub VM is a pure state machine with taps, which is enough to
++exercise `vm launch`, `vm start`, `vm stop`, `vm kill`, `vm flush`, `vm info`,
++`vm tag`, and `vm net` without any guest.
++
++<a id="TOC_4.4.1."></a>
++
++#### Technical details
++
++When launching `stub` type VMs, the following occurs, in order:
++
++- A new VM handler is created within minimega, which is populated with a copy of the VM configuration
++- An instance directory for the VM is created (by default /tmp/minimega/N, where N is the VM ID), and the configuration is written to disk
++- Checks are performed to ensure there are no naming or UUID conflicts
++- Any specified network taps are created and attached to openvswitch, exactly as for `kvm` type VMs
++- A handler is created to watch the stand-in process and kill it on demand
++- minimega returns control to the user with the VM in the BUILDING state
++
++`vm screenshot` returns a small solid-colour PNG so that tools which collect
++screenshots of every VM still receive an image. `vm save`, `vm migrate`,
++`vm qmp`, `vm cdrom`, `vm hotplug`, `vm console`, and VNC are not available
++for stub VMs because they rely on QEMU or a container.
+diff --git a/skills/minimega/SKILL.md b/skills/minimega/SKILL.md
+index 52d9658..b3d9271 100644
+--- a/skills/minimega/SKILL.md
++++ b/skills/minimega/SKILL.md
+@@ -119,9 +119,11 @@ hosts already present in the mesh.
+ 
+ ### VM configuration and lifecycle
+ 
+-minimega supports `kvm`, `container`, and `android` VM types. `vm config` is
+-mutable namespace-local state copied into every subsequently launched VM; it
+-does not retroactively change existing VMs.
++minimega supports `kvm`, `container`, `android`, and experimental `stub` VM
++types; `stub` VMs need no hypervisor and exist for testing (see
++`doc/content/articles/vmtypes.md`). `vm config` is mutable namespace-local state
++copied into every subsequently launched VM; it does not retroactively change
++existing VMs.
+ 
+ ```text
+ vm config                         # inspect current defaults
+diff --git a/tests/stub_info b/tests/stub_info
+new file mode 100644
+index 0000000..8508983
+--- /dev/null
++++ b/tests/stub_info
+@@ -0,0 +1,7 @@
++vm config memory 128
++vm config net 101
++vm launch stub foo
++vm start foo
++.columns name,state,type,vlan vm info
++vm kill foo
++vm flush
+\ No newline at end of file
+diff --git a/tests/stub_info.want b/tests/stub_info.want
+new file mode 100644
+index 0000000..d698826
+--- /dev/null
++++ b/tests/stub_info.want
+@@ -0,0 +1,9 @@
++## vm config memory 128
++## vm config net 101
++## vm launch stub foo
++## vm start foo
++## .columns name,state,type,vlan vm info
++name | state   | type | vlan
++foo  | RUNNING | stub | [101]
++## vm kill foo
++## vm flush
+diff --git a/tests/stub_lifecycle b/tests/stub_lifecycle
+new file mode 100644
+index 0000000..c0f9aef
+--- /dev/null
++++ b/tests/stub_lifecycle
+@@ -0,0 +1,32 @@
++vm launch stub foo[0-2]
++.columns name,state vm info
++vm start foo0
++.columns name,state vm info
++vm kill foo0
++.columns name,state vm info
++vm start foo0
++.columns name,state vm info
++vm kill foo1
++.columns name,state vm info
++vm start all
++.columns name,state vm info
++vm start foo1
++.columns name,state vm info
++vm stop foo0
++.columns name,state vm info
++vm start foo0
++.columns name,state vm info
++vm kill foo0
++vm flush
++.columns name,state vm info
++vm kill all
++vm flush
++.columns name,state vm info
++vm launch stub foo[0-2]
++.columns name,state vm info
++vm kill foo0
++vm flush foo0
++.columns name,state vm info
++vm kill all
++vm flush all
++.columns name,state vm info
+\ No newline at end of file
+diff --git a/tests/stub_lifecycle.want b/tests/stub_lifecycle.want
+new file mode 100644
+index 0000000..293be53
+--- /dev/null
++++ b/tests/stub_lifecycle.want
+@@ -0,0 +1,78 @@
++## vm launch stub foo[0-2]
++## .columns name,state vm info
++name | state
++foo0 | BUILDING
++foo1 | BUILDING
++foo2 | BUILDING
++## vm start foo0
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | BUILDING
++foo2 | BUILDING
++## vm kill foo0
++## .columns name,state vm info
++name | state
++foo0 | QUIT
++foo1 | BUILDING
++foo2 | BUILDING
++## vm start foo0
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | BUILDING
++foo2 | BUILDING
++## vm kill foo1
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | QUIT
++foo2 | BUILDING
++## vm start all
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | QUIT
++foo2 | RUNNING
++## vm start foo1
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | RUNNING
++foo2 | RUNNING
++## vm stop foo0
++## .columns name,state vm info
++name | state
++foo0 | PAUSED
++foo1 | RUNNING
++foo2 | RUNNING
++## vm start foo0
++## .columns name,state vm info
++name | state
++foo0 | RUNNING
++foo1 | RUNNING
++foo2 | RUNNING
++## vm kill foo0
++## vm flush
++## .columns name,state vm info
++name | state
++foo1 | RUNNING
++foo2 | RUNNING
++## vm kill all
++## vm flush
++## .columns name,state vm info
++## vm launch stub foo[0-2]
++## .columns name,state vm info
++name | state
++foo0 | BUILDING
++foo1 | BUILDING
++foo2 | BUILDING
++## vm kill foo0
++## vm flush foo0
++## .columns name,state vm info
++name | state
++foo1 | BUILDING
++foo2 | BUILDING
++## vm kill all
++## vm flush all
++## .columns name,state vm info
+-- 
+2.43.0
+

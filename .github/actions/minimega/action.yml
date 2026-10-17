@@ -34,6 +34,12 @@ inputs:
     description: Whether to start minimega after building (true/false)
     required: false
     default: 'true'
+  patch:
+    description: >-
+      Optional path (relative to the workspace) of a git patch to apply to the
+      minimega checkout before building, for testing unmerged minimega changes
+    required: false
+    default: ''
 
 outputs:
   bin:
@@ -53,6 +59,18 @@ runs:
         ref: ${{ inputs.ref }}
         path: ${{ inputs.path }}
         persist-credentials: false
+
+    - name: Apply patch to minimega
+      if: inputs.patch != ''
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        PATCH: ${{ github.workspace }}/${{ inputs.patch }}
+      run: |
+        set -euo pipefail
+        git apply --stat "$PATCH"
+        git apply "$PATCH"
+        git status --short | head -30
 
     - name: Set up Go for minimega
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
