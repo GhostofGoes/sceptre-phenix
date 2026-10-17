@@ -114,12 +114,15 @@ runs:
         set -euo pipefail
         if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
         sudo mkdir -p "$MM_BASE" "$MM_FILEPATH"
-        # nohup + setsid so the daemon outlives this step's shell.
-        sudo setsid nohup "$MM_BIN/minimega" \
+        # The daemon must run as root (taps, OVS, QEMU, cgroups). Run the whole
+        # command line under one root shell so the output redirection into the
+        # root-owned base directory is also done as root, and use setsid+nohup
+        # so the daemon outlives this step's shell.
+        sudo bash -c "setsid nohup '$MM_BIN/minimega' \
           -nostdin -force \
-          -base "$MM_BASE" -filepath "$MM_FILEPATH" \
-          -level "$MM_LEVEL" -logfile "$MM_BASE/minimega.log" \
-          >"$MM_BASE/minimega.stdout" 2>&1 &
+          -base '$MM_BASE' -filepath '$MM_FILEPATH' \
+          -level '$MM_LEVEL' -logfile '$MM_BASE/minimega.log' \
+          >'$MM_BASE/minimega.stdout' 2>&1 &"
         for i in $(seq 1 30); do
           if [ -S "$MM_BASE/minimega" ]; then break; fi
           sleep 1

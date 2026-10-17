@@ -96,7 +96,7 @@ jobs:
           row "qemu version" "$(qemu-system-x86_64 --version | head -1)"
           row "qemu-img version" "$(qemu-img --version | head -1)"
           row "dnsmasq version" "$(dnsmasq --version | head -1)"
-          row "kvm wrapper" "$(cat /usr/bin/kvm 2>&1 | tail -1)"
+          row "kvm wrapper" "$(file -b "$(readlink -f /usr/bin/kvm)" | cut -c1-80); $(readlink -f /usr/bin/kvm)"
           true
 
       - name: QEMU guest boot timing (KVM vs TCG) and hollow VM
@@ -121,7 +121,7 @@ jobs:
             local pid=$!
             local marker=timeout
             for i in $(seq 1 170); do
-              if grep -q -E 'emergency|/ #|login:|Alpine' "boot-$label.log"; then marker=booted; break; fi
+              if grep -q -E 'emergency|/ #|login:|Mounting boot media|Welcome to Alpine' "boot-$label.log"; then marker=userspace; break; fi
               kill -0 $pid 2>/dev/null || { marker=exited; break; }
               sleep 1
             done
@@ -201,6 +201,7 @@ jobs:
           row "alpine serial output" "$(sudo timeout 5 sh -c 'cat /tmp/minimega/*/serial0' 2>/dev/null | tail -c 200; mm 'vm info' >/dev/null)"
           mm 'clear all'
           # container type on this (cgroup v2) host
+          sudo apt-get install -y -q busybox-static >/dev/null 2>&1
           sudo mkdir -p /tmp/cfs/bin /tmp/cfs/proc /tmp/cfs/sys /tmp/cfs/dev /tmp/cfs/tmp
           sudo cp /bin/busybox /tmp/cfs/bin/busybox 2>/dev/null || sudo cp /usr/bin/busybox /tmp/cfs/bin/busybox
           sudo ln -sf busybox /tmp/cfs/bin/sh; sudo ln -sf busybox /tmp/cfs/bin/sleep
