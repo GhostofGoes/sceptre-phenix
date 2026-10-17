@@ -1,0 +1,132 @@
+name: Build and start minimega
+description: >-
+  Builds minimega from source on the runner, installs its runtime dependencies
+  (Open vSwitch, QEMU, dnsmasq), starts Open vSwitch, and launches a single
+  minimega instance as root listening on <base>/minimega. Intended for
+  end-to-end tests of phenix against a real minimega.
+
+inputs:
+  repository:
+    description: GitHub repository to build minimega from (owner/name)
+    required: false
+    default: sandia-minimega/minimega
+  ref:
+    description: Git ref of the minimega repository to build
+    required: false
+    default: master
+  path:
+    description: Checkout path, relative to the workspace
+    required: false
+    default: minimega
+  base:
+    description: minimega base directory (-base); the command socket is <base>/minimega
+    required: false
+    default: /tmp/minimega
+  filepath:
+    description: Directory minimega serves files from (-filepath)
+    required: false
+    default: /tmp/minimega/files
+  log-level:
+    description: minimega log level (-level)
+    required: false
+    default: info
+  start:
+    description: Whether to start minimega after building (true/false)
+    required: false
+    default: 'true'
+
+outputs:
+  bin:
+    description: Directory containing the built minimega binaries
+    value: ${{ steps.build.outputs.bin }}
+  socket:
+    description: Path of the minimega command socket
+    value: ${{ inputs.base }}/minimega
+
+runs:
+  using: composite
+  steps:
+    - name: Check out minimega
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.path }}
+        persist-credentials: false
+
+    - name: Set up Go for minimega
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ inputs.path }}/go.mod
+        cache-dependency-path: ${{ inputs.path }}/go.sum
+
+    - name: Install minimega runtime dependencies
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        sudo apt-get update -q
+        # dnsmasq's service fights systemd-resolved for port 53 on the runner;
+        # minimega only needs the binary, so stop the service after install.
+        sudo apt-get install -y --no-install-recommends \
+          build-essential libpcap-dev \
+          openvswitch-switch qemu-system-x86 qemu-kvm qemu-utils \
+          dnsmasq iproute2 isc-dhcp-client ntfs-3g cpu-checker
+        sudo systemctl disable --now dnsmasq 2>/dev/null || true
+
+    - name: Build minimega
+      id: build
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        source scripts/env.bash
+        ./scripts/version.bash
+        go install ./cmd/minimega ./cmd/minitest ./cmd/miniccc ./cmd/miniweb
+        ls -l bin
+        echo "bin=$PWD/bin" >> "$GITHUB_OUTPUT"
+
+    - name: Start Open vSwitch
+      if: inputs.start == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo modprobe openvswitch || echo "::warning::openvswitch kernel module did not load"
+        sudo systemctl start openvswitch-switch \
+          || sudo /usr/share/openvswitch/scripts/ovs-ctl start
+        for i in $(seq 1 30); do
+          if sudo ovs-vsctl show >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        sudo ovs-vsctl --version | head -1
+        sudo ovs-vsctl show
+
+    - name: Start minimega
+      if: inputs.start == 'true'
+      shell: bash
+      env:
+        MM_BIN: ${{ steps.build.outputs.bin }}
+        MM_BASE: ${{ inputs.base }}
+        MM_FILEPATH: ${{ inputs.filepath }}
+        MM_LEVEL: ${{ inputs.log-level }}
+      run: |
+        set -euo pipefail
+        if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+        sudo mkdir -p "$MM_BASE" "$MM_FILEPATH"
+        # nohup + setsid so the daemon outlives this step's shell.
+        sudo setsid nohup "$MM_BIN/minimega" \
+          -nostdin -force \
+          -base "$MM_BASE" -filepath "$MM_FILEPATH" \
+          -level "$MM_LEVEL" -logfile "$MM_BASE/minimega.log" \
+          >"$MM_BASE/minimega.stdout" 2>&1 &
+        for i in $(seq 1 30); do
+          if [ -S "$MM_BASE/minimega" ]; then break; fi
+          sleep 1
+        done
+        test -S "$MM_BASE/minimega" || { echo "minimega socket never appeared"; sudo cat "$MM_BASE/minimega.stdout" "$MM_BASE/minimega.log"; exit 1; }
+        sudo "$MM_BIN/minimega" -base "$MM_BASE" -e version
+        echo "::group::minimega check (external dependencies)"
+        sudo "$MM_BIN/minimega" -base "$MM_BASE" -e check || echo "::warning::minimega check reported missing dependencies"
+        echo "::endgroup::"
+        echo "$MM_BIN" >> "$GITHUB_PATH"

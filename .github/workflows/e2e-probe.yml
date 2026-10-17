@@ -1,0 +1,480 @@
+# Experimental: probes what GitHub-hosted runners can do for real
+# phenix + minimega end-to-end tests. Each job records findings in the
+# step summary; mismatches are reported, not failed, so one run yields
+# a complete picture.
+name: E2E Probe
+
+on:
+  push:
+    branches: ['claude/serene-fermi-38ybhr']
+    paths:
+      - '.github/workflows/e2e-probe.yml'
+      - '.github/actions/minimega/**'
+  workflow_dispatch:
+    inputs:
+      minimega_repository:
+        description: minimega repository to build (owner/name)
+        default: GhostofGoes/minimega
+        type: string
+      minimega_ref:
+        description: minimega git ref to build
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.24'
+  MINIMEGA_REPOSITORY: ${{ inputs.minimega_repository || 'GhostofGoes/minimega' }}
+  MINIMEGA_REF: ${{ inputs.minimega_ref || 'master' }}
+  ALPINE_VERSIONS: 'v3.22 v3.21 v3.20'
+
+jobs:
+  runner-probe:
+    name: Runner capabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Hardware, kernel, virtualization, cgroups
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-200)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## Runner capabilities"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          row "image" "$ImageOS $ImageVersion"
+          row "kernel" "$(uname -r)"
+          row "cpus" "$(nproc)"
+          row "memory" "$(free -h | awk '/Mem:/{print $2}')"
+          row "disk / avail" "$(df -h / | awk 'NR==2{print $4}')"
+          row "disk /mnt avail" "$(df -h /mnt 2>/dev/null | awk 'NR==2{print $4}')"
+          row "cpu model" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+          row "cpu virt flags" "$(grep -o -m1 -w -E 'vmx|svm' /proc/cpuinfo || echo none)"
+          row "/dev/kvm" "$(ls -l /dev/kvm 2>&1)"
+          row "kvm module" "$(lsmod | grep -E '^kvm' | awk '{print $1}' | tr '\n' ',')"
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -y -q cpu-checker busybox-static >/dev/null
+          row "kvm-ok" "$(sudo kvm-ok 2>&1)"
+          row "cgroup fs type" "$(stat -fc %T /sys/fs/cgroup)"
+          row "cgroup controllers" "$(cat /sys/fs/cgroup/cgroup.controllers 2>&1)"
+          row "cgroup v1 memory mount" "$(sudo mkdir -p /tmp/cg1mem && sudo mount -t cgroup -o memory cgroup /tmp/cg1mem 2>&1 && echo mounted-ok)"
+          row "cgroup v1 freezer mount" "$(sudo mkdir -p /tmp/cg1frz && sudo mount -t cgroup -o freezer cgroup /tmp/cg1frz 2>&1 && echo mounted-ok)"
+          row "systemd state" "$(systemctl is-system-running 2>&1)"
+          row "sudo" "$(sudo -n true 2>&1 && echo passwordless)"
+          row "docker" "$(docker --version 2>&1)"
+          row "docker privileged /dev/kvm" "$(docker run --rm --privileged alpine:3 sh -c 'ls -l /dev/kvm; grep CapEff /proc/1/status' 2>&1)"
+          row "loop device" "$(sudo losetup -f 2>&1)"
+          row "nbd module" "$(sudo modprobe nbd 2>&1 && ls /dev/nbd0)"
+          row "openvswitch module" "$(sudo modprobe openvswitch 2>&1 && lsmod | grep -c openvswitch)"
+          row "/dev/net/tun" "$(ls -l /dev/net/tun 2>&1)"
+          row "ip netns" "$(sudo ip netns add probe 2>&1 && sudo ip netns del probe && echo ok)"
+          row "unshare (user ns)" "$(unshare -Ur true 2>&1 && echo ok)"
+          row "nested virt flag" "$(cat /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested 2>&1)"
+          true
+
+      - name: Open vSwitch, taps, VLAN tags
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openvswitch-switch qemu-system-x86 qemu-kvm qemu-utils dnsmasq >/dev/null 2>&1
+          row "apt openvswitch+qemu+dnsmasq" "exit $?"
+          sudo systemctl disable --now dnsmasq >/dev/null 2>&1
+          sudo systemctl start openvswitch-switch
+          row "ovs service" "$(systemctl is-active openvswitch-switch 2>&1)"
+          row "ovs-vsctl version" "$(sudo ovs-vsctl --version | head -1)"
+          row "ovs datapath" "$(sudo ovs-dpctl dump-dps 2>&1)"
+          row "ovs add-br" "$(sudo ovs-vsctl add-br probe_br 2>&1 && sudo ip link set probe_br up && echo ok)"
+          row "tap + add-port tag=101" "$(sudo ip tuntap add mode tap probe_tap 2>&1 && sudo ovs-vsctl add-port probe_br probe_tap tag=101 2>&1 && sudo ip link set probe_tap up && echo ok)"
+          row "ovs-vsctl show" "$(sudo ovs-vsctl show 2>&1)"
+          row "ovs-ofctl show" "$(sudo ovs-ofctl show probe_br 2>&1 | head -5)"
+          row "ovs set vlan-limit" "$(sudo ovs-vsctl set Open_vSwitch . other_config:vlan-limit=2 2>&1 && echo ok)"
+          row "gre port" "$(sudo ovs-vsctl add-port probe_br probe_gre -- set interface probe_gre type=gre options:remote_ip=10.255.255.1 2>&1 && echo ok)"
+          sudo ovs-vsctl del-br probe_br
+          row "qemu version" "$(qemu-system-x86_64 --version | head -1)"
+          row "qemu-img version" "$(qemu-img --version | head -1)"
+          row "dnsmasq version" "$(dnsmasq --version | head -1)"
+          row "kvm wrapper" "$(cat /usr/bin/kvm 2>&1 | tail -1)"
+          true
+
+      - name: QEMU guest boot timing (KVM vs TCG) and hollow VM
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          mkdir -p /tmp/guest && cd /tmp/guest
+          for v in $ALPINE_VERSIONS; do
+            base="https://dl-cdn.alpinelinux.org/alpine/$v/releases/x86_64/netboot"
+            if curl -fsSL --retry 3 -o vmlinuz-virt "$base/vmlinuz-virt" && curl -fsSL --retry 3 -o initramfs-virt "$base/initramfs-virt"; then
+              row "alpine netboot" "$v: $(du -h vmlinuz-virt initramfs-virt | tr '\n' ' ')"; break
+            fi
+          done
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          boot() {
+            local label=$1; shift
+            local start end
+            start=$(date +%s.%N)
+            timeout 170 qemu-system-x86_64 "$@" -m 256 -nographic -no-reboot \
+              -kernel vmlinuz-virt -initrd initramfs-virt \
+              -append "console=ttyS0 panic=-1" >"boot-$label.log" 2>&1 &
+            local pid=$!
+            local marker=timeout
+            for i in $(seq 1 170); do
+              if grep -q -E 'emergency|/ #|login:|Alpine' "boot-$label.log"; then marker=booted; break; fi
+              kill -0 $pid 2>/dev/null || { marker=exited; break; }
+              sleep 1
+            done
+            end=$(date +%s.%N)
+            kill $pid 2>/dev/null; wait $pid 2>/dev/null
+            row "alpine boot ($label)" "$marker in $(awk "BEGIN{printf \"%.1f\", $end - $start}")s; tail: $(tail -c 160 "boot-$label.log")"
+          }
+          if [ -e /dev/kvm ]; then boot kvm -enable-kvm -cpu host; else row "alpine boot (kvm)" "skipped, no /dev/kvm"; fi
+          boot tcg -accel tcg -cpu max
+          qemu-img create -f qcow2 blank.qcow2 32M >/dev/null
+          timeout 20 qemu-system-x86_64 $( [ -e /dev/kvm ] && echo -enable-kvm ) -m 64 -nographic -drive file=blank.qcow2,format=qcow2 >hollow.log 2>&1 &
+          hp=$!; sleep 8
+          if kill -0 $hp 2>/dev/null; then row "hollow VM (blank qcow2) alive after 8s" "yes: $(tail -c 120 hollow.log)"; else row "hollow VM (blank qcow2) alive after 8s" "no: $(tail -c 200 hollow.log)"; fi
+          kill $hp 2>/dev/null
+          true
+
+  minimega-minitest:
+    name: minimega on the runner (minitest subset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and start minimega
+        id: mm
+        uses: ./.github/actions/minimega
+        with:
+          repository: ${{ env.MINIMEGA_REPOSITORY }}
+          ref: ${{ env.MINIMEGA_REF }}
+
+      - name: Runtime facts from inside minimega
+        run: |
+          set +e
+          mm() { sudo minimega -base /tmp/minimega -e "$@"; }
+          echo "::group::host"; mm host; echo "::endgroup::"
+          echo "::group::namespace"; mm namespace; echo "::endgroup::"
+          echo "::group::vlans"; mm vlans; echo "::endgroup::"
+          true
+
+      - name: VM state transitions with KVM and TCG, container attempt
+        run: |
+          set +e
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## minimega VM lifecycle on the runner"; echo; echo "| Check | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          mm() { sudo minimega -base /tmp/minimega -e "$@"; }
+          mm 'vm config memory 128'
+          mm 'vm config net LAN'
+          mm 'vm launch kvm probe-kvm'
+          row "launch kvm (no disk)" "$(mm '.columns name,state,type vm info')"
+          mm 'vm start probe-kvm'; sleep 4
+          row "start kvm (wrapper /usr/bin/kvm)" "$(mm '.columns name,state,vlan,tap,bridge vm info')"
+          row "ovs after start" "$(sudo ovs-vsctl show | grep -E 'Bridge|Port|tag' | tr -s ' ')"
+          row "qemu processes" "$(pgrep -a qemu | cut -c1-200)"
+          mm 'clear all'
+          mm 'vm config memory 128'
+          mm 'vm config qemu /usr/bin/qemu-system-x86_64'
+          mm 'vm launch kvm probe-tcg'
+          mm 'vm start probe-tcg'; sleep 4
+          row "start with qemu-system-x86_64 (TCG, no -enable-kvm)" "$(mm '.columns name,state vm info')"
+          mm 'clear all'
+          # Alpine kernel/initrd guest through minimega
+          mkdir -p /tmp/minimega/files
+          for v in $ALPINE_VERSIONS; do
+            base="https://dl-cdn.alpinelinux.org/alpine/$v/releases/x86_64/netboot"
+            if sudo curl -fsSL --retry 3 -o /tmp/minimega/files/vmlinuz-virt "$base/vmlinuz-virt" && sudo curl -fsSL --retry 3 -o /tmp/minimega/files/initramfs-virt "$base/initramfs-virt"; then break; fi
+          done
+          mm 'vm config memory 256'
+          mm 'vm config kernel /tmp/minimega/files/vmlinuz-virt'
+          mm 'vm config initrd /tmp/minimega/files/initramfs-virt'
+          mm 'vm config append console=ttyS0'
+          mm 'vm config serial-ports 1'
+          mm 'vm launch kvm alpine'
+          mm 'vm start alpine'; sleep 15
+          row "alpine kernel/initrd guest via minimega" "$(mm '.columns name,state,uptime vm info')"
+          row "alpine serial output" "$(sudo timeout 5 sh -c 'cat /tmp/minimega/*/serial0' 2>/dev/null | tail -c 200; mm 'vm info' >/dev/null)"
+          mm 'clear all'
+          # container type on this (cgroup v2) host
+          sudo mkdir -p /tmp/cfs/bin /tmp/cfs/proc /tmp/cfs/sys /tmp/cfs/dev /tmp/cfs/tmp
+          sudo cp /bin/busybox /tmp/cfs/bin/busybox 2>/dev/null || sudo cp /usr/bin/busybox /tmp/cfs/bin/busybox
+          sudo ln -sf busybox /tmp/cfs/bin/sh; sudo ln -sf busybox /tmp/cfs/bin/sleep
+          printf '#!/bin/sh\nexec /bin/sleep 3600\n' | sudo tee /tmp/cfs/init >/dev/null; sudo chmod +x /tmp/cfs/init
+          mm 'vm config filesystem /tmp/cfs'
+          mm 'vm launch container probe-c'
+          row "launch container" "$(mm '.columns name,state,type vm info')"
+          row "start container" "$(mm 'vm start probe-c' 2>&1; mm '.columns name,state,type vm info')"
+          row "container errors in log" "$(sudo grep -i -E 'cgroup|container' /tmp/minimega/minimega.log | tail -3)"
+          mm 'clear all'
+          true
+
+      - name: Run minitest subset
+        working-directory: minimega
+        run: |
+          set +e
+          # Excluded: tests that need a container filesystem ($images/minicccfs),
+          # a guest OS with miniccc (cc*, vnc*), routers, plumbing, or the mesh.
+          TESTS='^(builtins|check|debug|history|namespace|read_namespace|ns_save|vlans|vm_bad_names|vm_config|vm_config_net|vm_config_virtio|vm_config_save|vm_tags|vm_uuid|vm_lifecycle|vm_lifecycle_net|vm_add_nic|vm_hotplug|vm_qmp|vm_screenshot|vm_cdrom|vm_qos|taps_lifecycle|taps_namespace|bridge_trunk|disk|diskconfig|file|file_glob|shell)$'
+          echo "$TESTS" > /tmp/minitest.regex
+          sudo timeout 900 bin/minitest -base /tmp/minimega -dir tests -run "$TESTS" 2>&1 | tee /tmp/minitest.log
+          echo "minitest exit: ${PIPESTATUS[0]}"
+          pass=0; fail=0; notrun=0
+          { echo "## minitest subset results"; echo; echo "| test | result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          for want in tests/*.want; do
+            t=$(basename "$want" .want)
+            [[ "$t" =~ $TESTS ]] || continue
+            got="tests/$t.got"
+            if [ ! -f "$got" ]; then echo "| $t | not run |" >> "$GITHUB_STEP_SUMMARY"; notrun=$((notrun+1))
+            elif sudo diff -q "$want" "$got" >/dev/null; then echo "| $t | pass |" >> "$GITHUB_STEP_SUMMARY"; pass=$((pass+1))
+            else echo "| $t | FAIL |" >> "$GITHUB_STEP_SUMMARY"; fail=$((fail+1))
+              echo "::group::diff $t"; sudo diff -u "$want" "$got"; echo "::endgroup::"
+            fi
+          done
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "pass=$pass fail=$fail notrun=$notrun" | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo chmod -R a+r tests
+          true
+
+      - name: Collect minimega logs
+        if: always()
+        run: |
+          sudo cp /tmp/minimega/minimega.log /tmp/minimega-daemon.log 2>/dev/null || true
+          sudo chmod a+r /tmp/minimega-daemon.log /tmp/minitest.log 2>/dev/null || true
+          tail -50 /tmp/minimega-daemon.log || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: minitest-probe
+          path: |
+            minimega/tests/*.got
+            /tmp/minitest.log
+            /tmp/minimega-daemon.log
+          if-no-files-found: ignore
+
+  phenix-smoke:
+    name: phenix experiment lifecycle against real minimega
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: src/go/go.sum
+
+      - name: Build phenix (CLI/API only, no web UI bundle)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+          make -C src/go generate
+          make -C src/go phenix
+          src/go/bin/phenix version
+
+      - name: Build and start minimega
+        id: mm
+        uses: ./.github/actions/minimega
+        with:
+          repository: ${{ env.MINIMEGA_REPOSITORY }}
+          ref: ${{ env.MINIMEGA_REF }}
+          filepath: /phenix/images
+
+      - name: Prepare disk images and topology
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /phenix/images /tmp/e2e
+          sudo qemu-img create -f qcow2 /phenix/images/blank.qc2 32M
+          for v in $ALPINE_VERSIONS; do
+            base="https://dl-cdn.alpinelinux.org/alpine/$v/releases/x86_64/netboot"
+            if sudo curl -fsSL --retry 3 -o /phenix/images/vmlinuz-virt "$base/vmlinuz-virt" && sudo curl -fsSL --retry 3 -o /phenix/images/initramfs-virt "$base/initramfs-virt"; then break; fi
+          done
+          ls -l /phenix/images
+          cat > /tmp/e2e/topology.yaml <<'YAML'
+          apiVersion: phenix.sandia.gov/v1
+          kind: Topology
+          metadata:
+            name: e2e-hollow
+          spec:
+            nodes:
+            # "Hollow" VMs: QEMU runs with a blank disk and no guest OS. Enough to
+            # exercise launch, taps, VLANs, state, screenshots, and teardown.
+            - type: VirtualMachine
+              annotations:
+                phenix/default-apps: false
+              general:
+                hostname: hollow1
+                vm_type: kvm
+              hardware:
+                vcpus: 1
+                memory: 128
+                os_type: linux
+                drives:
+                - image: blank.qc2
+              network:
+                interfaces:
+                - name: if0
+                  type: ethernet
+                  proto: static
+                  address: 10.0.0.1
+                  mask: 24
+                  vlan: LAN
+            - type: VirtualMachine
+              annotations:
+                phenix/default-apps: false
+              general:
+                hostname: hollow2
+                vm_type: kvm
+              hardware:
+                vcpus: 1
+                memory: 128
+                os_type: linux
+                drives:
+                - image: blank.qc2
+              network:
+                interfaces:
+                - name: if0
+                  type: ethernet
+                  proto: static
+                  address: 10.0.0.2
+                  mask: 24
+                  vlan: LAN
+            # A real (tiny) Linux guest booted from kernel+initrd via advanced config.
+            - type: VirtualMachine
+              annotations:
+                phenix/default-apps: false
+              general:
+                hostname: alpine1
+                vm_type: kvm
+              hardware:
+                vcpus: 1
+                memory: 256
+                os_type: linux
+                drives:
+                - image: blank.qc2
+              advanced:
+                kernel: /phenix/images/vmlinuz-virt
+                initrd: /phenix/images/initramfs-virt
+                append: console=ttyS0
+                serial-ports: "1"
+              network:
+                interfaces:
+                - name: if0
+                  type: ethernet
+                  proto: static
+                  address: 10.0.0.3
+                  mask: 24
+                  vlan: LAN
+          YAML
+          cat /tmp/e2e/topology.yaml
+
+      - name: Experiment lifecycle through the phenix CLI
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set -euo pipefail
+          PHENIX="sudo $PWD/src/go/bin/phenix --deploy-mode all"
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "## phenix lifecycle against real minimega"; echo; echo "| Step | Result |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+
+          $PHENIX config create /tmp/e2e/topology.yaml
+          $PHENIX config list
+
+          echo "::group::dry run"
+          $PHENIX experiment create e2e-dry -t e2e-hollow
+          $PHENIX experiment start e2e-dry --dry-run
+          sudo cat /phenix/experiments/e2e-dry/mm_files/e2e-dry.mm
+          $PHENIX experiment delete e2e-dry -f || $PHENIX experiment delete e2e-dry
+          echo "::endgroup::"
+          row "dry-run script rendered" "ok"
+
+          $PHENIX experiment create e2e -t e2e-hollow
+          row "experiment create" "ok"
+
+          start=$(date +%s)
+          $PHENIX experiment start e2e
+          row "experiment start" "ok in $(( $(date +%s) - start ))s"
+
+          echo "::group::phenix vm info"; $PHENIX vm info e2e; echo "::endgroup::"
+          echo "::group::minimega vm info"; mm 'namespace e2e .columns name,state,vlan,tap,ip,memory,vcpus vm info'; echo "::endgroup::"
+          echo "::group::ovs"; sudo ovs-vsctl show; echo "::endgroup::"
+          echo "::group::experiment list"; $PHENIX experiment list; echo "::endgroup::"
+
+          sleep 10
+          states=$(mm 'namespace e2e .columns name,state vm info')
+          row "vm states 10s after start" "$states"
+          running=$(echo "$states" | grep -c RUNNING || true)
+          row "RUNNING count (expect 3)" "$running"
+          row "taps on OVS (expect 3)" "$(sudo ovs-vsctl list-ports mega_bridge 2>/dev/null | wc -l) on mega_bridge; $(sudo ovs-vsctl list-ports phenix 2>/dev/null | wc -l) on phenix"
+          row "vlans" "$(mm 'namespace e2e vlans')"
+          row "alpine serial tail" "$(sudo sh -c 'for f in /tmp/minimega/*/serial0; do timeout 3 cat $f; done' 2>/dev/null | tail -c 200)"
+
+          $PHENIX vm pause e2e hollow1
+          row "vm pause hollow1" "$(mm 'namespace e2e .filter name=hollow1 .columns name,state vm info')"
+          $PHENIX vm resume e2e hollow1
+          row "vm resume hollow1" "$(mm 'namespace e2e .filter name=hollow1 .columns name,state vm info')"
+
+          $PHENIX experiment stop e2e
+          row "experiment stop" "ok"
+          row "namespaces after stop" "$(mm namespace)"
+          row "qemu processes after stop (expect 0)" "$(pgrep -c qemu || true)"
+          $PHENIX experiment delete e2e
+          row "experiment delete" "ok"
+          $PHENIX experiment list
+          [ "$running" -eq 3 ] || { echo "::error::expected 3 RUNNING VMs, got $running"; exit 1; }
+
+      - name: Experiment lifecycle through the REST API
+        continue-on-error: true
+        env:
+          MM_BIN: ${{ steps.mm.outputs.bin }}
+        run: |
+          set -euo pipefail
+          row() { printf '| %s | %s |\n' "$1" "$(echo "$2" | tr '\n' ' ' | cut -c1-300)" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          mm() { sudo "$MM_BIN/minimega" -base /tmp/minimega -e "$@"; }
+          sudo setsid nohup $PWD/src/go/bin/phenix ui --deploy-mode all --listen-endpoint 127.0.0.1:3000 >/tmp/phenix-ui.log 2>&1 &
+          timeout 60 bash -c 'until curl -sf http://127.0.0.1:3000/api/v1/experiments >/dev/null; do sleep 1; done'
+          api() { curl -sS -f -X "$1" "http://127.0.0.1:3000/api/v1$2" "${@:3}"; }
+          row "GET /experiments" "$(api GET /experiments)"
+          api POST /experiments -H 'Content-Type: application/json' -d '{"name":"e2e-api","topology":"e2e-hollow"}' >/dev/null
+          row "POST /experiments" "created"
+          api POST /experiments/e2e-api/start >/dev/null
+          for i in $(seq 1 60); do
+            if api GET /experiments/e2e-api | grep -q '"running":true'; then break; fi; sleep 2
+          done
+          row "GET /experiments/e2e-api running" "$(api GET /experiments/e2e-api | head -c 300)"
+          sleep 8
+          row "GET /experiments/e2e-api/vms" "$(api GET /experiments/e2e-api/vms | grep -o '"state":"[A-Z]*"' | sort | uniq -c | tr '\n' ' ')"
+          row "GET /vms/e2e-api/hollow1/screenshot.png" "$(curl -s -o /tmp/shot.png -w '%{http_code} %{size_download}B' 'http://127.0.0.1:3000/api/v1/experiments/e2e-api/vms/hollow1/screenshot.png?size=small')"
+          api POST /experiments/e2e-api/stop >/dev/null
+          row "POST /experiments/e2e-api/stop" "$(mm namespace)"
+          api DELETE /experiments/e2e-api >/dev/null
+          row "DELETE /experiments/e2e-api" "ok"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          sudo cp /tmp/minimega/minimega.log /tmp/minimega-daemon.log 2>/dev/null || true
+          sudo cp /var/log/phenix/phenix.log /tmp/phenix.log 2>/dev/null || true
+          sudo chmod a+r /tmp/minimega-daemon.log /tmp/phenix.log /tmp/phenix-ui.log 2>/dev/null || true
+          echo "::group::minimega log tail"; tail -60 /tmp/minimega-daemon.log || true; echo "::endgroup::"
+          echo "::group::phenix log tail"; tail -60 /tmp/phenix.log || true; echo "::endgroup::"
+          echo "::group::phenix ui log tail"; tail -60 /tmp/phenix-ui.log || true; echo "::endgroup::"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: phenix-smoke-probe
+          path: |
+            /tmp/minimega-daemon.log
+            /tmp/phenix.log
+            /tmp/phenix-ui.log
+            /tmp/e2e/topology.yaml
+          if-no-files-found: ignore
