@@ -291,7 +291,8 @@ jobs:
       - name: Prepare disk images and topology
         run: |
           set -euo pipefail
-          sudo mkdir -p /phenix/images /tmp/e2e
+          sudo mkdir -p /phenix/images
+          mkdir -p /tmp/e2e
           sudo qemu-img create -f qcow2 /phenix/images/blank.qc2 32M
           for v in $ALPINE_VERSIONS; do
             base="https://dl-cdn.alpinelinux.org/alpine/$v/releases/x86_64/netboot"
