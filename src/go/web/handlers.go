@@ -1290,7 +1290,11 @@ func GetVMs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vms, err := vm.List(expName)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, vm.ErrPartialList):
+		plog.Warn(plog.TypeSystem, "listing the VMs the other hosts listed", "exp", expName, "err", err)
+	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return
