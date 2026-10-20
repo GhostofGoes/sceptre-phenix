@@ -65,6 +65,8 @@ All notable changes to this project will be documented in this file.
 - **Config Updates (breaking)**: Refuse a running experiment's config without force.
 - **Experiment Names (breaking)**: Refuse `.`, `..` and `all`, renames included.
 - **Base Directories (breaking)**: Refuse the root and phēnix's own directories.
+- **SCORCH Terminals and Output (breaking)**: Check roles; typing needs `experiments/trigger`.
+- **SCORCH Pipeline Updates (breaking)**: Reach only roles with the experiment.
 
 ### Removed
 
@@ -146,16 +148,43 @@ All notable changes to this project will be documented in this file.
 - **Tap Status**: Record only the taps a delete left behind.
 - **Tap App**: Create no taps or namespaces on dry runs.
 - **Startup Disk Images**: Refuse unusable paths; warn on denied access.
+- **SCORCH Cancel**: Bound the whole teardown, even when canceled mid-stage.
+- **SCORCH Cancel**: End pause and break at once on cancel.
 - **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **SCORCH Runs**: Keep a stale run from canceling its successor.
+- **SCORCH Pipelines**: Refuse starts with 409 or 400, not 204.
+- **SCORCH Web UI**: Show refused run starts and cancels.
+- **SCORCH SOH**: Stop data races on the run's shared status.
+- **SCORCH Taps**: Stop tap and break reverting stored SOH results.
+- **SCORCH Background**: Track backgrounded stages per loop and count.
+- **SCORCH Background**: End every instance of a component listed twice.
+- **SCORCH Filebeat**: Ship canceled runs' teardown output; reap Filebeat.
+- **SCORCH Web Terminals**: Stop races and double closes crashing phenix.
+- **SCORCH Web Terminals**: Idle connects no longer revoke write access.
+- **SCORCH Web Terminals**: Drop terminal output history when terminals end.
+- **SCORCH Web Terminals**: End terminals without waiting on stalled observers.
+- **SCORCH Output Streams**: Stop concurrent map access crashing phenix.
 - **Role-less Requests**: Answer 403 instead of dropping the connection.
 - **Periodic Apps**: Resume after skipped ticks; stop without hanging.
 - **App Stages**: Keep others' status; never write into newer runs.
 - **Stage Triggers**: Keep running flags that refuse second SCORCH runs.
 - **Periodic Apps**: Refuse to schedule apps of stopped experiments.
+- **SCORCH SOH**: Honor `failOnError` when SOH is already running.
+- **SCORCH Runs**: Refuse runs that name undefined components.
+- **SCORCH Runs**: Refuse a second run started from another process.
+- **SCORCH Triggers**: Record status for triggered and periodic runs.
+- **SCORCH Background**: Stop leftover backgrounded components when runs end.
+- **SCORCH Background**: Fail runs whose backgrounded components fail.
+- **SCORCH Background**: Wait for backgrounded components to exit on stop.
+- **SCORCH Background**: Prevent `concurrent map writes` crashes in `phenix ui`.
+- **SCORCH Concurrent Runs**: Stop runs using another experiment's component metadata.
+- **SCORCH Cancel**: Fail canceled runs when stop or cleanup fails.
 - **SCORCH Runs**: Accept runs again after a stop that panicked.
+- **SCORCH Filebeat**: Start Filebeat when the run-level setting enables it.
 - **Netflow**: Drop captures of experiments stopped from the CLI.
 - **Subnet Captures**: Stamp capture file names to the second.
 - **Subnet Captures**: Report why listing VMs or starting captures failed.
+- **SCORCH Cancel**: Run stop and cleanup stages after a cancel.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
 - **Dry Runs**: List VMs without creating a minimega namespace.
@@ -203,6 +232,7 @@ All notable changes to this project will be documented in this file.
 - **BoltDB Store**: Stop hanging after one failed database open.
 - **Experiment Runs**: Never write a stopped or restarted run back.
 - **Failed Starts**: Stop only the start's own run, never twice.
+- **Experiment Stop**: End SCORCH runs first; keep their final status.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **SoH Startup Delay**: Stop waiting once the start is canceled.
@@ -254,6 +284,9 @@ All notable changes to this project will be documented in this file.
 - **Injection Permissions**: Stop chmod-ing host files; inject copies instead.
 - **minimega Scripts**: Stop config values running head node shell commands.
 - **Experiment Deletes**: Stop crafted names or base directories wiping data.
+- **SCORCH Terminals**: Stop any user taking host shells, reading output.
+- **SCORCH Pipeline Updates**: Hide runs from roles without the experiment.
+- **SCORCH Taps**: Validate tap and break component taps upfront.
 
 ## [1.0.0]
 

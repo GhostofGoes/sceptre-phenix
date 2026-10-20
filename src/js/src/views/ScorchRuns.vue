@@ -108,13 +108,17 @@
     methods: {
       scorchControl(exp, runID) {
         let run = this.runs[runID];
-        if (run.running) {
-          axiosInstance.delete(`experiments/${exp}/scorch/pipelines/${runID}`);
-          // TODO: handle errors
-        } else {
-          axiosInstance.post(`experiments/${exp}/scorch/pipelines/${runID}`);
-          // TODO: handle errors
-        }
+        let path = `experiments/${exp}/scorch/pipelines/${runID}`;
+
+        // The server refuses a start it cannot run, such as one while a run
+        // executes or the experiment is stopping, in its answer.
+        let request = run.running
+          ? axiosInstance.delete(path)
+          : axiosInstance.post(path);
+
+        return request.catch((err) => {
+          useErrorNotification(err);
+        });
       },
 
       runsView(exp) {

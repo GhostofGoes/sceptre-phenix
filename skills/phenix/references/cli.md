@@ -105,6 +105,9 @@ shorthand: `configure` (`config`), `pre-start` (`pre`), `post-start` (`post`),
 `running` (`run`), `cleanup` (`clean`). Passing `all` instead of an experiment
 name triggers the stage in every experiment, and passing no app names triggers
 every app. The `running` stage is skipped for stopped experiments. Triggering
+the `running` stage of the `scorch` app executes SCORCH run 0, as
+`phenix experiment scorch <exp>` does, and is skipped while a SCORCH run
+executes. Triggering
 `configure` is not equivalent to `phenix experiment reconfigure`: it does not
 validate the experiment config, run config hooks, or guard against running
 experiments.

@@ -593,8 +593,12 @@ func broadcastPipeline(exp string, run, loop int, pl *pipeline) {
 	name := fmt.Sprintf("%s/%d/%d", exp, run, loop)
 	body, _ := json.Marshal(pl)
 
-	resource := bt.NewResource("apps/scorch", name, "pipeline-update")
-	broker.Broadcast(nil, resource, body)
+	// Only those who may get the experiment hear of its runs.
+	broker.Broadcast(
+		bt.NewRequestPolicy("experiments", "get", exp),
+		bt.NewResource("apps/scorch", name, "pipeline-update"),
+		body,
+	)
 }
 
 type PipelineUpdate struct {
