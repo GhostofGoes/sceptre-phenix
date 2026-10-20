@@ -146,7 +146,13 @@ func newExperimentCreateCmd() *cobra.Command {
   Used to create an experiment from existing configurations; can be a
   topology, or topology and scenario, or paths to topology/scenario
   configuration files (YAML or JSON). (Optional are the arguments for
-  scenario or base directory.)`
+  scenario or base directory.)
+
+  --vlan-min and --vlan-max set the experiment's VLAN range: minimega
+  assigns its VLAN IDs from min up to, but not including, max. Set both, or
+  neither to use minimega's default pool. While the experiment runs, minimega
+  reserves the range and refuses to start another experiment whose range
+  overlaps it.`
 
 	example := `
   phenix experiment create <experiment name> -t <topology name or /path/to/filename>
@@ -256,8 +262,8 @@ func newExperimentCreateCmd() *cobra.Command {
 	cmd.Flags().StringP("base-dir", "d", "", "Base directory to use for experiment (optional)")
 	cmd.Flags().
 		StringP("default-bridge", "b", appName, "Default bridge name to use for experiment (optional)")
-	cmd.Flags().Int("vlan-min", 0, "VLAN pool minimum")
-	cmd.Flags().Int("vlan-max", 0, "VLAN pool maximum")
+	cmd.Flags().Int("vlan-min", 0, "VLAN range min, the first VLAN ID minimega assigns (1-4095); needs --vlan-max")
+	cmd.Flags().Int("vlan-max", 0, "VLAN range max; minimega assigns VLAN IDs below it (2-4096); needs --vlan-min")
 	cmd.Flags().StringSlice("disabled-apps", []string{}, "Comma separated ist of apps to disable")
 
 	return cmd
@@ -459,6 +465,10 @@ func newExperimentStartCmd() *cobra.Command {
   experiment name will include all stopped experiments; dry-run will do
 	everything but call out to minimega.
 
+	--vlan-min and --vlan-max replace an end of the experiment's VLAN range,
+	which must then have both ends set or neither: minimega assigns its VLAN
+	IDs from min up to, but not including, max.
+
 	NOTE: passing the --honor-run-periodically flag will prevent the CLI from
 	returning. If Ctrl+c is pressed, the experiment will continue to run but
 	the running stage will no longer continue to be triggered for any apps
@@ -578,8 +588,8 @@ func newExperimentStartCmd() *cobra.Command {
 		Bool("honor-run-periodically", false, "Periodically trigger running stage in apps if configured in scenario")
 	cmd.Flags().
 		Bool("treat-mm-errors-as-warnings", false, "Treat errors from minimega as warnings instead of failing")
-	cmd.Flags().Int("vlan-min", 0, "VLAN pool minimum")
-	cmd.Flags().Int("vlan-max", 0, "VLAN pool maximum")
+	cmd.Flags().Int("vlan-min", 0, "Replace the VLAN range's min, the first VLAN ID minimega assigns (1-4095)")
+	cmd.Flags().Int("vlan-max", 0, "Replace the VLAN range's max; minimega assigns VLAN IDs below it (2-4096)")
 
 	return cmd
 }

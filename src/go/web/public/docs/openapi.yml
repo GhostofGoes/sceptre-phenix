@@ -390,8 +390,15 @@ paths:
                     type: string
                 vlan_min:
                   type: integer
+                  description: >-
+                    The VLAN range's min, the first VLAN ID minimega may assign,
+                    1-4095; set it with vlan_max, or leave both 0 for minimega's
+                    default pool.
                 vlan_max:
                   type: integer
+                  description: >-
+                    The VLAN range's max, 2-4096 and above vlan_min; minimega
+                    assigns VLAN IDs below it, never the max itself.
       responses:
         "200":
           description: successful operation
@@ -399,6 +406,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Experiment"
+        "400":
+          description: >
+            the experiment cannot be created, for example for a refused VLAN
+            range, an unknown topology or an invalid name
+        "403":
+          description: creating the experiment is not allowed
+        "409":
+          description: an experiment of the name is being created
+        "500":
+          description: the request cannot be read or parsed
   "/experiments/{name}":
     get:
       tags:
@@ -2279,19 +2296,29 @@ components:
             vlanRange:
               type: object
               title: VLAN Range
-              description: The range of VLAN IDs the experiment may allocate from; unset leaves both ends unset.
+              description: >-
+                The experiment's VLAN range: minimega assigns its VLAN IDs from
+                min up to, but not including, max, and reserves the range for
+                the experiment while it runs, refusing to start another
+                experiment whose range overlaps it. Set both ends, or neither
+                to use minimega's default pool.
               nullable: true
               additionalProperties: false
               properties:
                 min:
                   type: integer
                   title: Minimum
-                  description: The lowest VLAN ID the experiment may use; 0 leaves the minimum unset.
+                  description: >-
+                    The first VLAN ID minimega may assign, 1-4095; set it with
+                    max, or leave both unset or 0.
                   nullable: true
                 max:
                   type: integer
                   title: Maximum
-                  description: The highest VLAN ID the experiment may use; 0 leaves the maximum unset.
+                  description: >-
+                    The end of the range, 2-4096 and above min; minimega assigns
+                    VLAN IDs below it, never the max itself. Set it with min, or
+                    leave both unset or 0.
                   nullable: true
             defaultBridge:
               type: string

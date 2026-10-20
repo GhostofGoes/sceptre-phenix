@@ -215,9 +215,30 @@ build troubleshooting, read the sibling
 ```bash
 phenix vlan alias [exp]                          # list VLAN aliases (all experiments, or one)
 phenix vlan alias <exp> <alias name>             # print the alias's VLAN ID (e.g. `105`)
-phenix vlan alias <exp> <alias name> <vlan id>   # set an alias (-f to overwrite)
-phenix vlan range <exp> <range min> <range max>  # view or set the VLAN pool range
+phenix vlan alias <exp> <alias name> <vlan id>   # set an alias (-f to re-pin a pinned alias)
+phenix vlan range <exp> <range min> <range max>  # view or set the experiment's VLAN range; -f replaces a set range
 ```
+
+minimega assigns an experiment's VLAN IDs from its range's min up to, but not
+including, its max, so 300-310 gives VLAN IDs 300 to 309. Set both ends, or
+neither (`0`) to use minimega's default pool (its `-vlanrange`, VLAN IDs 101
+to 4095 by default). `phenix experiment create` and `start` (`--vlan-min`,
+`--vlan-max`), `phenix config create` and `edit` (`spec.vlans.min`,
+`spec.vlans.max`), `phenix vlan range` and `phenix workflow apply`
+(`vlanRange`) refuse a min outside 1-4095, a max outside 2-4096, a min that
+is not below the max, and a range with only one end set, such as `max VLAN ID
+is unset while min VLAN ID is 300; set both ends of the VLAN range, or
+neither`. `phenix vlan alias`, and `PATCH /api/v1/experiments/{name}`, the
+Web-UI's VLAN assignment, refuse to pin a VLAN ID outside 1-4095 or outside
+the range, such as the max itself, and `phenix vlan range` refuses a range
+that leaves out a pinned VLAN ID.
+
+While the experiment runs, minimega reserves its range: the default pool skips
+it, and a start of another experiment whose range overlaps it fails with
+`range overlaps with another namespace: <experiment>`. minimega counts the max
+of the range being set as part of it, so ranges that share an end, such as
+300-310 and 310-320, collide when the higher one starts first; leave a gap,
+such as 300-310 and 311-320.
 
 ## Other subcommands
 

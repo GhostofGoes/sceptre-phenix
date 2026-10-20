@@ -421,7 +421,7 @@ func Edit(name string, force bool) (*store.Config, error) {
 		c.Spec["experimentName"] = expName
 	}
 
-	if err = Update(name, c); err != nil {
+	if err = Update(name, c, UpdateWithForce(force)); err != nil {
 		return nil, fmt.Errorf("updating edited config: %w", err)
 	}
 
@@ -430,8 +430,12 @@ func Edit(name string, force bool) (*store.Config, error) {
 
 // Update updates the store with the given config. If the name of the config was
 // changed as part of the update, a new config will be created and the old
-// config deleted.
-func Update(name string, c *store.Config) error {
+// config deleted. Unless [UpdateWithForce] is given, it refuses to update the
+// config of an experiment that the store holds as running, whatever status c
+// carries, or that c says runs. It never renames a running experiment.
+func Update(name string, c *store.Config, opts ...UpdateOption) error {
+	o := newUpdateOptions(opts...)
+
 	old, err := store.NewConfig(name)
 	if err != nil {
 		return fmt.Errorf("getting config to update: %w", err)
@@ -441,10 +445,51 @@ func Update(name string, c *store.Config) error {
 		return fmt.Errorf("getting config to update: %w", err)
 	}
 
+	// A config with another kind or name renames the stored one.
+	renamed := c.Kind != old.Kind || c.Metadata.Name != old.Metadata.Name
+
+	// A body without a status would store a running experiment as stopped
+	// while its VMs keep running, and a forced rename would leave them in the
+	// minimega namespace of the old name.
+	if !o.force || renamed {
+		running, runErr := experimentRunning(old)
+		if runErr != nil {
+			return runErr
+		}
+
+		if running && renamed {
+			return fmt.Errorf("renaming config %s: cannot rename running experiment", name)
+		}
+
+		if running {
+			return errors.New("cannot update running experiment")
+		}
+	}
+
 	c.Metadata.Created = old.Metadata.Created
 
 	if err = Validate(c); err != nil {
 		return err
+	}
+
+	// A body with a running status would store a stopped experiment as
+	// running.
+	if !o.force {
+		running, runErr := experimentRunning(c)
+		if runErr != nil {
+			return runErr
+		}
+
+		if running {
+			return errors.New("cannot update running experiment")
+		}
+	}
+
+	// A rename must not replace a config that already has that name.
+	if renamed {
+		if err = checkNameFree(c); err != nil {
+			return fmt.Errorf("renaming config %s: %w", name, err)
+		}
 	}
 
 	for _, hook := range hooks[c.Kind] {
@@ -460,24 +505,58 @@ func Update(name string, c *store.Config) error {
 		}
 	}
 
-	if err = store.Update(c); err != nil {
-		if errors.Is(err, store.ErrNotExist) { // name changed during update
-			createErr := store.Create(c)
-			if createErr != nil {
-				return fmt.Errorf("renaming updated config in store: %w", createErr)
-			}
-
-			deleteErr := store.Delete(old)
-			if deleteErr != nil {
-				_ = store.Delete(c) // don't offer a path to creation via updates
-
-				return fmt.Errorf("renaming updated config in store: %w", deleteErr)
-			}
-
-			return nil
+	if !renamed {
+		if err = store.Update(c); err != nil {
+			return fmt.Errorf("updating config in store: %w", err)
 		}
 
-		return fmt.Errorf("updating config in store: %w", err)
+		return nil
+	}
+
+	// Create refuses a name taken since the check above.
+	if err = store.Create(c); err != nil {
+		return fmt.Errorf("renaming updated config in store: %w", err)
+	}
+
+	if err = store.Delete(old); err != nil {
+		_ = store.Delete(c) // don't offer a path to creation via updates
+
+		return fmt.Errorf("renaming updated config in store: %w", err)
+	}
+
+	return nil
+}
+
+// experimentRunning reports whether c is the config of an experiment whose
+// status says it runs.
+func experimentRunning(c *store.Config) (bool, error) {
+	if c.Kind != kindExperiment {
+		return false, nil
+	}
+
+	exp, err := types.DecodeExperimentFromConfig(*c)
+	if err != nil {
+		return false, fmt.Errorf("decoding experiment from config: %w", err)
+	}
+
+	return exp.Running(), nil
+}
+
+// checkNameFree returns an error wrapping store.ErrExist when the store holds
+// a config of c's kind and name.
+func checkNameFree(c *store.Config) error {
+	taken := &store.Config{ //nolint:exhaustruct // only the key is needed
+		Kind:     c.Kind,
+		Metadata: store.ConfigMetadata{Name: c.Metadata.Name}, //nolint:exhaustruct // only the key is needed
+	}
+
+	err := store.Get(taken)
+	if err == nil {
+		return fmt.Errorf("config %s: %w", c.FullName(), store.ErrExist)
+	}
+
+	if !errors.Is(err, store.ErrNotExist) {
+		return fmt.Errorf("checking for config %s: %w", c.FullName(), err)
 	}
 
 	return nil

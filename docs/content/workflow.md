@@ -242,12 +242,19 @@ spec:
 | `auto.restart` | `true` | Restart a running experiment to update it, and start an experiment that was just created or updated. |
 | `topology` | the experiment's topology | The topology config to use. Required to create an experiment. |
 | `scenario` | the experiment's scenario | The scenario config to use, if any. |
-| `vlans` | | VLAN alias to VLAN ID. |
+| `vlans` | | VLAN alias to VLAN ID. With `vlanRange` set, each ID other than `0` must be in the range; any other is refused. |
 | `schedules` | | VM hostname to cluster host. |
 | `deployMode` | the server's `deploy-mode` | Which minimega VMs to deploy: `all`, `no-headnode` or `only-headnode`. |
 | `useGREMesh` | `false` | Use GRE tunnels between mesh nodes for VLAN trunking. |
-| `vlanRange.min`, `vlanRange.max` | `0` | The lowest and highest VLAN IDs minimega may assign. `0` leaves that end unset. |
+| `vlanRange.min`, `vlanRange.max` | `0` | The experiment's VLAN range: minimega assigns its VLAN IDs from `min` up to, but not including, `max`, so `min: 100` and `max: 200` give VLAN IDs 100 to 199. Set both ends, or neither to use minimega's default pool. `min` is 1-4095, and `max` is 2-4096 and above `min`; any other range is refused. |
 | `defaultBridge` | `phenix` | The bridge VMs connect to by default: at most 15 characters and, unless it's `phenix`, used by no other experiment. |
+
+While the experiment runs, minimega reserves its VLAN range for it: the default
+pool skips the range, and minimega refuses to start another experiment whose
+range overlaps it. minimega's overlap check counts the `max` of the experiment
+being started, so ranges that share an end, such as 100-200 and 200-300,
+collide when the experiment with the higher range starts first. Leave a gap
+between them, such as 100-200 and 201-300.
 
 ### Schema
 

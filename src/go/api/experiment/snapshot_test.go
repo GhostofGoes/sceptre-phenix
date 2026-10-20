@@ -98,3 +98,43 @@ func TestStopVMsDoesNotDeleteSnapshotsWhenNamespaceClearFails(t *testing.T) {
 		t.Fatalf("expected no deleted snapshots, got %v", clusterFiles.deleted)
 	}
 }
+
+// TestDeleteHookDeletesStagedStartupScripts is a regression test: deleting an
+// experiment left the startup scripts staged for C2 delivery in minimega's
+// files directory, outside the experiment's base directory.
+func TestDeleteHookDeletesStagedStartupScripts(t *testing.T) {
+	clusterFiles := new(recordingClusterFiles)
+	originalClusterFiles := file.DefaultClusterFiles
+	originalMM := mm.DefaultMM
+
+	file.DefaultClusterFiles = clusterFiles //nolint:reassign // install test double
+	mm.DefaultMM = headnodeMM{}             //nolint:reassign // install test double
+
+	t.Cleanup(func() {
+		file.DefaultClusterFiles = originalClusterFiles //nolint:reassign // restore default
+		mm.DefaultMM = originalMM                       //nolint:reassign // restore default
+	})
+
+	exp := types.NewExperiment(store.ConfigMetadata{Name: "test-exp"})
+	exp.Spec.SetExperimentName("test-exp")
+	exp.Spec.SetBaseDir(t.TempDir())
+	exp.Spec.SetTopology(&v1.TopologySpec{
+		NodesF: []*v1.Node{{GeneralF: &v1.General{HostnameF: "vm-one"}}},
+	})
+
+	if err := hookDelete(exp); err != nil {
+		t.Fatalf("running the delete hook: %v", err)
+	}
+
+	for _, want := range []string{
+		"test-exp/*-hostname.sh",
+		"test-exp/*-timezone.sh",
+		"test-exp/*-interfaces.sh",
+		"test-exp/*-domain.sh",
+		"test-exp/*-startup.ps1",
+	} {
+		if !slices.Contains(clusterFiles.deleted, want) {
+			t.Errorf("delete hook did not delete %s; deleted %v", want, clusterFiles.deleted)
+		}
+	}
+}

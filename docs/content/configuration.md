@@ -201,6 +201,26 @@ three options available to set, but on only one option can be set:
    setting, per hostname, that will watch for the UUID instead of the hostname
    to register with minimega command and control.
 
+    phēnix waits for these clients with no deadline, so experiment create,
+    once the configure apps have run, and experiment start, once the
+    pre-start apps have run, refuse a `c2` hostname that is not a node in the
+    topology, is the node itself, or is an external or `do_not_boot` node,
+    and `c2` delays that wait on each other. A `c2` delay can therefore wait
+    on a node an app adds, such as the caldera app's server. The error names
+    why a node will not boot when the startup app set its `do_not_boot`, such
+    as `(missing disk image)`. Experiment create and update also check the
+    topology before any app runs, as a Builder save of an experiment does,
+    and refuse the same, except a hostname no node has yet and a node that is
+    `do_not_boot` only because its disk image is missing. A Builder save of an
+    existing experiment stores the topology before that check, so a save it
+    refuses keeps the new topology but not the experiment change. A Topology
+    config on its own is checked against its schema only. Hostnames match
+    regardless of case. An empty `c2` hostname is refused too, since start
+    would skip it and not wait. A `c2` delay on a node that also has
+    `user: true` is not checked, since the user delay wins. A dry-run start
+    waits for no VM, so it only warns of what its check finds: a disk image
+    missing on this host may exist where the experiment really starts.
+
 `phenix experiment start` waits until every `timer` and `c2` delayed VM has
 started and the post-start apps have run. The experiment is reported running
 while it waits. If a delayed VM fails to start or the command is interrupted,

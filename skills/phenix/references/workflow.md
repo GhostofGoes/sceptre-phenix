@@ -91,14 +91,14 @@ spec:                              # required; {} applies every default
   topology: ${BRANCH_NAME}         # topology config; needed to create, else defaults to the experiment's
   scenario: ${BRANCH_NAME}         # scenario config (optional)
   vlans:
-    EXP: 101                       # VLAN alias -> VLAN ID
+    EXP: 101                       # VLAN alias -> VLAN ID; must be in vlanRange when set
   schedules:
     host-01: compute1              # VM hostname -> cluster host
   deployMode: all                  # all, no-headnode or only-headnode; omit for the server's deploy-mode
   useGREMesh: false
   vlanRange:
-    min: 100                       # 0 leaves that end of the range unset
-    max: 200
+    min: 100                       # minimega assigns 100-199, never the max; set both ends or neither
+    max: 200                       # min 1-4095, max 2-4096 and above min; reserved while the experiment runs
   defaultBridge: phenix            # at most 15 characters (the Linux interface-name limit)
 ```
 
