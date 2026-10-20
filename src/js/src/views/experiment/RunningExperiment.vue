@@ -393,7 +393,10 @@
                 <br /><br />
                 Disk:
                 <b-tooltip :label="getDiskToolTip(vmI.disk)" type="is-dark">
-                  <b-select v-model="vmI.disk">
+                  <b-select
+                    v-model="vmI.disk"
+                    :aria-label="`Disk of VM ${vmI.name}`">
+                    <option value="">keep the current disk</option>
                     <option v-for="(d, index) in disks" :key="index" :value="d">
                       {{ getBaseName(d) }}
                     </option>
@@ -405,8 +408,8 @@
                   label="menu for replicating injections"
                   type="is-dark">
                   <b-select v-model="vmI.inject" expanded>
-                    <option value="true">Yes</option>
-                    <option value="false">No</option>
+                    <option :value="true">Yes</option>
+                    <option :value="false">No</option>
                   </b-select>
                 </b-tooltip>
               </div>
@@ -1504,6 +1507,7 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
   import { partitionSnapshotVMNames } from '@/utils/vmSnapshot.js';
+  import { redeployRequestBody } from '@/utils/redeploy.js';
   import {
     applyStopCaptureUpdate,
     isInterfaceCapturing,
@@ -2338,8 +2342,12 @@
         this.disks = [];
         this.isWaiting = true;
 
+        // Only the disks a redeploy or an optical disc change accepts, not
+        // their backing images.
         axiosInstance
-          .get(`disks?diskType=${diskType}`)
+          .get(
+            `disks?expName=${this.$route.params.id}&assignable=true&diskType=${diskType}`,
+          )
           .then((resp) => {
             this.isWaiting = false;
 
@@ -3436,7 +3444,8 @@
                 name: vms[i].name,
                 cpus: vms[i].cpus,
                 ram: vms[i].ram,
-                disk: vms[i].disk.substring(vms[i].disk.lastIndexOf('/') + 1),
+                // An empty disk keeps the VM's own (see redeployRequestBody).
+                disk: '',
                 inject: false,
               });
             }
@@ -3455,21 +3464,13 @@
         let postUrl = '';
 
         vms.forEach((vm) => {
-          body = {
-            cpus: parseInt(vm.cpus),
-            ram: parseInt(vm.ram),
-            disk: vm.disk,
-          };
+          body = redeployRequestBody(vm);
           postUrl =
             'experiments/' +
             this.$route.params.id +
             '/vms/' +
             vm.name +
             '/redeploy';
-
-          if (vm.inject) {
-            body['injects'] = true;
-          }
 
           this.redeployModal.actionsQueue.push({
             name: vm.name,

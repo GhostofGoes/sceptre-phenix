@@ -389,7 +389,12 @@ func updateFromWorkflow(
 	exp.Spec.SetDefaultBridge(spec.DefaultBridgeName())
 	exp.Spec.SetSchedule(prep.Schedules)
 	exp.Spec.SetDeployMode(string(spec.ExperimentDeployMode()))
-	_ = exp.Spec.SetVLANRange(spec.VLANMin(), spec.VLANMax(), true)
+
+	// spec.Validate already refused a range leaving out a pinned VLAN ID.
+	if err := exp.Spec.SetVLANRange(spec.VLANMin(), spec.VLANMax(), true); err != nil {
+		return weberror.NewWebError(err, "unable to update experiment %s", expName)
+	}
+
 	exp.Spec.SetUseGREMesh(spec.UseGREMesh)
 
 	if err := exp.WriteToStore(false); err != nil {

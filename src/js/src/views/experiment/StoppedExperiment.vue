@@ -326,8 +326,8 @@
                       <option
                         v-for="(h, index) in hosts"
                         :key="index"
-                        :value="h">
-                        {{ h }}
+                        :value="h.value">
+                        {{ h.label }}
                       </option>
                     </b-select>
                     <p class="control">
@@ -691,6 +691,7 @@
   import axiosInstance from '@/utils/axios.js';
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { hostOptions } from '@/utils/hosts.js';
 
   export default {
     mixins: [formattingMixin],
@@ -962,14 +963,8 @@
       updateHosts() {
         axiosInstance.get('hosts').then(
           (response) => {
-            for (let i = 0; i < response.data.hosts.length; i++) {
-              if (response.data.hosts[i].schedulable) {
-                this.hosts.push(response.data.hosts[i].name);
-              }
-
-              this.hosts.sort();
-              this.isWaiting = false;
-            }
+            this.hosts = hostOptions(response.data.hosts);
+            this.isWaiting = false;
           },
           (err) => {
             useErrorNotification(err);
@@ -980,7 +975,10 @@
       updateDisks() {
         this.isWaiting = true;
 
-        axiosInstance.get('disks' + '?expName=' + this.$route.params.id).then(
+        // Only the disks a disk change accepts, not their backing images.
+        const url = `disks?expName=${this.$route.params.id}&assignable=true`;
+
+        axiosInstance.get(url).then(
           (response) => {
             this.isWaiting = false;
 

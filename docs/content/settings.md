@@ -92,7 +92,7 @@ The following global flags are supported by all `phenix` subcommands:
 | `--bridge-mode` | `string` | `manual` | Bridge naming mode for experiments (`auto` uses experiment name for bridge; `manual` uses user-specified bridge name, or `phenix` if omitted). |
 | `--deploy-mode` | `string` | — | Deploy mode for minimega VMs (`all`, `no-headnode`, or `only-headnode`). |
 | `-h, --help` | — | — | Display help information for the command. |
-| `--hostname-suffixes` | `string` | `-minimega,-phenix` | Hostname suffixes to strip. |
+| `--hostname-suffixes` | `string` | `-minimega,-phenix` | Hostname suffixes to strip from the headnode name used in snapshot names and from the host names `GET /api/v1/hosts` displays, which also gives each host's minimega name as `minimega_name`. Schedules keep the host names minimega reports. |
 | `--log.console` | `string` | `stderr` | Destination output for console logs in text format (`stderr`, `stdout`, or a file path). |
 | `--log.level` | `string` | `info` | Level to log messages at (`debug`, `info`, `warn`, `error`). |
 | `--log.system.max-age` | `int` | `90` | Maximum number of days to retain old log files. |

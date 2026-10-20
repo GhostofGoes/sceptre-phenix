@@ -39,7 +39,46 @@ var (
 	activeMounts = make(map[string]*MountInfo) //nolint:gochecknoglobals // global state
 	// locks activeMounts map itself.
 	activeMountsMu sync.RWMutex //nolint:gochecknoglobals // global lock
+
+	// vmMounted reports whether a VM filesystem is mounted at a host path.
+	vmMounted = vm.Mounted //nolint:gochecknoglobals // replaced by tests
 )
+
+// lookupMount returns the mount of the VM whose mount path is basePath. A VM
+// mounted by another process, such as `phenix vm mount`, is not in
+// activeMounts, so it gets a lock of its own: MountVM does not take such a
+// mount over, and UnmountVM only unmounts what MountVM mounted.
+//
+// A mount in activeMounts whose file system is gone, detached by an
+// experiment stop or by `phenix vm unmount`, is not mounted.
+func lookupMount(basePath string) (*MountInfo, bool) {
+	if !vmMounted(basePath) {
+		return nil, false
+	}
+
+	activeMountsMu.RLock()
+	mountInfo, exists := activeMounts[basePath]
+	activeMountsMu.RUnlock()
+
+	if exists {
+		return mountInfo, true
+	}
+
+	return &MountInfo{users: 0, lock: &sync.RWMutex{}}, true
+}
+
+// forgetStaleMount drops the entry of activeMounts for mapKey when the VM
+// file system it recorded is no longer mounted: an experiment stop and `phenix
+// vm unmount` detach mounts without telling this process, and the entry would
+// make MountVM answer 200 without mounting. The caller must hold
+// activeMountsMu.
+func forgetStaleMount(mapKey string) {
+	if _, exists := activeMounts[mapKey]; exists && !vmMounted(mapKey) {
+		plog.Info(plog.TypeSystem, "forgetting mount that is gone", "mount", mapKey)
+
+		delete(activeMounts, mapKey)
+	}
+}
 
 // MountVM - POST /experiments/{exp}/vms/{name}/mount.
 func MountVM(w http.ResponseWriter, r *http.Request) {
@@ -65,8 +104,12 @@ func MountVM(w http.ResponseWriter, r *http.Request) {
 	activeMountsMu.Lock()
 	defer activeMountsMu.Unlock()
 
+	forgetStaleMount(mapKey)
+
 	mountInfo, exists := activeMounts[mapKey]
-	if exists {
+
+	switch {
+	case exists:
 		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 		plog.Info(
 			plog.TypeAction,
@@ -80,7 +123,13 @@ func MountVM(w http.ResponseWriter, r *http.Request) {
 		)
 
 		mountInfo.users += 1
-	} else {
+	case vmMounted(mapKey):
+		// Another process, such as `phenix vm mount`, mounted the VM. Serve its
+		// files but leave the mount to that process: recording it here would let
+		// the next UnmountVM unmount it.
+		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
+		plog.Info(plog.TypeAction, "vm already mounted by another process", "mount", mapKey, "user", user)
+	default:
 		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 		plog.Info(
 			plog.TypeAction,
@@ -88,7 +137,7 @@ func MountVM(w http.ResponseWriter, r *http.Request) {
 			"exp",
 			vars["exp"],
 			"vm",
-			vars["vm"],
+			vars["name"],
 			"path",
 			mapKey,
 			"user",
@@ -97,7 +146,7 @@ func MountVM(w http.ResponseWriter, r *http.Request) {
 
 		if err := vm.MountFilesystem(vars["exp"], vars["name"]); err != nil {
 			plog.Error(plog.TypeSystem, "creating mount", "mount", mapKey, "err", err)
-			http.Error(w, fmt.Sprintf("Error mounting: %s", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Error mounting: %s", err), vmErrorStatus(err))
 
 			return
 		}
@@ -132,11 +181,14 @@ func UnmountVM(w http.ResponseWriter, r *http.Request) {
 	activeMountsMu.Lock()
 	defer activeMountsMu.Unlock()
 
-	mountInfo, exists := activeMounts[mapKey]
-	if exists {
-		mountInfo.users -= 1
+	// A mount that is gone needs no unmount.
+	forgetStaleMount(mapKey)
 
-		if mountInfo.users == 0 {
+	mountInfo, exists := activeMounts[mapKey]
+
+	switch {
+	case exists:
+		if mountInfo.users <= 1 {
 			user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 			plog.Info(
 				plog.TypeAction,
@@ -149,21 +201,24 @@ func UnmountVM(w http.ResponseWriter, r *http.Request) {
 
 			mountInfo.lock.Lock()
 
+			// The count stays as it was when the unmount fails, so a retry
+			// unmounts again.
 			if err := vm.UnmountFilesystem(vars["exp"], vars["name"]); err != nil {
 				mountInfo.lock.Unlock()
 
 				plog.Error(plog.TypeSystem, "unmounting", "mount", mapKey, "err", err)
-				http.Error(
-					w,
-					fmt.Sprintf("Error unmounting: %s", err),
-					http.StatusInternalServerError,
-				)
+				http.Error(w, fmt.Sprintf("Error unmounting: %s", err), vmErrorStatus(err))
 
 				return
 			}
 
 			delete(activeMounts, mapKey)
+
+			// A file handler that looked the mount up before may wait for it.
+			mountInfo.lock.Unlock()
 		} else {
+			mountInfo.users -= 1
+
 			user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 			plog.Info(
 				plog.TypeAction,
@@ -176,7 +231,11 @@ func UnmountVM(w http.ResponseWriter, r *http.Request) {
 				user,
 			)
 		}
-	} else {
+	case vmMounted(mapKey):
+		// The UI unmounts when its file browser closes; the mount of another
+		// process stays for that process to unmount.
+		plog.Info(plog.TypeAction, "leaving vm mounted by another process", "mount", mapKey)
+	default:
 		plog.Warn(
 			plog.TypeSystem,
 			"tried to unmount VM whose lock was not in map",
@@ -214,12 +273,7 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
+	mountInfo, exists := lookupMount(basePath)
 	if !exists {
 		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
 
@@ -230,6 +284,25 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 	defer mountInfo.lock.RUnlock()
 
 	combinedPath := filepath.Join(basePath, vars["path"])
+
+	if err := validatePathWithin(combinedPath, basePath); err != nil {
+		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
+		plog.Error(
+			plog.TypeSecurity,
+			"user attempted getting path outside of mount",
+			"path",
+			combinedPath,
+			"user",
+			user,
+		)
+		http.Error(
+			w,
+			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
+			http.StatusBadRequest,
+		)
+
+		return
+	}
 	user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 	plog.Info(
 		plog.TypeAction,
@@ -273,25 +346,6 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(MountPathTimeout):
 		plog.Error(plog.TypeSystem, "timeout getting mount path", "path", combinedPath)
 		http.Error(w, "timeout getting path "+combinedPath, http.StatusInternalServerError)
-
-		return
-	}
-
-	if !strings.HasPrefix(combinedPath, basePath) {
-		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
-		plog.Error(
-			plog.TypeSecurity,
-			"user attempted getting path outside of mount",
-			"path",
-			combinedPath,
-			"user",
-			user,
-		)
-		http.Error(
-			w,
-			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
-			http.StatusBadRequest,
-		)
 
 		return
 	}
@@ -365,12 +419,7 @@ func DownloadMountFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
+	mountInfo, exists := lookupMount(basePath)
 	if !exists {
 		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
 
@@ -382,19 +431,7 @@ func DownloadMountFile(w http.ResponseWriter, r *http.Request) {
 
 	combinedPath := filepath.Join(basePath, vars["path"])
 
-	fileInfo, err := os.Stat(combinedPath)
-	if err != nil {
-		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
-		http.Error(
-			w,
-			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
-			http.StatusInternalServerError,
-		)
-
-		return
-	}
-
-	if !strings.HasPrefix(combinedPath, basePath) {
+	if err := validatePathWithin(combinedPath, basePath); err != nil {
 		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 		plog.Error(
 			plog.TypeSecurity,
@@ -408,6 +445,18 @@ func DownloadMountFile(w http.ResponseWriter, r *http.Request) {
 			w,
 			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
 			http.StatusBadRequest,
+		)
+
+		return
+	}
+
+	fileInfo, err := os.Stat(combinedPath)
+	if err != nil {
+		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
+		http.Error(
+			w,
+			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
+			http.StatusInternalServerError,
 		)
 
 		return
@@ -455,12 +504,7 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
+	mountInfo, exists := lookupMount(basePath)
 	if !exists {
 		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
 
@@ -471,19 +515,8 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 	defer mountInfo.lock.RUnlock()
 
 	combinedPath := filepath.Join(basePath, vars["path"])
-	//nolint:gosec // Path traversal via taint analysis
-	if _, err := os.Stat(combinedPath); err != nil {
-		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
-		http.Error(
-			w,
-			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
-			http.StatusInternalServerError,
-		)
 
-		return
-	}
-
-	if !strings.HasPrefix(combinedPath, basePath) {
+	if err := validatePathWithin(combinedPath, basePath); err != nil {
 		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 		plog.Error(
 			plog.TypeSecurity,
@@ -501,6 +534,17 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+	//nolint:gosec // Path traversal via taint analysis
+	if _, err := os.Stat(combinedPath); err != nil {
+		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
+		http.Error(
+			w,
+			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
+			http.StatusInternalServerError,
+		)
+
+		return
+	}
 
 	clientFile, handler, err := r.FormFile("file")
 	if err != nil {
@@ -512,31 +556,40 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 			"dest_path",
 			combinedPath,
 		)
-		http.Error(w, "Error uploading: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error uploading: "+err.Error(), http.StatusBadRequest)
+
+		return
 	}
 
 	defer func() { _ = clientFile.Close() }()
 
-	localFile, err := os.OpenFile( //nolint:gosec // Path traversal via taint analysis
-		filepath.Join(combinedPath, handler.Filename),
-		os.O_WRONLY|os.O_CREATE,
-		0o600,
-	)
-	if err != nil {
-		plog.Error(
-			plog.TypeSystem,
-			"error uploading file",
-			"err",
-			err.Error(),
-			"dest_path",
-			combinedPath,
-		)
+	if err := writeUpload(filepath.Join(combinedPath, handler.Filename), clientFile); err != nil {
+		plog.Error(plog.TypeSystem, "error uploading file", "err", err.Error(), "dest_path", combinedPath)
 		http.Error(w, "Error uploading: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+}
+
+// writeUpload writes the uploaded file src to path, replacing a file there:
+// without truncating it, a shorter upload kept the old file's tail.
+func writeUpload(path string, src io.Reader) error {
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is checked to be within the mount
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", path, err)
 	}
 
-	defer func() { _ = localFile.Close() }()
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
 
-	_, _ = io.Copy(localFile, clientFile)
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("closing %s: %w", path, err)
+	}
+
+	return nil
 }
 
 // CopyExperimentFileToMount copies a same-experiment file into a mounted VM directory.
@@ -559,10 +612,7 @@ func CopyExperimentFileToMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-	mountInfo, exists := activeMounts[basePath]
-	activeMountsMu.RUnlock()
-
+	mountInfo, exists := lookupMount(basePath)
 	if !exists {
 		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
 
