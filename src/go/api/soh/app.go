@@ -146,12 +146,28 @@ func (s *SOH) PostStart(ctx context.Context, exp *types.Experiment) error {
 		return nil
 	}
 
+	// A stop cancels ctx and waits for the post-start apps only so long, and
+	// the checks' commands would create the cleared namespace again. A stop
+	// from another process leaves ctx alone, so the delay and the checks also
+	// end once the stored run is no longer this one.
+	ctx, done := untilRunChanges(ctx, exp.Metadata.Name, exp.StartTime())
+	defer done()
+
 	if s.md.startupDelay > 0 {
 		logger.Info("Waiting before running SoH checks", "delay", s.md.startupDelay)
-		time.Sleep(s.md.startupDelay)
+
+		select {
+		case <-time.After(s.md.startupDelay):
+		case <-ctx.Done():
+			return fmt.Errorf("waiting before running SoH checks: %w", context.Cause(ctx))
+		}
 	}
 
 	err = s.runChecks(ctx, exp)
+	if cause := context.Cause(ctx); errors.Is(cause, types.ErrExperimentRunChanged) {
+		return fmt.Errorf("running initial SoH checks: %w", cause)
+	}
+
 	if err != nil {
 		if s.md.ExitOnError {
 			return fmt.Errorf("running initial SoH checks: %w", err)
@@ -163,10 +179,50 @@ func (s *SOH) PostStart(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
+// storedRunInterval is how often the post-start stage checks that the
+// experiment is still stored with the run it began for.
+var storedRunInterval = 5 * time.Second //nolint:gochecknoglobals // shortened by tests
+
+// untilRunChanges returns a copy of ctx that is canceled, with the cause
+// types.ErrExperimentRunChanged, once the named experiment is no longer stored
+// with the given start time. The caller must call the returned function.
+func untilRunChanges(ctx context.Context, name, start string) (context.Context, func()) {
+	interval := storedRunInterval
+	ctx, cancel := context.WithCancelCause(ctx)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !app.ExperimentStillStarted(name, start) {
+					cancel(fmt.Errorf("experiment %s: %w", name, types.ErrExperimentRunChanged))
+
+					return
+				}
+			}
+		}
+	}()
+
+	return ctx, func() { cancel(context.Canceled) }
+}
+
 func (s *SOH) Running(ctx context.Context, exp *types.Experiment) error {
 	err := s.decodeMetadata(exp)
 	if err != nil {
 		return err
+	}
+
+	// A dry run has no VMs to check, and minimega would create the namespace
+	// for the checks' commands.
+	if s.options.DryRun {
+		plog.LoggerFromContext(ctx, plog.TypeSoh).Info("skipping SoH checks since this is a dry run")
+
+		return nil
 	}
 
 	s.apps = exp.Spec.Scenario().Apps()
@@ -174,7 +230,14 @@ func (s *SOH) Running(ctx context.Context, exp *types.Experiment) error {
 	return s.runChecks(ctx, exp)
 }
 
-func (SOH) Cleanup(ctx context.Context, exp *types.Experiment) error {
+func (s *SOH) Cleanup(ctx context.Context, exp *types.Experiment) error {
+	// A dry run sent no C2 commands, and minimega would create the namespace
+	// to clear their responses. Neither did a start refused before it stored
+	// its run: the stored experiment is then stopped, or a dry run.
+	if s.options.DryRun || !exp.Running() || exp.DryRun() {
+		return nil
+	}
+
 	err := mm.ClearC2Responses(mm.C2NS(exp.Spec.ExperimentName()))
 	if err != nil {
 		return fmt.Errorf("deleting minimega C2 responses: %w", err)

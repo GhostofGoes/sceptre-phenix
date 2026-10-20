@@ -165,7 +165,9 @@ details. (In this screenshot, the mouse is hovering over the traffic for IP
   only delays SoH when it first runs at the experiment start. It will not delay
   SoH when run manually later by clicking the 'Run SoH' button in the UI or
   running `phenix exp trigger running` (or the deprecated `trigger-running`
-  command) from the command line. The default is no delay.
+  command) from the command line. The default is no delay. A stop of the
+  experiment, also from another process, ends the delay and the checks of the
+  experiment start within a few seconds.
 
 * `hostCustomTests`: If present, a map of custom tests to run on the given
   hosts.
