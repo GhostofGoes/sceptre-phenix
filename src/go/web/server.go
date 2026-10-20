@@ -427,6 +427,10 @@ func Start(opts ...ServerOption) error {
 
 	go broker.Start()
 
+	plog.Info(plog.TypeSystem, "starting port forward service")
+
+	forward.Start()
+
 	plog.Info(plog.TypeSystem, "starting scorch processors")
 
 	go scorch.Start(o.basePath)
