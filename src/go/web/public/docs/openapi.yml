@@ -799,8 +799,20 @@ paths:
                   type: integer
                 disk:
                   type: string
+                  description: >
+                    the image the VM boots from, of a stopped experiment: a
+                    disk of a node in the topology, or an image directly in
+                    minimega's files directory that is not a disk snapshot
+                    phenix made at start (a name ending in _snapshot); with
+                    snapshot false, only a disk the topology gave a node
                 dnb:
                   type: boolean
+                snapshot:
+                  type: boolean
+                  description: >
+                    whether the VM boots a throwaway snapshot of its disk; a VM
+                    with false writes its disk, so false needs a disk the
+                    topology gave a node, not one only a disk change picked
                 interface:
                   type: object
                   properties:
@@ -911,6 +923,44 @@ paths:
           required: true
           schema:
             type: string
+        - name: replicate-injects
+          in: query
+          description: >
+            for a request without a body, any value recreates the VM's disk
+            snapshot and replays its injections and deletions; a request with
+            a body sets injects instead, and this parameter is ignored
+          required: false
+          schema:
+            type: string
+      requestBody:
+        description: >
+          the settings to change; an empty body keeps the VM's CPUs, memory
+          and disk
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cpus:
+                  type: integer
+                ram:
+                  type: integer
+                disk:
+                  type: string
+                  description: >
+                    <image>[,<interface>][,<cache mode>], where the image is
+                    a disk of a node in the topology, or is directly in
+                    minimega's files directory and is not a disk snapshot
+                    phenix made at start (a name ending in _snapshot); for a
+                    VM with snapshot false, only a disk the topology gave a
+                    node
+                injects:
+                  type: boolean
+                  description: >
+                    recreate the VM's disk snapshot and replay its injections
+                    and deletions; replicate-injects does this for a request
+                    without a body
       responses:
         "200":
           description: successful operation
@@ -1039,6 +1089,11 @@ paths:
                   type: integer
                 filename:
                   type: string
+                  description: >
+                    only its base name is used, with a .pcap extension; that
+                    name, extension included, may hold only letters, digits,
+                    '.', '_' and '-', must start with a letter or digit, may
+                    not contain "..", and is at most 128 characters long
       responses:
         "204":
           description: successful operation
@@ -1120,6 +1175,9 @@ paths:
               properties:
                 filename:
                   type: string
+                  pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  maxLength: 128
+                  description: the snapshot name, which may not contain ".."
       responses:
         "204":
           description: successful operation

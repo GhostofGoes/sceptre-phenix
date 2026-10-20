@@ -371,7 +371,11 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 			}
 
 			vms, err := vm.List(expName)
-			if err != nil {
+
+			switch {
+			case errors.Is(err, vm.ErrPartialList):
+				plog.Warn(plog.TypeSystem, "sending the VMs the other hosts listed", "exp", expName, "err", err)
+			case err != nil:
 				plog.Error(
 					plog.TypeSystem,
 					"getting list of VMs for experiment",

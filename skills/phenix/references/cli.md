@@ -137,7 +137,8 @@ phenix vm info <exp> [vm]                            # table of VM(s)
 phenix vm pause|resume|restart|shutdown|kill <exp> [vm]
 phenix vm reset-disk <exp> [vm]
 phenix vm redeploy <exp> [vm] [-c <cpus>] [-m <MB>] [-d <disk image>] [-p <partition>] \
-  [-r|--replicate-injects]                           # -r recreates the disk snapshot and injections
+  [-r|--replicate-injects]                           # -r recreates the disk snapshot, injections and deletions
+                                                     # (snapshot: true nodes only; refused for others);
 phenix vm set <exp> [vm] [-c|--cpu <n>] [-m|--mem <MB>] [-d|--disk <image>] [-p|--partition <n>] \
   [--do-not-boot] [--snapshot] [-L key=value ...] [--append-labels]
 phenix vm net connect <exp> <vm> <iface index> <vlan id>
@@ -147,13 +148,35 @@ phenix vm capture start-subnet <exp> <subnet>
 phenix vm capture stop <exp> <vm>
 phenix vm capture stop-subnet <exp> <subnet>
 phenix vm capture stop-all <exp>
-phenix vm memory-snapshot <exp> <vm> <path>
+phenix vm memory-snapshot <exp> <vm> <name>          # writes <name>.elf to the experiment files
 phenix vm mount <exp> <vm> [host path]               # mount a running VM's filesystem on the headnode
 phenix vm unmount <exp> <vm>
 ```
 
+A `vm set` disk (`-d`, or `disk` in the REST PATCH body) must be an image a
+redeploy accepts, without the `,<interface>` and `,<cache mode>` options
+(REST: 400). A redeploy disk (`-d`, or `disk` in the REST body) is
+`<image>[,<interface>][,<cache mode>]` and must name a disk of a node in the
+topology, or an image directly in minimega's files directory (no
+subdirectory, no `*_snapshot` disk snapshot), written with letters, digits,
+`.`, `_`, `+`, `-` and `/` only and without `..`; any other disk is refused
+(REST: 400). A VM with `snapshot: false` writes its disk, so it may run only
+on a disk the topology gave a node: `vm set` refuses a disk change or
+`--snapshot=false` that would leave it on any other image, and a redeploy of
+such a VM refuses any other disk (REST: 400). The topology's disk of a VM
+whose disk `vm set` replaced is kept in the node annotation
+`phenix/topology-disk`.
+
+Snapshot, capture and memory snapshot names may hold only letters, digits,
+`.`, `_` and `-`, start with a letter or digit, hold no `..`, and are at most
+128 characters long: they reach
+minimega `shell` commands and QEMU's `exec:` migration URI. Other names are
+refused (REST: 400); a capture uses only the base name of its output file.
+
 `phenix vm mount` mounts to `<mount-dir>/<experiment>/<vm>` unless an explicit
-host path is given, and prints the resulting mount path; `<mount-dir>` comes
+host path is given, and prints the resulting mount path. It fails for a VM
+already mounted at another path, and for a path holding characters other than
+letters, digits, `.`, `_`, `+`, `-` and `/`; `<mount-dir>` comes
 from the `--mount-dir` root flag (`PHENIX_MOUNT_DIR`), defaulting to
 `<base-dir.phenix>/mounts`.
 
