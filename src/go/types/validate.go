@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
 
@@ -44,7 +45,36 @@ func ValidateConfigSpec(c store.Config) error {
 		return fmt.Errorf("validating config: %w", err)
 	}
 
+	if err := checkStoredVersion(c); err != nil {
+		return fmt.Errorf("%w: %w", ErrValidationFailed, err)
+	}
+
 	return ValidateSchema(c.Kind, version.LATEST_VERSION, c.Spec)
+}
+
+// checkStoredVersion refuses a config of a kind phenix decodes into a
+// versioned spec, such as a Topology or a Scenario, whose apiVersion is not
+// the stored version of that kind, the one the latest schemas describe.
+// phenix has no config upgraders, so it could not read such a config, such as
+// a v1 Scenario, whatever its spec. Kinds without a versioned spec, such as
+// Image, are validated against the latest schemas as they are.
+func checkStoredVersion(c store.Config) error {
+	if _, err := version.GetStoredSpecForKind(c.Kind); err != nil {
+		return nil //nolint:nilerr // the kind has no versioned spec to check
+	}
+
+	if stored := version.StoredVersion[c.Kind]; c.APIVersion() != stored {
+		return fmt.Errorf(
+			"unknown %s version %s: %s configs need apiVersion %s/%s",
+			strings.ToLower(c.Kind),
+			c.APIVersion(),
+			c.Kind,
+			store.APIGroup,
+			stored,
+		)
+	}
+
+	return nil
 }
 
 // ValidateSchema validates value against the component schema called name in

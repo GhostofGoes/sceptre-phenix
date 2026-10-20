@@ -189,8 +189,15 @@ components:
                 MGMT: 200
             min:
               type: integer
+              description: >-
+                The VLAN range's min, the first VLAN ID minimega may assign,
+                1-4095; set it with max, or leave both 0 for minimega's default
+                pool.
             max:
               type: integer
+              description: >-
+                The VLAN range's max, 2-4096 and above min; minimega assigns
+                VLAN IDs below it, never the max itself.
         schedule:
           type: object
           additionalProperties:
@@ -829,6 +836,6 @@ components:
         device:
           type: string
           minLength: 1
-          default: /dev/ttyS0
-          example: /dev/ttyS0
+          default: /dev/ttyphenix0
+          example: /dev/ttyphenix0
           pattern:

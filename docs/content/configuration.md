@@ -126,6 +126,61 @@ Optional values for a node in the topology configuration can include:
     [C2 Startup Script Delivery](apps.md#c2-startup-script-delivery) for the
     requirements and configuration options.
 
+!!! note
+    Each file injection needs a `src`, the file on the phēnix host, and a
+    `dst`, its path in the VM. A relative `src` is relative to the
+    experiment's base directory. phēnix refuses an injection whose `src` is
+    empty or `null`, which would otherwise inject that whole directory: the
+    topology schema refuses it, and an experiment create or update fails
+    with an error naming the node and the destination, such as
+    `validating node <hostname>: injection to "<dst>" has no source`.
+    Experiment create and update also refuse a `src` or `dst` with a
+    control character, a `$`, which minimega expands, or a `:`, where minimega
+    splits the source from the destination, and a `dst` with a `..` element,
+    which minimega would follow out of the VM's disk into the phēnix host's
+    files. A deletion's `path` follows the same rules as a `dst`, with `,`,
+    where minimega splits the list of paths, in place of `:`. Create and
+    update check every node but external ones, even a node whose files are
+    not injected at the next start (`do_not_boot`, `snapshot: false` or
+    `inject_partition: 0`), since `phenix vm set` can change those settings
+    without validating the experiment again. A start refuses the same
+    injections and deletions only where it uses them: in its minimega
+    script, which injects files only into a node that boots with a disk
+    snapshot and a nonzero `inject_partition`, and in the experiment a
+    pre-start user app returns, for every node but external ones. The error
+    names the node. A Topology config on its own, created with `phenix config
+    create` or saved through the Builder's topology routes, is checked against
+    its schema only: these checks, and the `permissions` and `delay` checks
+    below, apply to the experiments created from it.
+
+    An injection's `permissions` are an octal mode from `0000` to `0777`, such
+    as `0644`. minimega copies the source's mode into the VM, so phēnix sets
+    the mode of a source in the experiment's base directory; for a regular
+    file anywhere else, it injects a copy with that mode, written to the
+    `injections` directory of the experiment's base directory, and leaves the
+    host file's mode alone. If phēnix cannot set the mode of a source in the
+    base directory, the start or redeploy fails, naming the injection. It
+    refuses `permissions` on a directory, or any other source that is not a
+    regular file, outside the base directory, which phēnix cannot copy with
+    that mode; leave out `permissions` to inject it with its own. Since a
+    source in the base directory is changed in place, two injections that
+    give it different `permissions`, in one node or in two nodes the start
+    injects into, are refused: both would get the mode set last.
+
+!!! note
+    The minimega script writes a node's `hostname`, `vm_type` and `cpu`, its
+    drives' `image`, `interface` and `cache_mode`, its interfaces' `bridge`,
+    `vlan`, `mac` and `driver`, the experiment's VLAN aliases and its schedule
+    hosts unquoted. phēnix refuses any of them that minimega would not read as
+    one argument, such as one with whitespace, a quote, a backslash or a `#`,
+    and a node's `commands` entry or `advanced` setting with a control
+    character other than the line break a YAML block scalar ends with: a line
+    break would start another minimega command. Experiment
+    create and update fail with an error naming the field and its node. A
+    start fails the same way for what its scripts render: the VLAN
+    aliases, the `hostname` and `commands` of every node but external ones,
+    and the other fields of the nodes that boot.
+
 #### Delay Start
 
 It is possible to delay the start of a VM with the `delay` value. There are
@@ -135,7 +190,9 @@ three options available to set, but on only one option can be set:
    start either through the phēnix UI or command line (the latter can be by
    phēnix or minimega commands).
 
-1. `timer` is a string that is set as a delay in minutes; e.g., `5m`.
+1. `timer` is a string that is set as a delay in minutes; e.g., `5m`. It
+   must be a duration with a unit, such as `30s` or `5m`, and not negative: a
+   plain number such as `30` is refused.
 
 1. `c2` requires minimega command and control. Note in the example below that
    the hostname `AD1` will be delayed starting until the VM `host-00` has
@@ -322,7 +379,7 @@ spec:
         type: serial
         udp_port: 8989
         baud_rate: 9600
-        device: /dev/ttyS0
+        device: /dev/ttyphenix0
   - type: VirtualMachine
     general:
       hostname: AD1

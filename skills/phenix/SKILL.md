@@ -59,8 +59,18 @@ for a complete, copyable two-node topology):
 - `network.interfaces[]`: `name`, `vlan`, `type: ethernet`, `proto: static|dhcp|manual`
   (router/firewall interfaces also accept `ospf`), `address`, `mask`, `gateway`, `bridge`
 - `network.rulesets[]`: firewall rules with `action: accept|drop|reject`
-- `injections[]` / `deletions[]`: files to inject into or remove from the disk image before boot
-- `delay`: boot delay (timer, user-ack, or C2/miniccc-based)
+- `injections[]` / `deletions[]`: files to inject into or remove from the disk image before boot;
+  an injection needs a non-empty `src` (a relative one is under the experiment's base directory);
+  paths with a control character or `$`, an injection path with `:`, a deletion path with `,`,
+  and a `dst` or deletion path with a `..` element are refused; `permissions` (octal, at most
+  `0777`) are set on a `src` in the experiment's base directory, and on a copy of any other regular
+  file; a directory outside the base directory cannot carry `permissions`, and two injections
+  may not give one base-directory `src` different `permissions`
+- the minimega script writes `hostname`, `vm_type`, `cpu`, drive and interface fields, VLAN
+  aliases and schedule hosts unquoted, so phenix refuses one with whitespace, a quote, `\`, `#`
+  or a control character, and a `commands` entry or `advanced` setting with a control character
+  other than trailing whitespace
+- `delay`: boot delay (timer, user-ack, or C2/miniccc-based); `timer` needs a unit (`30s`, `5m`)
 - `annotations`: free-form hints for apps; the ones the default apps read are in
   [`references/annotations.md`](references/annotations.md)
 - An `external` node represents a physical/non-minimega host in the topology (not scheduled/booted).
@@ -227,8 +237,10 @@ curl -H "X-Phenix-Auth-Token: $TOKEN" http://localhost:3000/api/v1/experiments
   file outright, so it has the same effect as removing it by hand and any running phenix
   process needs a restart afterwards.
 - **Scenario `apiVersion` differs from Topology/Experiment** — Scenario currently uses
-  `phenix.sandia.gov/v2` while Topology/Image typically use `v1`; mixing them up in a
-  hand-written config causes schema validation failures.
+  `phenix.sandia.gov/v2` while Topology/Image typically use `v1`. phenix reads a Topology,
+  Scenario or Experiment only at that version, so validation refuses any other
+  `apiVersion`, such as a v1 Scenario, whatever its `apps`, with `unknown scenario version
+  v1: Scenario configs need apiVersion phenix.sandia.gov/v2`.
 - **`phenix config edit` on a running experiment's config requires `--force`** — edits are
   normally blocked once an experiment exists to avoid drift between the stored config and
   the deployed state.

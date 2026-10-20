@@ -34,6 +34,15 @@ All notable changes to this project will be documented in this file.
 - **Workflow Schema (breaking)**: Workflow configs are validated against the new `Workflow` schema, so unknown or misspelled keys, values of the wrong type and a missing `spec` return 400 instead of being ignored. ([#445](https://github.com/sandialabs/sceptre-phenix/pull/445))
 - **CLI**: `phenix mm` now stops parsing its own flags at the first minimega argument, so flags meant for minimega (for example the `-a` in `phenix mm cc exec ls -a`) are passed through. `phenix mm` and global flags must now come *before* the minimega command.
 - **CLI**: Upgraded cobra from v1.0.0 to v1.10.2 and pflag from v1.0.3 to v1.0.9. `phenix completion bash` now generates cobra's V2 Bash script, and `phenix completion powershell` includes descriptions.
+- **Pinned VLANs (breaking)**: Refuse IDs at or above the max.
+- **C2 Delays (breaking)**: Refuse waits on hostnames that never register.
+- **Injection Sources (breaking)**: Refuse an empty or null `src`.
+- **Injection Permissions (breaking)**: Octal modes only; no directories outside base.
+- **Injection Permissions (breaking)**: Refuse two modes for one base-directory source.
+- **Delayed Starts (breaking)**: Reject bad `delay.timer` values; list enforced delays.
+- **Disk Injections (breaking)**: Escape paths; refuse ones minimega would misread.
+- **VM Settings (breaking)**: Escape `qemu-override`; refuse inner `advanced` line breaks.
+- **minimega Scripts (breaking)**: Refuse values minimega would split or misread.
 - **VM Label Limits (breaking)**: Refuse running-VM labels minimega cannot store.
 - **C2 Commands (breaking)**: Refuse commands minimega would cut at `#`.
 
@@ -51,12 +60,18 @@ All notable changes to this project will be documented in this file.
 
 - **Start Progress**: Never create or re-create the minimega namespace.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
+- **VLAN Range Errors**: Name the max VLAN ID correctly.
 - **Running VM Labels**: Escape label quotes and backslashes for minimega.
 - **VM Flush**: Keep other powered-off VMs on kill and redeploy.
 - **Per-VM Start**: Start every VM despite failures; name failed VMs.
+- **Linux Startup Scripts**: Make hostname, DNS and domain join idempotent.
+- **Linux Hostname Script**: Rename adjacent `phenix` and `phenix.<domain>` aliases.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
+- **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **Linux Interface MTU**: Apply topology interface MTUs on Linux guests.
+- **Serial Device Default**: Suggest `/dev/ttyphenix0` instead of the guest's `/dev/ttyS0`.
 - **Port Forwards**: Keep forwards when `cc tunnel list` fails.
 - **minimega Restarts**: Retry unsent commands once on a fresh connection.
 - **C2 Commands**: Pass `$` to guests instead of minimega's environment.
@@ -67,6 +82,7 @@ All notable changes to this project will be documented in this file.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
 - **Files Directory**: Ask minimega after `--base-dir.*` apply; retry until answered.
 - **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
+- **Start Script Labels**: Escape quotes and backslashes for minimega.
 - **C2 Commands**: Clear minimega's `cc filter` after every attempt.
 - **C2 Responses**: Stop truncating guest output at header-like lines.
 - **C2 Responses**: Keep guest output lines over 1 MiB whole.
@@ -115,6 +131,9 @@ All notable changes to this project will be documented in this file.
 - **Workflow configs**: `POST /api/v1/workflow/configs/{branch}` no longer exposes server environment variables in its errors to callers who may not write that config, and checks the role's config names when creating one. ([#436](https://github.com/sandialabs/sceptre-phenix/pull/436))
 - **VM Labels**: Stop minimega expanding `$` or fetching `file:` labels.
 - **minimega Commands**: Refuse arguments, such as VLANs, that crash minimega.
+- **Disk Injections**: Stop paths running commands or changing host files.
+- **Injection Permissions**: Stop chmod-ing host files; inject copies instead.
+- **minimega Scripts**: Stop config values running head node shell commands.
 
 ## [1.0.0]
 
