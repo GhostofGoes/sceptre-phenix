@@ -10,7 +10,7 @@ has a matching config-file key and `PHENIX_*` env var):
 
 | Flag | Config key / Env var | Default | Description |
 |---|---|---|---|
-| `--store.endpoint` | `store.endpoint` / `PHENIX_STORE_ENDPOINT` | `bolt:///etc/phenix/store.bdb` (root) or `bolt://~/.phenix.bdb` (non-root) | Data store endpoint (`bolt://...` or `etcd://host:port`) |
+| `--store.endpoint` | `store.endpoint` / `PHENIX_STORE_ENDPOINT` | `bolt:///etc/phenix/store.bdb` (root) or `bolt://$HOME/.phenix.bdb` (non-root; under `sudo phenix ...`, also through `setsid`, `nohup` or `env`, the invoking user's) | Data store endpoint (`bolt://...` or `etcd://host:port`) |
 | `--base-dir.phenix` | `base-dir.phenix` / `PHENIX_BASE_DIR_PHENIX` | `/phenix` | Base phēnix data directory |
 | `--base-dir.minimega` | `base-dir.minimega` / `PHENIX_BASE_DIR_MINIMEGA` | `/tmp/minimega` | Base minimega directory |
 | `--base-dir.injects` | `base-dir.injects` / `PHENIX_BASE_DIR_INJECTS` | `<base-dir.phenix>/injects` | Where `phenix workflow apply` stages `phenix-injects/` (as `<base-dir.injects>/<name>`). The server's value wins over the CLI's own unless the flag is given; see the `injects` step in [`workflow.md`](workflow.md). Use an absolute path |
@@ -34,6 +34,13 @@ variable** (`PHENIX_*`) → **4. built-in default**. See
 [Settings & Configuration](https://phenix.sceptre.dev/latest/settings/) for the
 full settings reference, including UI-only settings (`ui.logs.level`,
 `ui.features`, `ui.file-server-endpoint`) not exposed as root-level CLI flags.
+
+phenix reads the first `config.*` it finds in the current directory, then
+`~/.config/phenix/` (a regular user, or the user who ran `sudo phenix ...`,
+also through `setsid`, `nohup` or `env`, as in `sudo setsid nohup phenix ui`),
+then `/etc/phenix/`. When there is none, it creates an empty `config.yaml` to
+watch: in `/etc/phenix/` when it runs as root, `sudo` included, and in
+`~/.config/phenix/` otherwise.
 
 `phenix ui --features vm-mount` (equivalently `ui.features: vm-mount` in
 `config.yaml`, or `PHENIX_UI_FEATURES=vm-mount`) enables the optional
@@ -80,7 +87,10 @@ YAML/JSON file (in which case it's auto-created as a config first).
 
 `start all` starts every stopped experiment. `--dry-run` (also on `restart`)
 does everything except call out to minimega, which isolates config and
-scheduling problems from minimega problems. `--honor-run-periodically` keeps
+scheduling problems from minimega problems. A dry-run experiment counts as
+running for `stop`, `delete` and `reconfigure`, but `start <name>` starts it
+again, with or without `--dry-run`, as `POST /api/v1/experiments/{name}/start`
+does; `start all` leaves it alone. `--honor-run-periodically` keeps
 the process in the foreground re-running `running` stages on their
 `runPeriodically` interval.
 
@@ -142,6 +152,7 @@ phenix vm reset-disk <exp> [vm]
 phenix vm redeploy <exp> [vm] [-c <cpus>] [-m <MB>] [-d <disk image>] [-p <partition>] \
   [-r|--replicate-injects]                           # -r recreates the disk snapshot, injections and deletions
                                                      # (snapshot: true nodes only; refused for others);
+                                                     # -c/-m default to the VM's current size
 phenix vm set <exp> [vm] [-c|--cpu <n>] [-m|--mem <MB>] [-d|--disk <image>] [-p|--partition <n>] \
   [--do-not-boot] [--snapshot] [-L key=value ...] [--append-labels]
 phenix vm net connect <exp> <vm> <iface index> <vlan id>
@@ -288,7 +299,7 @@ such as 300-310 and 311-320.
 ## Other subcommands
 
 ```bash
-phenix mm <minimega args>...     # pass raw commands to (or attach to) minimega
+phenix mm <minimega args>...     # pass raw commands to (or attach to) minimega; exits nonzero on minimega errors
 phenix settings list|get|set|unset [key] [value]
 phenix settings db ...            # legacy BoltDB-backed settings
 phenix ui                         # run the phenix web UI/API server
@@ -306,4 +317,5 @@ argument; everything after it is passed to minimega unchanged, so
 for minimega as needed; a single argument is sent as-is, so
 `phenix mm -n my-exp "vm info"` passes a whole minimega command line. The
 command exits non-zero, and logs the error, when minimega reports an error or
-the connection to minimega is lost, so scripts can check its exit status.
+the connection to minimega is lost, so scripts can check its exit status;
+`phenix mm quit` exits 0, although minimega shuts down without answering.

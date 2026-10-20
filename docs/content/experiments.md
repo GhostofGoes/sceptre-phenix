@@ -449,4 +449,7 @@ phenix exp reconfigure my-experiment
 ```bash
 # Test experiment startup logic without deploying minimega VMs
 phenix exp start my-experiment --dry-run
+
+# Then deploy it for real; a dry-run experiment launched no VMs
+phenix exp start my-experiment
 ```
