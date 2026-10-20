@@ -200,6 +200,8 @@ func (u UserComponent) run(ctx context.Context, stage Action, cmd string, data [
 			"PHENIX_LOG_FILE=stderr",
 			"PHENIX_DRYRUN="+strconv.FormatBool(u.options.Exp.DryRun()),
 			"PHENIX_SCORCH_STARTTIME="+u.options.StartTime,
+			// The suffixes core trims from host names to tell the headnode.
+			"PHENIX_HOSTNAME_SUFFIXES="+common.HostnameSuffixes,
 		),
 		shell.StreamStderr(stderrChan),
 	}

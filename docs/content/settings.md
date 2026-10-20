@@ -169,6 +169,7 @@ phēnix sets these itself when it launches an app:
 | `PHENIX_LOG_FILE` | `stderr` | App logs stream back to phēnix rather than to a file. |
 | `PHENIX_DRYRUN` | `true` / `false` | Whether the run is a dry run. |
 | `PHENIX_STORE_ENDPOINT` | `store.endpoint` | Data store endpoint (user apps only). |
+| `PHENIX_HOSTNAME_SUFFIXES` | `hostname-suffixes` | Comma-separated suffixes phēnix trims from host names to tell the headnode. Set but empty when `hostname-suffixes` is empty: trim none, not the defaults. |
 | `PHENIX_SCORCH_STARTTIME` | run start time | Scorch components only. |
 
 The rest are inherited from the phēnix process:

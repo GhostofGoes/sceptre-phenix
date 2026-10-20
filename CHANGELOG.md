@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - **CLI**: Added `phenix minimega` as an alias for `phenix mm`, and `-a` and `-n` as shorthands for `--attach` and `--namespace`.
 - **CLI**: Added tab completion for `phenix mm`, which will now suggest minimega commands from the running minimega and `--namespace` from the names of running experiments.
 - **CLI**: `phenix vlan alias <experiment> <alias>` now prints the VLAN ID of that alias, or an error if the alias doesn't exist or doesn't have a VLAN ID yet. Its shell completion also completes experiment and alias names.
+- **App Environment**: Pass `PHENIX_HOSTNAME_SUFFIXES` to apps and SCORCH components.
 
 ### Changed
 
