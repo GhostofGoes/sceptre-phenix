@@ -7,12 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,6 +132,46 @@ func phenixStdout(args ...string) (string, error) {
 	return string(out), nil
 }
 
+// phenixProc is a phenix CLI process the test does not wait for at once.
+type phenixProc struct {
+	mu   sync.Mutex
+	out  bytes.Buffer
+	done chan struct{}
+	err  error
+}
+
+func (p *phenixProc) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.out.Write(b)
+}
+
+func (p *phenixProc) finished() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// wait waits for the process and returns its output and exit error.
+func (p *phenixProc) wait(t *testing.T, timeout time.Duration) (string, error) {
+	t.Helper()
+
+	select {
+	case <-p.done:
+	case <-time.After(timeout):
+		t.Fatalf("phenix did not finish within %v", timeout)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.out.String(), p.err
+}
+
 // phenix runs the phenix CLI and fails the test when it exits nonzero.
 func phenix(t *testing.T, args ...string) string {
 	t.Helper()
@@ -136,6 +179,18 @@ func phenix(t *testing.T, args ...string) string {
 	out, err := phenixRun(args...)
 	if err != nil {
 		t.Fatalf("phenix %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+
+	return out
+}
+
+// phenixFails runs the phenix CLI and fails the test unless it exits nonzero.
+func phenixFails(t *testing.T, args ...string) string {
+	t.Helper()
+
+	out, err := phenixRun(args...)
+	if err == nil {
+		t.Fatalf("phenix %s succeeded, want failure\n%s", strings.Join(args, " "), out)
 	}
 
 	return out
@@ -229,6 +284,21 @@ func mm(t *testing.T, ns, command string) []mmResponse {
 	return resp
 }
 
+// mmText returns the simple (non-tabular) responses of a command, joined.
+func mmText(t *testing.T, ns, command string) string {
+	t.Helper()
+
+	var parts []string
+
+	for _, r := range mm(t, ns, command) {
+		if r.Response != "" {
+			parts = append(parts, r.Response)
+		}
+	}
+
+	return strings.Join(parts, "\n")
+}
+
 // mmRows flattens the tabular responses of a command into rows keyed by
 // header, adding the responding host under "host" when the table lacks it.
 func mmRows(resp []mmResponse) []map[string]string {
@@ -262,6 +332,20 @@ func mmTable(t *testing.T, ns, command string) []map[string]string {
 	return mmRows(mm(t, ns, command))
 }
 
+// mmNamespaces lists minimega's namespaces without entering (and so creating)
+// any of them.
+func mmNamespaces(t *testing.T) map[string]map[string]string {
+	t.Helper()
+
+	out := make(map[string]map[string]string)
+
+	for _, row := range mmTable(t, "", "namespace") {
+		out[row["namespace"]] = row
+	}
+
+	return out
+}
+
 // vmInfo returns minimega's vm info rows for namespace ns, keyed by VM name.
 func vmInfo(t *testing.T, ns string) map[string]map[string]string {
 	t.Helper()
@@ -273,6 +357,212 @@ func vmInfo(t *testing.T, ns string) map[string]map[string]string {
 	}
 
 	return out
+}
+
+// rawVLANs returns the VLAN of each alias minimega holds in namespace ns.
+func rawVLANs(t *testing.T, ns string) map[string]int {
+	t.Helper()
+
+	vlans := make(map[string]int)
+
+	for _, row := range mmTable(t, ns, "vlans") {
+		id, err := strconv.Atoi(row["vlan"])
+		if err != nil {
+			t.Fatalf("minimega vlans row %v: %v", row, err)
+		}
+
+		vlans[row["alias"]] = id
+	}
+
+	return vlans
+}
+
+// vmUUIDs returns the UUID minimega reports for each VM of namespace ns.
+func vmUUIDs(t *testing.T, ns string) map[string]string {
+	t.Helper()
+
+	uuids := make(map[string]string)
+
+	for name, row := range vmInfo(t, ns) {
+		uuids[name] = row["uuid"]
+	}
+
+	return uuids
+}
+
+// splitList splits a minimega list column such as `[LAN (101), WAN (102)]`.
+func splitList(column string) []string {
+	s := strings.TrimSuffix(strings.TrimPrefix(column, "["), "]")
+	if s == "" {
+		return nil
+	}
+
+	return strings.Split(s, ", ")
+}
+
+// ovsVsctl runs ovs-vsctl and returns its trimmed output.
+func ovsVsctl(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+
+	out, err := exec.CommandContext(t.Context(), "ovs-vsctl", args...).CombinedOutput()
+
+	return strings.TrimSpace(string(out)), err
+}
+
+// mustOVS runs ovs-vsctl and returns its trimmed output, failing the test when
+// it exits nonzero.
+func mustOVS(t *testing.T, args ...string) string {
+	t.Helper()
+
+	out, err := ovsVsctl(t, args...)
+	if err != nil {
+		t.Fatalf("ovs-vsctl %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+
+	return out
+}
+
+// wantTapsGone waits until no tap of taps is left on Open vSwitch or the host.
+func wantTapsGone(t *testing.T, taps []string) {
+	t.Helper()
+
+	eventually(t, 30*time.Second, 500*time.Millisecond, fmt.Sprintf("taps %v to be removed", taps), func() (bool, string) {
+		for _, tap := range taps {
+			if br, err := ovsVsctl(t, "port-to-br", tap); err == nil {
+				return false, fmt.Sprintf("%s is still on bridge %s", tap, br)
+			}
+
+			if _, err := os.Stat(filepath.Join("/sys/class/net", tap)); err == nil {
+				return false, tap + " still exists on the host"
+			}
+		}
+
+		return true, ""
+	})
+}
+
+// headnode is the minimega host name of this runner, as `host name` reports it.
+func headnode(t *testing.T) string {
+	t.Helper()
+
+	resp := mm(t, "", "host name")
+	if len(resp) == 0 || resp[0].Host == "" {
+		t.Fatal("minimega did not report its host name")
+	}
+
+	return resp[0].Host
+}
+
+// trimHostSuffixes trims the host name suffixes phenix strips by default
+// (--hostname-suffixes), as it does when it names snapshots.
+func trimHostSuffixes(host string) string {
+	for _, suffix := range []string{"-minimega", "-phenix"} {
+		host = strings.TrimSuffix(host, suffix)
+	}
+
+	return host
+}
+
+// minimegaQEMU reports whether argv, a process's command line, is a QEMU
+// system emulator (minimega's default "kvm", or qemu-system-*, not the qemu-img
+// or qemu-nbd minimega also runs there) that names one of minimega's instance
+// directories under base. Every e2e count of minimega's VMs uses it.
+func minimegaQEMU(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+
+	if base := filepath.Base(argv[0]); base != "kvm" && !strings.HasPrefix(base, "qemu-system-") {
+		return false
+	}
+
+	return slices.ContainsFunc(argv, func(arg string) bool { return strings.Contains(arg, cfg.mmBase+"/") })
+}
+
+// qemuPids returns the PIDs of the running processes minimegaQEMU matches.
+func qemuPids() (map[string]bool, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+
+	pids := make(map[string]bool)
+
+	for _, e := range entries {
+		cmdline, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+
+		if minimegaQEMU(strings.Split(string(cmdline), "\x00")) {
+			pids[e.Name()] = true
+		}
+	}
+
+	return pids, nil
+}
+
+// qemuProcesses counts the running QEMU processes of minimega's VMs.
+func qemuProcesses(t *testing.T) int {
+	t.Helper()
+
+	pids, err := qemuPids()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return len(pids)
+}
+
+// readFile reads a file the product wrote and fails the test when it cannot.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path) //nolint:gosec // test reads product output
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	return string(data)
+}
+
+// hostCmd runs a command on the host and returns its trimmed combined output.
+func hostCmd(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput() //nolint:gosec // test harness
+
+	return strings.TrimSpace(string(out)), err
+}
+
+// wantContains reports every want missing from text.
+func wantContains(t *testing.T, what, text string, wants ...string) {
+	t.Helper()
+
+	for _, w := range wants {
+		if !strings.Contains(text, w) {
+			t.Errorf("%s does not contain %q:\n%s", what, w, text)
+		}
+	}
+}
+
+// wantLacks reports every unwanted string found in text.
+func wantLacks(t *testing.T, what, text string, unwanted ...string) {
+	t.Helper()
+
+	for _, u := range unwanted {
+		if strings.Contains(text, u) {
+			t.Errorf("%s contains %q:\n%s", what, u, text)
+		}
+	}
+}
+
+// mustJSON returns v as JSON text and panics when v cannot be marshaled.
+func mustJSON(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+
+	return string(data)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +756,77 @@ func startUI() (func(), error) {
 	return nil, fmt.Errorf("phenix ui did not answer on %s; see %s", cfg.uiAddr, logPath)
 }
 
+var httpClient = &http.Client{Timeout: 10 * time.Minute} //nolint:gochecknoglobals // shared client
+
+// api calls the phenix REST API and returns the status code and body.
+func api(t *testing.T, method, path string, body any) (int, []byte) {
+	t.Helper()
+
+	var reader io.Reader
+
+	if body != nil {
+		switch b := body.(type) {
+		case []byte:
+			reader = bytes.NewReader(b)
+		case string:
+			reader = strings.NewReader(b)
+		default:
+			data, err := json.Marshal(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reader = bytes.NewReader(data)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, "http://"+cfg.uiAddr+"/api/v1"+path, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s: reading body: %v", method, path, err)
+	}
+
+	return resp.StatusCode, data
+}
+
+// apiOK calls the REST API, fails the test unless the status is 2xx, and
+// decodes the JSON body into out when out is not nil, failing the test when
+// there is no body: a zero-valued out would satisfy negative assertions.
+func apiOK(t *testing.T, method, path string, body, out any) []byte {
+	t.Helper()
+
+	code, data := api(t, method, path, body)
+	if code < 200 || code > 299 {
+		t.Fatalf("%s %s: status %d: %s", method, path, code, data)
+	}
+
+	if out != nil {
+		if len(bytes.TrimSpace(data)) == 0 {
+			t.Fatalf("%s %s: status %d with an empty body, want JSON", method, path, code)
+		}
+
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("%s %s: decoding %s: %v", method, path, data, err)
+		}
+	}
+
+	return data
+}
+
 // ---------------------------------------------------------------------------
 // files
 
@@ -494,5 +855,24 @@ func requireImage(t *testing.T, name string) {
 
 	if _, err := os.Stat(filepath.Join(cfg.imagesDir, name)); err != nil {
 		t.Fatalf("disk image %s is required: %v", name, err)
+	}
+}
+
+// requireApps fails the test unless the E2E workflow installed
+// sceptre-phenix-apps for shard and the given commands are on PATH. Missing
+// apps are a harness failure, never a reason to skip.
+func requireApps(t *testing.T, shard string, commands ...string) {
+	t.Helper()
+
+	if os.Getenv("E2E_APPS") != "true" {
+		t.Fatalf("the %s shard needs E2E_APPS=true, which the E2E workflow sets once it has installed "+
+			"sceptre-phenix-apps (console scripts linked into /usr/local/bin from /opt/phenix-apps, "+
+			"phenix-app-mirror built from its src/go)", shard)
+	}
+
+	for _, c := range commands {
+		if _, err := exec.LookPath(c); err != nil {
+			t.Fatalf("E2E_APPS=true but %s is not on PATH: %v", c, err)
+		}
 	}
 }

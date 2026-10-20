@@ -120,10 +120,6 @@ func IsHeadnode(node string) bool {
 	return DefaultMM.IsHeadnode(node)
 }
 
-func GetMMArgs() (map[string]string, error) {
-	return DefaultMM.GetMMArgs()
-}
-
 func GetVLANs(opts ...Option) (map[string]int, error) {
 	return DefaultMM.GetVLANs(opts...)
 }
