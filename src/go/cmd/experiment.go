@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1166,7 +1165,9 @@ func newExperimentScorchCmd() *cobra.Command {
 			ctx = app.SetContextTriggerCLI(ctx)
 
 			if err := scorchexe.Execute(ctx, exp, run); err != nil {
-				if errors.Is(err, context.Canceled) {
+				// A run interrupted by a signal is not an error, unless its
+				// stop or cleanup stage then failed.
+				if scorchexe.Canceled(err) {
 					return nil
 				}
 

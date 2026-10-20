@@ -43,36 +43,38 @@ type Component interface {
 	Cleanup(context.Context) error
 }
 
-var components map[string]Component //nolint:gochecknoglobals // global registry
+// components maps each built-in component type to a function returning a new
+// instance. Every execution initializes an instance of its own, since the
+// runs of different experiments execute components concurrently.
+var components map[string]func() Component //nolint:gochecknoglobals // global registry
 
 func init() { //nolint:gochecknoinits // component registration
-	components = map[string]Component{
-		"break":      new(Break),
-		"pause":      new(Pause),
-		"soh":        new(SOH),
-		"tap":        new(Tap),
-		"user-shell": new(UserComponent),
+	components = map[string]func() Component{
+		"break":      func() Component { return new(Break) },
+		"pause":      func() Component { return new(Pause) },
+		"soh":        func() Component { return new(SOH) },
+		"tap":        func() Component { return new(Tap) },
+		"user-shell": func() Component { return new(UserComponent) },
 	}
 }
 
+// GetComponent returns a new instance of the component of the given type; a
+// type without a built-in component is an external user component.
+//
 //nolint:ireturn // factory function returns interface
 func GetComponent(name string) Component {
-	cmp, ok := components[name]
+	newComponent, ok := components[name]
 	if !ok {
-		cmp = components["user-shell"]
+		newComponent = components["user-shell"]
 	}
 
-	return cmp
+	return newComponent()
 }
 
 func ExecuteComponent(ctx context.Context, opts ...Option) error {
 	options := NewOptions(opts...)
 
-	cmp, ok := components[options.Type]
-	if !ok {
-		cmp = components["user-shell"]
-	}
-
+	cmp := GetComponent(options.Type)
 	_ = cmp.Init(opts...)
 
 	var err error

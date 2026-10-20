@@ -42,9 +42,9 @@ func (p Pause) Type() string {
 
 func (p Pause) Configure(ctx context.Context) error {
 	if p.options.Background {
-		ctx = background(ctx, ActionConfigure, p.options)
-
-		go func() { _ = p.pause(ctx, ActionConfigure) }()
+		runInBackground(ctx, ActionConfigure, p.options, func(ctx context.Context) error {
+			return p.pause(ctx, ActionConfigure)
+		})
 
 		return nil
 	}
@@ -54,9 +54,9 @@ func (p Pause) Configure(ctx context.Context) error {
 
 func (p Pause) Start(ctx context.Context) error {
 	if p.options.Background {
-		ctx = background(ctx, ActionStart, p.options)
-
-		go func() { _ = p.pause(ctx, ActionStart) }()
+		runInBackground(ctx, ActionStart, p.options, func(ctx context.Context) error {
+			return p.pause(ctx, ActionStart)
+		})
 
 		return nil
 	}
@@ -64,20 +64,24 @@ func (p Pause) Start(ctx context.Context) error {
 	return p.pause(ctx, ActionStart)
 }
 
+// Stop ends the component's backgrounded start stage if there is one, and
+// pauses otherwise, unless the run is canceled.
 func (p Pause) Stop(ctx context.Context) error {
-	if handleBackgrounded(ActionStop, p.options) {
-		return nil
+	if handled, err := handleBackgrounded(ctx, ActionStop, p.options); handled {
+		return err
 	}
 
-	return p.pause(ctx, ActionStop)
+	return p.pause(pipelineContext(ctx), ActionStop)
 }
 
+// Cleanup ends the component's backgrounded configure stage if there is one,
+// and pauses otherwise, unless the run is canceled.
 func (p Pause) Cleanup(ctx context.Context) error {
-	if handleBackgrounded(ActionCleanup, p.options) {
-		return nil
+	if handled, err := handleBackgrounded(ctx, ActionCleanup, p.options); handled {
+		return err
 	}
 
-	return p.pause(ctx, ActionCleanup)
+	return p.pause(pipelineContext(ctx), ActionCleanup)
 }
 
 func (p Pause) pause(ctx context.Context, stage Action) error {

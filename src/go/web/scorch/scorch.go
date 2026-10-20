@@ -18,42 +18,40 @@ var (
 	basePath string //nolint:gochecknoglobals // global state
 )
 
-func processWebSockets() {
-	ws = make(map[string]map[string]wsRequest)
-	wsRequests = make(chan wsRequest)
+// addOutputStream adds the websocket client of a component output stream,
+// or, if the component is no longer running, sends it the whole output and
+// ends it. processComponents calls it, so the component maps have one user.
+func addOutputStream(req wsRequest) {
+	out := output[req.key]
 
-	for req := range wsRequests {
-		out := output[req.key]
-
-		// Component is no longer running, so update and close this client.
-		if !running[req.key] {
-			if len(out) > 0 {
-				_, _ = req.ws.Write(out)
-			}
-
-			_, _ = req.ws.Write([]byte("***** COMPONENT FINISHED *****"))
-			close(req.done)
-
-			continue
-		}
-
-		if _, ok := ws[req.key]; !ok {
-			ws[req.key] = make(map[string]wsRequest)
-		}
-
-		ws[req.key][req.id] = req
-
-		// If there's already data, send it to the new client.
+	// Component is no longer running, so update and close this client.
+	if !running[req.key] {
 		if len(out) > 0 {
 			_, _ = req.ws.Write(out)
 		}
+
+		_, _ = req.ws.Write([]byte("***** COMPONENT FINISHED *****"))
+		close(req.done)
+
+		return
+	}
+
+	if _, ok := ws[req.key]; !ok {
+		ws[req.key] = make(map[string]wsRequest)
+	}
+
+	ws[req.key][req.id] = req
+
+	// If there's already data, send it to the new client.
+	if len(out) > 0 {
+		_, _ = req.ws.Write(out)
 	}
 }
 
 func Start(base string) {
 	basePath = base
 
-	go processWebSockets()
-	go processComponents()
+	startComponents()
+
 	go processPipelines()
 }

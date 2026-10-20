@@ -704,6 +704,131 @@ paths:
           description: switching protocols
         "404":
           description: the experiment captures no netflow
+  "/experiments/{name}/scorch/pipelines":
+    get:
+      tags:
+        - Experiments
+      summary: Get the SCORCH pipelines of the experiment and the run executing
+      description: ""
+      operationId: getExperimentsNameScorchPipelines
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            the pipelines, one per run and loop, and the ID of the run
+            executing, or -1
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines:
+                    type: array
+                    items:
+                      type: object
+                  running:
+                    type: integer
+        "400":
+          description: the experiment does not exist
+        "500":
+          description: the experiment's SCORCH configuration cannot be read
+  "/experiments/{name}/scorch/pipelines/{run}/{loop}":
+    get:
+      tags:
+        - Experiments
+      summary: Get the SCORCH pipeline of a run and loop
+      description: ""
+      operationId: getExperimentsNameScorchPipelinesRunLoop
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run
+          required: true
+          schema:
+            type: integer
+        - name: loop
+          in: path
+          description: index of the loop of the run
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: the run or loop is not a number, or has no pipeline
+  "/experiments/{name}/scorch/pipelines/{run}":
+    post:
+      tags:
+        - Experiments
+      summary: Start a SCORCH run
+      description: ""
+      operationId: postExperimentsNameScorchPipelinesRun
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run to start
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: the run started
+        "400":
+          description: >
+            the run is not a number, the experiment does not exist, or the
+            run cannot start, for example because the experiment is not
+            running or has no such run
+        "409":
+          description: >
+            a run of the experiment already executes, or the experiment is
+            stopping
+    delete:
+      tags:
+        - Experiments
+      summary: Cancel a SCORCH run, which then runs its stop and cleanup stages
+      description: ""
+      operationId: deleteExperimentsNameScorchPipelinesRun
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run to cancel
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: successful operation, also when the run does not execute
+        "400":
+          description: the run is not a number
   "/experiments/{exp_name}/vms":
     get:
       tags:
