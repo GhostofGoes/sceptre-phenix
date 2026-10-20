@@ -62,7 +62,7 @@ func TestHandleDelayedVMsSkipsClearNamespaceOnContextCancellation(t *testing.T) 
 	// hit first, the test would hang rather than silently pass.
 	delays := map[string]time.Duration{"host01": time.Minute}
 
-	err := handleDelayedVMs(ctx, "test-ns", delays, nil)
+	err := handleDelayedVMs(ctx, "test-ns", "", delays, nil)
 	if err == nil {
 		t.Fatal("expected an error when the context is canceled")
 	}
@@ -102,7 +102,7 @@ func TestHandleDelayedVMsNoDelaysOrC2sReturnsNilWithoutClearingNamespace(t *test
 
 	mm.DefaultMM = fake //nolint:reassign // install test double
 
-	if err := handleDelayedVMs(context.Background(), "test-ns", nil, nil); err != nil {
+	if err := handleDelayedVMs(context.Background(), "test-ns", "", nil, nil); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
