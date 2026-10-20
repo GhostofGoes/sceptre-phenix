@@ -58,7 +58,7 @@ phenix mm vlans
 
 phēnix quotes each argument for minimega as needed, so empty arguments and arguments containing spaces, quotes, or `#` arrive intact. A single argument is sent as-is instead, which lets you pass a whole command written in minimega's own syntax as one quoted string, such as `phenix mm "vm info"`.
 
-If minimega errors or the minimega daemon is unreachable, `phenix mm` will exit with a non-zero status and record the error in the phēnix log.
+If minimega errors on any host or the minimega daemon is unreachable, `phenix mm` will exit with a non-zero status, naming minimega's errors, and record the error in the phēnix log, so scripts can rely on its exit code. `phenix mm quit` exits 0 although minimega shuts down without answering.
 
 ### Namespace Scoping
 

@@ -312,3 +312,116 @@ func TestExperimentStopKeepInjectionSnapshotsFlag(t *testing.T) {
 		t.Fatalf("expected flag shorthand to be %q, got %q", "K", flag.Shorthand)
 	}
 }
+
+// TestExperimentStartRestartsOnlyDryRunExperiments is a regression test: the
+// CLI skipped an experiment started with --dry-run as already running, while
+// experiment.Start and the REST API start it again.
+func TestExperimentStartRestartsOnlyDryRunExperiments(t *testing.T) {
+	tests := []struct {
+		name      string
+		startTime string
+		wantStart bool
+	}{
+		{name: "dry run", startTime: "2024-01-01T00:00:00Z-DRYRUN", wantStart: true},
+		{name: "running", startTime: "2024-01-01T00:00:00Z", wantStart: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := "start-exp"
+			cfg := newRunningDryRunExperimentConfig(name, t.TempDir())
+			cfg.Status["startTime"] = tt.startTime
+
+			originalMM := mm.DefaultMM
+			originalStore := store.DefaultStore
+			t.Cleanup(func() {
+				mm.DefaultMM = originalMM          //nolint:reassign // restore test double
+				store.DefaultStore = originalStore //nolint:reassign // restore test double
+			})
+
+			mm.DefaultMM = fakeMM{} //nolint:reassign // install test double
+
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			m := store.NewMockStore(ctrl)
+			m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+				*c = cfg
+				return nil
+			}).AnyTimes()
+
+			// A start writes the experiment's status, once before it waits for
+			// delayed VMs and once when it is done; a skipped start writes
+			// nothing.
+			update := m.EXPECT().Update(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+				cfg = *c
+				return nil
+			})
+			if tt.wantStart {
+				update.MinTimes(1)
+			} else {
+				update.Times(0)
+			}
+
+			store.DefaultStore = m //nolint:reassign // install test double
+
+			root := &cobra.Command{Use: "phenix", SilenceUsage: true}
+			experimentCmd := newExperimentCmd()
+			experimentCmd.AddCommand(newExperimentStartCmd())
+			root.AddCommand(experimentCmd)
+			root.SetArgs([]string{"experiment", "start", "--dry-run", name})
+
+			var output bytes.Buffer
+			root.SetOut(&output)
+			root.SetErr(&output)
+
+			if _, err := root.ExecuteC(); err != nil {
+				t.Fatalf("starting the experiment: %v\n%s", err, output.String())
+			}
+		})
+	}
+}
+
+// TestExperimentStartAllLeavesDryRunsAlone is a regression test: once a named
+// dry-run experiment could be started again, phenix experiment start all also
+// deployed every dry-run experiment for real, while its help says it starts
+// the stopped ones.
+func TestExperimentStartAllLeavesDryRunsAlone(t *testing.T) {
+	cfg := newRunningDryRunExperimentConfig("dry-exp", t.TempDir())
+
+	originalMM := mm.DefaultMM
+	originalStore := store.DefaultStore
+	t.Cleanup(func() {
+		mm.DefaultMM = originalMM          //nolint:reassign // restore test double
+		store.DefaultStore = originalStore //nolint:reassign // restore test double
+	})
+
+	mm.DefaultMM = fakeMM{} //nolint:reassign // install test double
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	m := store.NewMockStore(ctrl)
+	m.EXPECT().List(gomock.Any()).Return(store.Configs{cfg}, nil).AnyTimes()
+	m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+		*c = cfg
+		return nil
+	}).AnyTimes()
+	m.EXPECT().Update(gomock.Any()).Times(0)
+
+	store.DefaultStore = m //nolint:reassign // install test double
+
+	root := &cobra.Command{Use: "phenix", SilenceUsage: true}
+	experimentCmd := newExperimentCmd()
+	experimentCmd.AddCommand(newExperimentStartCmd())
+	root.AddCommand(experimentCmd)
+	root.SetArgs([]string{"experiment", "start", allExperiments})
+
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetErr(&output)
+
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("starting all experiments: %v\n%s", err, output.String())
+	}
+}

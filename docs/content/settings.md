@@ -11,10 +11,15 @@ phēnix looks for a configuration file (e.g. `config.yaml`, `config.json`, `conf
 
 * `/etc/phenix/config.yaml`
 
-**When run as a regular user:**
+**When run as a regular user, or through `sudo phenix ...` (see [Store Configuration](#store-configuration)):**
 
-* `$HOME/.config/phenix/config.yaml`
+* `$HOME/.config/phenix/config.yaml`, where `$HOME` is the home of the user who
+  ran `sudo`
 * `/etc/phenix/config.yaml`
+
+If none of them exists, phēnix creates an empty one so it can watch it for
+changes: `/etc/phenix/config.yaml` when it runs as root, including through
+`sudo`, and `$HOME/.config/phenix/config.yaml` otherwise.
 
 ### Example Configuration
 
@@ -49,6 +54,21 @@ Deleting `config.yaml` resets daemon behavior to defaults. Deleting the Data Sto
 
 The phenix tool uses a bbolt key-value data store, a single file with no external dependencies that is only accessible on one machine. Set its path with the `bolt://` store endpoint (e.g. `bolt:///etc/phenix/store.bdb`).
 phenix no longer supports the `etcd://` store endpoint.
+
+The default bbolt store is `/etc/phenix/store.bdb` when phēnix runs as root and
+`$HOME/.phenix.bdb` otherwise. `sudo phenix ...` runs as root but uses the
+`$HOME/.phenix.bdb`, `$HOME/.config/phenix` and `$HOME/phenix_logs/phenix.log`
+of the user who ran `sudo`, and so does phēnix started by sudo through
+`setsid`, `nohup` or `env`, such as `sudo setsid nohup phenix ui`, so the CLI
+and a UI started that way share a store. phēnix run from a root shell (`sudo -i`, `sudo su`) uses
+`/etc/phenix/store.bdb`. Pass the same `--store.endpoint` to processes started
+in different ways to share a store.
+
+!!! note "Upgrading"
+    Earlier releases gave phēnix started by sudo through `setsid`, `nohup` or
+    `env` root's paths, so such a UI kept its experiments in
+    `/etc/phenix/store.bdb`. To keep using that store, start it with
+    `--store.endpoint bolt:///etc/phenix/store.bdb`.
 
 ## Managing Settings
 

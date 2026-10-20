@@ -462,14 +462,16 @@ func newExperimentStartCmd() *cobra.Command {
 
   Used to start a stopped experiment, using 'all' instead of a specific
   experiment name will include all stopped experiments; dry-run will do
-	everything but call out to minimega.
+	everything but call out to minimega. An experiment started with --dry-run
+	launches no VMs, so it can be started again, with or without --dry-run,
+	by name; 'all' leaves it alone.
 
 	--vlan-min and --vlan-max replace an end of the experiment's VLAN range,
 	which must then have both ends set or neither: minimega assigns its VLAN
 	IDs from min up to, but not including, max.
 
 	NOTE: passing the --honor-run-periodically flag will prevent the CLI from
-	returning. If Ctrl+c is pressed, the experiment will continue to run but
+	returning until the experiment stops. If Ctrl+c is pressed, the experiment will continue to run but
 	the running stage will no longer continue to be triggered for any apps
 	configured (via the scenario) to have their running stage triggered
 	periodically.`
@@ -512,12 +514,17 @@ func newExperimentStartCmd() *cobra.Command {
 			}
 
 			for _, exp := range experiments {
-				if exp.Running() {
+				// Like experiment.Start, start a dry-run experiment again: it
+				// launched no VMs. 'all' starts only stopped experiments, so it
+				// does not deploy every dry run for real.
+				if exp.Running() && (!exp.DryRun() || name == allExperiments) {
 					plog.Warn(
 						plog.TypeSystem,
 						"not starting already running experiment",
 						"exp",
 						exp.Metadata.Name,
+						"dryrun",
+						exp.DryRun(),
 					)
 
 					continue
@@ -560,7 +567,16 @@ func newExperimentStartCmd() *cobra.Command {
 				if periodic {
 					plog.Info(plog.TypeSystem, "honor-run-periodically flag was passed")
 
-					err := app.PeriodicallyRunApps(ctx, &wg, &exp)
+					// The periodic apps follow the run this start began, not the
+					// copy read before it.
+					started, err := experiment.Get(exp.Metadata.Name)
+					if err != nil {
+						err := util.HumanizeError(err, "%s", "Unable to schedule the "+exp.Metadata.Name+" experiment's periodic apps")
+
+						return err.Humanized()
+					}
+
+					err = app.PeriodicallyRunApps(ctx, &wg, started)
 					if err != nil {
 						plog.Error(
 							plog.TypeSystem,
@@ -575,7 +591,8 @@ func newExperimentStartCmd() *cobra.Command {
 			// If --honor-run-periodically was not passed, then this will return
 			// immediately so no harm no foul. Otherwise, it will wait until all
 			// Goroutines that are periodically running apps exit, which will be
-			// triggered by the context being canceled via an OS signal.
+			// triggered by the context being canceled via an OS signal, or by
+			// the experiment being stopped.
 			wg.Wait()
 
 			return nil
@@ -1149,13 +1166,14 @@ func newExperimentScorchCmd() *cobra.Command {
 
 			exp, err := experiment.Get(name)
 			if err != nil {
+				// exp is nil here; name the experiment from the argument.
 				err := util.HumanizeError(
 					err,
 					"%s",
 					fmt.Sprintf(
 						"Unable to start Scorch run %d for %s experiment",
 						run,
-						exp.Metadata.Name,
+						name,
 					),
 				)
 
