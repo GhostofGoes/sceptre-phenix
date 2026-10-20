@@ -174,6 +174,8 @@ func (u UserApp) shellOut(ctx context.Context, action Action, exp *types.Experim
 			"PHENIX_LOG_FILE=stderr",
 			"PHENIX_DRYRUN="+strconv.FormatBool(u.options.DryRun),
 			"PHENIX_STORE_ENDPOINT="+common.StoreEndpoint,
+			// The suffixes core trims from host names to tell the headnode.
+			"PHENIX_HOSTNAME_SUFFIXES="+common.HostnameSuffixes,
 		),
 		shell.StreamStderr(stderrChan),
 	}
