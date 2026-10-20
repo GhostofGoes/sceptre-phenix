@@ -281,13 +281,22 @@ it at all, it must meet three requirements (`src/go/app/doc.go`):
 2. Be executable.
 3. Be named `phenix-app-<name>`, where `<name>` is the app name used in the
    scenario's `apps[].name` field — a scenario app named `foo` resolves to the
-   executable `phenix-app-foo`. A missing executable fails the stage with
-   `external user app phenix-app-<name> does not exist in your path`.
+   executable `phenix-app-foo`. A missing executable does not fail the
+   stage: phenix logs the warning `[?] '<name>' user app (<stage>)` and goes
+   on with the next app.
 
 Apps receive experiment JSON on stdin and one lifecycle argument, emit
 experiment JSON on stdout and JSON logs on stderr, and exit 0 on success. A
 non-zero exit fails the stage, except exit code 101, which reschedules the
-experiment using the scheduler named on stdout and re-runs the app. Apps read
+experiment using the scheduler named on stdout and re-runs the app. phenix
+takes the `spec` an app returns from `configure`, `pre-start` and `cleanup`,
+and only `status.apps.<name>` from `post-start`, `running` and `cleanup`. A
+`configure` or `pre-start` spec whose injections, deletions or `advanced`
+settings experiment create would refuse, on any node that is not external
+(`do_not_boot` ones included), fails the stage and is not taken, for example
+`user app <name> returned an experiment phenix refuses: node <hostname>: injection to "<dst>" has no source`
+for an empty or `null` `src`; a `cleanup` spec is taken with a warning, so the
+cleanup of later apps still runs. Apps read
 their configuration from the environment variables listed in
 [`references/app-environment.md`](references/app-environment.md).
 

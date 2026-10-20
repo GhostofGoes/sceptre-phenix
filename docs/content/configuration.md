@@ -496,7 +496,8 @@ with custom metadata for the app specific to the topology node.
   [Golang duration string](https://pkg.go.dev/time#ParseDuration))
   specifying how often to trigger the app's running stage. The default value is
   an empty string, which means the app's running stage will not be triggered
-  periodically.
+  periodically. A duration that does not parse, or is shorter than one second,
+  is logged and the app is not run periodically.
 
 ### Example
 

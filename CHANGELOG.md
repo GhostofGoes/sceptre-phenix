@@ -36,10 +36,12 @@ All notable changes to this project will be documented in this file.
 - **CLI**: Upgraded cobra from v1.0.0 to v1.10.2 and pflag from v1.0.3 to v1.0.9. `phenix completion bash` now generates cobra's V2 Bash script, and `phenix completion powershell` includes descriptions.
 - **Pinned VLANs (breaking)**: Refuse IDs at or above the max.
 - **C2 Delays (breaking)**: Refuse waits on hostnames that never register.
+- **Default Apps (breaking)**: Honor `"false"` and `0`; refuse invalid values.
 - **Injection Sources (breaking)**: Refuse an empty or null `src`.
 - **Injection Permissions (breaking)**: Octal modes only; no directories outside base.
 - **Injection Permissions (breaking)**: Refuse two modes for one base-directory source.
 - **Delayed Starts (breaking)**: Reject bad `delay.timer` values; list enforced delays.
+- **Periodic Apps (breaking)**: Skip and log periods under one second.
 - **Disk Injections (breaking)**: Escape paths; refuse ones minimega would misread.
 - **VM Settings (breaking)**: Escape `qemu-override`; refuse inner `advanced` line breaks.
 - **minimega Scripts (breaking)**: Refuse values minimega would split or misread.
@@ -58,28 +60,51 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Triggered User Apps**: Skip minimega VM lookup for stopped experiments.
+- **Triggered Stages**: Pass `PHENIX_DRYRUN=true` to user apps of dry runs.
 - **Start Progress**: Never create or re-create the minimega namespace.
+- **Stop During Start**: Skip remaining default post-start apps too.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
+- **Running Trigger**: Keep the status the app's running stage prints.
 - **VLAN Range Errors**: Name the max VLAN ID correctly.
 - **Running VM Labels**: Escape label quotes and backslashes for minimega.
 - **VM Flush**: Keep other powered-off VMs on kill and redeploy.
 - **Per-VM Start**: Start every VM despite failures; name failed VMs.
+- **C2 Startup**: Queue scripts with `cc exec` so they run.
+- **C2 Startup**: Read a stored `phenix/startup-via-cc: 0` as false.
 - **Linux Startup Scripts**: Make hostname, DNS and domain join idempotent.
 - **Linux Hostname Script**: Rename adjacent `phenix` and `phenix.<domain>` aliases.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
 - **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **User Apps**: Query VMs only from post-start, outside dry runs.
+- **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
+- **Startup Autotunnels**: End C2 waits at stop; skip dry runs.
 - **Linux Interface MTU**: Apply topology interface MTUs on Linux guests.
+- **Default App Order**: Run default apps in their documented order.
 - **Serial Device Default**: Suggest `/dev/ttyphenix0` instead of the guest's `/dev/ttyS0`.
 - **Port Forwards**: Keep forwards when `cc tunnel list` fails.
 - **minimega Restarts**: Retry unsent commands once on a fresh connection.
 - **C2 Commands**: Pass `$` to guests instead of minimega's environment.
 - **Cluster Hosts**: Report the failed minimega `host` command's error.
 - **Scheduling**: Keep minimega's host names; trim suffixes only for display.
+- **Tap External Access**: Refuse prefixless or empty `ip` without panicking.
+- **Tap Failures**: Delete created taps when a later one fails.
+- **Tap Validation**: Check every tap's VLAN, bridge and address upfront.
+- **Tap Hosts**: Fail instead of panicking when minimega lists none.
+- **Tap Triggers**: Delete previously recorded taps before creating new ones.
+- **Tap Status**: Record only the taps a delete left behind.
+- **Tap App**: Create no taps or namespaces on dry runs.
+- **Startup Disk Images**: Refuse unusable paths; warn on denied access.
 - **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **Periodic Apps**: Resume after skipped ticks; stop without hanging.
+- **App Stages**: Keep others' status; never write into newer runs.
+- **Stage Triggers**: Keep running flags that refuse second SCORCH runs.
+- **Periodic Apps**: Refuse to schedule apps of stopped experiments.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
+- **Disk Images**: Check `-filepath`; boot skipped nodes once images appear.
 - **Files Directory**: Ask minimega after `--base-dir.*` apply; retry until answered.
 - **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
 - **Start Script Labels**: Escape quotes and backslashes for minimega.
@@ -94,7 +119,13 @@ All notable changes to this project will be documented in this file.
 - **BoltDB Store**: Stop hiding delete and update failures.
 - **Etcd Store**: Report missing, existing and unreadable configs like BoltDB.
 - **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
+- **vrouter NAT**: Prefer app `snat` rules over topology masquerade rules.
+- **minirouter Hostnames**: Set minirouter hostnames in the startup app.
+- **vrouter Dry Runs**: Send no `router` commands to minimega.
+- **vrouter Re-Triggers**: Clear staged minirouter config before re-running post-start.
 - **BoltDB Store**: Stop hanging after one failed database open.
+- **Experiment Runs**: Never write a stopped or restarted run back.
+- **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.

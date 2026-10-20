@@ -154,8 +154,12 @@ depends on the experiment (hostname, interfaces, injected files) belongs in
 script.
 
 When disk injection is bypassed or unavailable, the startup app instead delivers
-those scripts over minimega C2 and runs them from `/tmp/miniccc/files`, rather than
-writing to `/etc/phenix/startup/`. That path is taken when the node is annotated
+those scripts over minimega C2 and runs them from `/tmp/miniccc/files`, rather
+than writing to `/etc/phenix/startup/`. minimega sends them each time `miniccc`
+connects, but a Linux script runs once per boot, as `phenix.service` would: it
+does nothing when `miniccc` connects again within the same boot, such as after a
+pause or a snapshot restore. The Windows script does nothing once its registry
+flag says it ran. That path is taken when the node is annotated
 `phenix/startup-via-cc` or when the first drive sets `inject_partition: 0`
 (typical for LVM images). Such images still need a working `miniccc` — one more
 reason `inject-miniexe` is mandatory.
