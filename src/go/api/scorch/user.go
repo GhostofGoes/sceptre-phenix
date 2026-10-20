@@ -43,31 +43,27 @@ func (u UserComponent) Type() string {
 }
 
 func (u UserComponent) Configure(ctx context.Context) error {
-	if u.options.Background {
-		ctx = background(ctx, ActionConfigure, u.options)
-	}
-
 	return u.shellOut(ctx, ActionConfigure)
 }
 
 func (u UserComponent) Start(ctx context.Context) error {
-	if u.options.Background {
-		ctx = background(ctx, ActionStart, u.options)
-	}
-
 	return u.shellOut(ctx, ActionStart)
 }
 
+// Stop ends the component's backgrounded start stage, if any, then runs its
+// stop stage.
 func (u UserComponent) Stop(ctx context.Context) error {
-	handleBackgrounded(ActionStop, u.options)
+	_, bgErr := handleBackgrounded(ctx, ActionStop, u.options)
 
-	return u.shellOut(ctx, ActionStop)
+	return errors.Join(bgErr, u.shellOut(ctx, ActionStop))
 }
 
+// Cleanup ends the component's backgrounded configure stage, if any, then
+// runs its cleanup stage.
 func (u UserComponent) Cleanup(ctx context.Context) error {
-	handleBackgrounded(ActionCleanup, u.options)
+	_, bgErr := handleBackgrounded(ctx, ActionCleanup, u.options)
 
-	return u.shellOut(ctx, ActionCleanup)
+	return errors.Join(bgErr, u.shellOut(ctx, ActionCleanup))
 }
 
 func (u UserComponent) shellOut(ctx context.Context, stage Action) error {
@@ -140,8 +136,11 @@ func (u UserComponent) shellOut(ctx context.Context, stage Action) error {
 	// TODO: consider letting the child process send a signal indicating it wants
 	// to run in the background instead of having to configure it in the scenario.
 
+	// Only configure and start stages are backgrounded.
 	if u.options.Background {
-		go func() { _ = u.run(ctx, stage, cmd, data) }()
+		runInBackground(ctx, stage, u.options, func(ctx context.Context) error {
+			return u.run(ctx, stage, cmd, data)
+		})
 
 		return nil
 	}

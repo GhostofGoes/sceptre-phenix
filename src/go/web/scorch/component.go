@@ -59,16 +59,27 @@ func UpdateComponent(update ComponentUpdate) {
 	<-update.done
 }
 
-func processComponents() {
+// startComponents makes the state of the component processor and starts it.
+func startComponents() {
 	componentUpdates = make(chan ComponentUpdate)
 	outputRequests = make(chan outputRequest)
+	wsRequests = make(chan wsRequest)
 
 	cmpType = make(map[string]string)
 	running = make(map[string]bool)
 	output = make(map[string][]byte)
+	ws = make(map[string]map[string]wsRequest)
 
+	go processComponents()
+}
+
+// processComponents is the only user of the component maps: a concurrent
+// map read and write ends the process.
+func processComponents() {
 	for {
 		select {
+		case req := <-wsRequests:
+			addOutputStream(req)
 		case update := <-componentUpdates:
 			// track updates by exp/run/loop/stage/component
 			key := fmt.Sprintf(
