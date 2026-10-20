@@ -16,7 +16,7 @@ has a matching config-file key and `PHENIX_*` env var):
 | `--base-dir.injects` | `base-dir.injects` / `PHENIX_BASE_DIR_INJECTS` | `<base-dir.phenix>/injects` | Where `phenix workflow apply` stages `phenix-injects/` (as `<base-dir.injects>/<name>`). The server's value wins over the CLI's own unless the flag is given; see the `injects` step in [`workflow.md`](workflow.md). Use an absolute path |
 | `--base-dir.topologies` | `base-dir.topologies` / `PHENIX_BASE_DIR_TOPOLOGIES` | `<base-dir.phenix>/topologies` | Where `phenix workflow apply NAME` looks up a bare topology directory name. Use an absolute path |
 | `--mount-dir` | `mount-dir` / `PHENIX_MOUNT_DIR` | `<base-dir.phenix>/mounts` | Base directory for VM filesystem mounts (`phenix vm mount`, UI `vm-mount` feature) |
-| `--hostname-suffixes` | `hostname-suffixes` / `PHENIX_HOSTNAME_SUFFIXES` | `-minimega,-phenix` | Hostname suffixes to strip |
+| `--hostname-suffixes` | `hostname-suffixes` / `PHENIX_HOSTNAME_SUFFIXES` | `-minimega,-phenix` | Hostname suffixes stripped from the headnode name (snapshot names) and the names `GET /hosts` displays; schedulers, apps and `spec.schedules` use minimega's own host names |
 | `--log.level` | `log.level` / `PHENIX_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` — use `--log.level=debug` for verbose troubleshooting output |
 | `--log.console` | `log.console` / `PHENIX_LOG_CONSOLE` | `stderr` | Console log destination: `stderr`, `stdout`, or a file path |
 | `--log.system.path` | `log.system.path` / `PHENIX_LOG_SYSTEM_PATH` | `/var/log/phenix/phenix.log` | Persistent JSON system log path (used by UI) |
@@ -181,7 +181,26 @@ host path is given, and prints the resulting mount path. It fails for a VM
 already mounted at another path, and for a path holding characters other than
 letters, digits, `.`, `_`, `+`, `-` and `/`; `<mount-dir>` comes
 from the `--mount-dir` root flag (`PHENIX_MOUNT_DIR`), defaulting to
-`<base-dir.phenix>/mounts`.
+`<base-dir.phenix>/mounts`. The UI's `/files` routes (`vm-mount` feature) serve
+any VM with a 9p mount at that default path, whichever process mounted it;
+`DELETE .../unmount` unmounts only a VM that `POST .../mount` was called for in
+the same UI process.
+
+The commands that act on VMs in minimega refuse a stopped or dry-run
+experiment before they reach minimega, which would otherwise create the
+experiment's namespace again. `pause`, `resume`, `restart`, `shutdown`, `kill`,
+`reset-disk`, `redeploy`, `net`, `capture stop`, `memory-snapshot` and `unmount`
+fail with `experiment not running: <exp>` (`... <exp> is a dry run`). The
+REST VM start, stop and redeploy routes, `POST` and `DELETE .../captures`,
+`POST .../snapshots`, the restore route (`POST .../snapshots/{snapshot}`),
+the subnet capture routes (`POST .../captureSubnet` and
+`POST .../stopCaptureSubnet`) and the VNC websocket (`.../vnc/ws`) answer
+400 with that message, and 404 for an experiment that does not exist.
+`GET .../captures` and `GET .../snapshots` answer 200 for a stopped or
+dry-run experiment, the captures list empty. `DELETE .../vms/{name}` answers
+400 with a bare `experiment not running`, and 400 for a missing experiment
+too. The VNC page (`GET .../vnc`) is served whether or not the experiment
+runs; only its websocket refuses.
 
 ### Targeting VMs by label
 

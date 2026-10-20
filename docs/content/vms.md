@@ -223,6 +223,11 @@ users must already have valid phēnix credentials to upload files. File upload
 permissions are included in the default **Experiment Admin** and **Experiment
 User** roles.
 
+The file server refuses files ending in `.hdd` or `.state` with a 400 and
+stores none of the files of such an upload: those are the disk and memory of
+VM snapshots, which a restore gives QEMU, running as root, and only phēnix
+writes them.
+
 See [Settings & Configuration](settings.md#settings-reference) for the
 `ui.file-server-endpoint` configuration key.
 
@@ -241,7 +246,9 @@ phenix vm mount <experiment name> <vm name> [host path]
 If `host path` is omitted, the VM is mounted to a default path of
 `<mount-dir>/<experiment name>/<vm name>`, where `<mount-dir>` defaults to
 `<base-dir.phenix>/mounts` (see [`mount-dir`](settings.md#settings-reference)).
-The command prints the resolved host path once the mount succeeds.
+The command prints the resolved host path once the mount succeeds. A VM mounted
+at its default path can also be browsed through the file routes of a phēnix UI
+running with the `vm-mount` feature.
 
 ```shell
 phenix vm mount my-exp my-vm
@@ -519,6 +526,13 @@ power button, second from the right on the modal footer). You are able to edit t
     * Disk
     * Replication of original injections
 
+The disk lists of both, and of the optical disc of a running VM, offer only the
+images a VM of the experiment may be given: the disks of its topology and the
+images directly in minimega's files directory that are not disk snapshots, not
+the backing images of those, which may be in subdirectories (see
+[Redeploy a VM](#redeploy-a-vm)). A VM with `snapshot: false` may still be
+refused an image of the list that is not a disk of the topology.
+
 ### From the Command Line Binary
 
 To modify VM settings, run the following command, specifying one or more of the
@@ -582,6 +596,7 @@ phenix vm set my-exp my-vm -L val1=true -L val2=roger
     non-printable character other than a tab or line break, or holds a double
     quote, single quote, backslash or `#` without also holding whitespace, such
     as `a"b` or `it's`. The error names the VM and the label, and
+    `PATCH /api/v1/experiments/{exp}/vms/{name}` answers it with 400. Such
     labels can still be set while the experiment is stopped. With
     `--append-labels` (or the `ADD` update mode) the VM's existing labels are
     sent to minimega again and checked too, so while the experiment runs an

@@ -5,7 +5,15 @@ import (
 	"time"
 )
 
-const lockTimeout = 5 * time.Minute
+const (
+	lockTimeout = 5 * time.Minute
+
+	// stopLockTimeout outlasts an experiment stop: the SCORCH stopping hook
+	// alone waits up to 5 minutes for canceled runs (web/scorch stopWait), and
+	// the cleanup apps run after it. A shorter lock would let a second stop
+	// request run experiment.Stop again while the first one is still running.
+	stopLockTimeout = 15 * time.Minute
+)
 
 func IsExperimentLocked(name string) Status {
 	key := "experiment|" + name
@@ -98,7 +106,7 @@ func LockExperimentForStarting(name string) error {
 func LockExperimentForStopping(name string) error {
 	key := "experiment|" + name
 
-	if status := Lock(key, StatusStopping, 1*time.Minute); status != "" {
+	if status := Lock(key, StatusStopping, stopLockTimeout); status != "" {
 		return fmt.Errorf("experiment %s is locked with status %s", name, status)
 	}
 

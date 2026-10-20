@@ -50,6 +50,7 @@ All notable changes to this project will be documented in this file.
 - **Snapshot Saves (breaking)**: Cancel after 30 minutes; bound QMP waits.
 - **Restore Names (breaking)**: Refuse snapshots without plain file names.
 - **Restore Disks (breaking)**: Refuse backing chains that leave phēnix images.
+- **File Uploads (breaking)**: Refuse VM snapshot `.hdd` and `.state` files.
 - **Upgrades (breaking)**: Delete uploaded `.state` files; restores cannot check them.
 - **Redeploy Disks (breaking)**: Accept only topology disks and top-level images.
 - **Redeploy -r (breaking)**: Keep user images; refuse `snapshot: false` nodes.
@@ -61,8 +62,13 @@ All notable changes to this project will be documented in this file.
 - **minimega Scripts (breaking)**: Refuse values minimega would split or misread.
 - **VM Label Limits (breaking)**: Refuse running-VM labels minimega cannot store.
 - **C2 Commands (breaking)**: Refuse commands minimega would cut at `#`.
+- **VM Routes (breaking)**: Refuse lists, ranges, IDs, unsafe VM names.
 - **Screenshot Sizes (breaking)**: Accept only whole numbers 0 to 4096.
+- **VM Mounts (breaking)**: Refuse `../` paths into other VMs' mounts.
+- **VNC (breaking)**: Require `vms/vnc` for console websockets and VNC forwards.
 - **Config Updates (breaking)**: Refuse a running experiment's config without force.
+- **Config Renames (breaking)**: Refuse taken names; need create, delete permissions.
+- **Config Kinds (breaking)**: Refuse PUT bodies of another kind.
 - **Experiment Names (breaking)**: Refuse `.`, `..` and `all`, renames included.
 - **Base Directories (breaking)**: Refuse the root and phēnix's own directories.
 - **SCORCH Terminals and Output (breaking)**: Check roles; typing needs `experiments/trigger`.
@@ -88,22 +94,29 @@ All notable changes to this project will be documented in this file.
 - **SoH App**: End startup delay and checks on stops elsewhere.
 - **Start Progress**: Never create or re-create the minimega namespace.
 - **VM Operations**: Refuse VM commands on stopped or dry-run experiments.
+- **VM Routes**: Answer refused requests 400, not 500.
+- **Snapshot, Capture Refusals**: Answer 409 or 400, not 500.
 - **Failed Delayed Start**: Run cleanup apps, then clear namespace once.
 - **Delayed VMs**: Abandon waits when another process stops the experiment.
 - **Stop During Start**: Await the canceled UI start before cleanup.
 - **Stop During Start**: Skip remaining default post-start apps too.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
 - **Running Trigger**: Keep the status the app's running stage prints.
+- **App Triggers**: Drop each finished trigger's canceler.
 - **VLAN Range Errors**: Name the max VLAN ID correctly.
 - **Workflow VLAN Range**: Refuse an invalid `vlanRange` with 400 upfront.
 - **Workflow VLANs**: Refuse pinned IDs outside `vlanRange` with 400.
 - **VLAN Range Docs**: Say minimega never assigns a range's max.
+- **REST Redeploy**: Keep disk, CPUs and memory for empty bodies.
+- **REST Redeploy**: Answer 400, not 500, for unknown VMs.
 - **Redeploy Deletions**: Apply node deletions when replicating injections on redeploy.
 - **Redeploy Injections**: Resolve paths and apply permissions as start does.
 - **Redeploy Snapshots**: Recreate the disk snapshot of nodes without injections.
+- **UI Redeploy Disk**: Default to keeping the VM's current disk.
 - **Experiment Rename**: Rename only the base directory's last element.
 - **Forced Config Edits**: Keep running experiments' status; never rename them.
 - **Experiment Stop**: Leave runs another process started meanwhile untouched.
+- **UI Redeploy Injections**: Honor `No` for replicating original injections.
 - **Running VM Labels**: Escape label quotes and backslashes for minimega.
 - **VM Flush**: Keep other powered-off VMs on kill and redeploy.
 - **VM Kill, Redeploy and Restore**: Handle powered-off and errored VMs.
@@ -112,6 +125,7 @@ All notable changes to this project will be documented in this file.
 - **C2 Startup**: Read a stored `phenix/startup-via-cc: 0` as false.
 - **Linux Startup Scripts**: Make hostname, DNS and domain join idempotent.
 - **VLAN IDs**: Treat 0 as unpinned.
+- **VLAN Aliases**: Refuse IDs outside 1-4095; check REST assignments too.
 - **Linux Hostname Script**: Rename adjacent `phenix` and `phenix.<domain>` aliases.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
@@ -124,6 +138,7 @@ All notable changes to this project will be documented in this file.
 - **Auto Bridge Mode**: Move unbridged interfaces to the experiment's bridge.
 - **Failed Starts**: Delete leftover disk snapshots and report cleanup errors.
 - **Stopping Hooks**: Drop port forwards before clearing the minimega namespace.
+- **Capture Listing**: Skip minimega for stopped experiments; reject unknown ones.
 - **Subnet Captures**: Never overwrite an earlier capture's file.
 - **Subnet Captures**: Fail when a cluster node cannot list files.
 - **User Apps**: Query VMs only from post-start, outside dry runs.
@@ -140,6 +155,8 @@ All notable changes to this project will be documented in this file.
 - **Cluster Hosts**: Report the failed minimega `host` command's error.
 - **CLI Start**: Mark running during delays; run cleanup on failure.
 - **Scheduling**: Keep minimega's host names; trim suffixes only for display.
+- **UI Host Assignment**: Map displayed host names back to minimega's.
+- **UI Host Select**: Show the hosts of scheduled VMs.
 - **Tap External Access**: Refuse prefixless or empty `ip` without panicking.
 - **Tap Failures**: Delete created taps when a later one fails.
 - **Tap Validation**: Check every tap's VLAN, bridge and address upfront.
@@ -184,12 +201,24 @@ All notable changes to this project will be documented in this file.
 - **Netflow**: Drop captures of experiments stopped from the CLI.
 - **Subnet Captures**: Stamp capture file names to the second.
 - **Subnet Captures**: Report why listing VMs or starting captures failed.
+- **REST Starts**: Leak no goroutine when an experiment start fails.
+- **VM Commits**: Leak no goroutine per commit or memory snapshot.
+- **REST Starts**: Keep periodic apps cancelable after a failed retry.
+- **REST Stops**: Answer 500 instead of panicking when rereading fails.
+- **REST Stops**: Hold the stop lock until slow stops finish.
+- **REST Stops**: Refuse VM routes until the stop finishes.
+- **Experiments UI**: Reload the list after failed starts and stops.
+- **VM Mounts**: Serve files of VMs mounted from the CLI.
+- **VM Mount Uploads**: Replace existing files whole; report failed writes.
+- **VM Mounts**: Stop UI unmounts from removing CLI-made mounts.
+- **VM Mounts**: Remount after stops; keep counts when unmounts fail.
 - **SCORCH Cancel**: Run stop and cleanup stages after a cancel.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
 - **Dry Runs**: List VMs without creating a minimega namespace.
 - **Disk Images**: Check `-filepath`; boot skipped nodes once images appear.
 - **Files Directory**: Ask minimega after `--base-dir.*` apply; retry until answered.
+- **File Downloads**: Honor `{filename}` when the `path` query is absent.
 - **VM Mount Path**: Honor given paths; fail if mounted elsewhere.
 - **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
 - **Start Script Labels**: Escape quotes and backslashes for minimega.
@@ -206,9 +235,11 @@ All notable changes to this project will be documented in this file.
 - **VM Snapshots**: Refuse VMs without disk snapshots before saving anything.
 - **Reset Disk**: Create snapshots in instance directories so VMs restart.
 - **VM Screenshots**: Cache each size separately.
+- **Paused VM Screenshots**: Answer 409 `VM is not running`.
 - **VM Screenshots**: Report minimega failures instead of `screenshot not found`.
 - **Screenshot Updates**: Stop logging errors for stopped experiments' VMs.
 - **Screenshot Updates**: Keep each websocket client's screenshot size its own.
+- **VM Websocket Events**: Name VMs `<experiment>/<vm>` in start/stop events.
 - **VM Info**: Skip `disk info` for VMs without a disk.
 - **VM Lookups**: Pick the exact name among case-folded matches.
 - **BoltDB Store**: Create missing directories of absolute `bolt://` paths.
@@ -229,10 +260,12 @@ All notable changes to this project will be documented in this file.
 - **VM Details**: Report minimega errors instead of a stopped VM.
 - **Snapshot and Dump Names**: Stop dropping the last dotted part.
 - **Optical Discs**: Resolve relative ISO paths in minimega's files directory.
+- **VM Disk Lists**: Offer only disks a VM may use.
 - **BoltDB Store**: Stop hanging after one failed database open.
 - **Experiment Runs**: Never write a stopped or restarted run back.
 - **Failed Starts**: Stop only the start's own run, never twice.
 - **Experiment Stop**: End SCORCH runs first; keep their final status.
+- **Experiment Stop**: Cancel and await triggered runs; refuse new triggers.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **SoH Startup Delay**: Stop waiting once the start is canceled.
@@ -278,8 +311,13 @@ All notable changes to this project will be documented in this file.
 - **Writable Disks**: Stop guests writing images other experiments boot from.
 - **VM Labels**: Stop minimega expanding `$` or fetching `file:` labels.
 - **minimega Commands**: Refuse arguments, such as VLANs, that crash minimega.
+- **VM Routes**: Stop VM-scoped roles acting on other VMs.
+- **VM Scheduling**: Refuse hosts that name no cluster host.
+- **Config Updates**: Stop PUT bodies overwriting other configs, Roles included.
 - **Port Forwards**: Refuse invalid destination hosts; bound local port retries.
 - **Websocket VM Lists**: Refuse malformed requests; never crash `phenix ui`.
+- **VNC**: Stop roles without `vms/vnc` reaching VM consoles.
+- **VM Mounts**: Stop one VM's routes reaching other VMs' mounts.
 - **Disk Injections**: Stop paths running commands or changing host files.
 - **Injection Permissions**: Stop chmod-ing host files; inject copies instead.
 - **minimega Scripts**: Stop config values running head node shell commands.

@@ -413,6 +413,8 @@ func Start(opts ...ServerOption) error {
 	}
 
 	api.Use(middleware.Auth(o.jwtKey, o.proxyAuthHeader))
+	api.Use(refuseUnsafeVMNames)
+	api.Use(refuseStoppingExperiments)
 
 	switch o.logMiddleware {
 	case "full":
