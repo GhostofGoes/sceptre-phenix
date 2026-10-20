@@ -42,6 +42,8 @@ All notable changes to this project will be documented in this file.
 - **Workflow Schema (breaking)**: Workflow configs are validated against the new `Workflow` schema, so unknown or misspelled keys, values of the wrong type and a missing `spec` return 400 instead of being ignored. ([#445](https://github.com/sandialabs/sceptre-phenix/pull/445))
 - **CLI**: `phenix mm` now stops parsing its own flags at the first minimega argument, so flags meant for minimega (for example the `-a` in `phenix mm cc exec ls -a`) are passed through. `phenix mm` and global flags must now come *before* the minimega command.
 - **CLI**: Upgraded cobra from v1.0.0 to v1.10.2 and pflag from v1.0.3 to v1.0.9. `phenix completion bash` now generates cobra's V2 Bash script, and `phenix completion powershell` includes descriptions.
+- **VM Label Limits (breaking)**: Refuse running-VM labels minimega cannot store.
+- **C2 Commands (breaking)**: Refuse commands minimega would cut at `#`.
 
 ### Removed
 
@@ -58,13 +60,31 @@ All notable changes to this project will be documented in this file.
 - **Web UI Accessibility**: Fixed WCAG A and AA failures that only showed with data: controls that worked only with a mouse, controls with no name, low-contrast colored buttons and tags, dialogs without a dialog role or focus return, and a keyboard trap in the terminal.
 - **Web UI Idle Timeout**: A warning time longer than the idle timeout no longer delays the logout past the timeout, and Settings rejects a warning time that is not shorter than the timeout.
 - **Web UI**: The multi-VM toolbar of a running experiment no longer shows two Restart buttons.
+- **Start Progress**: Never create or re-create the minimega namespace.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
+- **Running VM Labels**: Escape label quotes and backslashes for minimega.
+- **VM Flush**: Keep other powered-off VMs on kill and redeploy.
+- **Per-VM Start**: Start every VM despite failures; name failed VMs.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
+- **Port Forwards**: Keep forwards when `cc tunnel list` fails.
+- **minimega Restarts**: Retry unsent commands once on a fresh connection.
+- **C2 Commands**: Pass `$` to guests instead of minimega's environment.
+- **Cluster Hosts**: Report the failed minimega `host` command's error.
+- **Scheduling**: Keep minimega's host names; trim suffixes only for display.
 - **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
+- **Files Directory**: Ask minimega after `--base-dir.*` apply; retry until answered.
+- **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
+- **C2 Commands**: Clear minimega's `cc filter` after every attempt.
+- **C2 Responses**: Stop truncating guest output at header-like lines.
+- **C2 Responses**: Keep guest output lines over 1 MiB whole.
+- **VM Redeploy**: Keep the VM type instead of forcing KVM.
+- **VM Screenshots**: Report minimega failures instead of `screenshot not found`.
+- **VM Info**: Skip `disk info` for VMs without a disk.
+- **VM Lookups**: Pick the exact name among case-folded matches.
 - **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
@@ -102,6 +122,8 @@ All notable changes to this project will be documented in this file.
 
 - **API Authentication**: The auth middleware let any request whose path ended in `/login` or `/signup` through without a token, which included routes such as `/api/v1/experiments/{name}` and `/api/v1/configs/{kind}/{name}` when the last path variable was `login`. Only `/api/v1/login`, `/api/v1/signup`, and the file server `/login` are now public. Signing in with an unknown username now returns the same 401 as a wrong password, after the same bcrypt work, instead of a 404 that echoed the username. With proxy authentication the 404 still carries the proxied username, which the web UI uses to start sign-up.
 - **Workflow configs**: `POST /api/v1/workflow/configs/{branch}` no longer exposes server environment variables in its errors to callers who may not write that config, and checks the role's config names when creating one. ([#436](https://github.com/sandialabs/sceptre-phenix/pull/436))
+- **VM Labels**: Stop minimega expanding `$` or fetching `file:` labels.
+- **minimega Commands**: Refuse arguments, such as VLANs, that crash minimega.
 
 ## [1.0.0]
 

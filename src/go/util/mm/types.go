@@ -189,21 +189,32 @@ func (v VMs) SortBy(col string, asc bool) {
 	}
 }
 
+// Paginate returns page page, counted from 1, of the VMs split into pages of
+// size VMs. A page past the end, or a page or size below 1, is empty.
 func (v VMs) Paginate(page, size int) VMs {
-	var (
-		start = (page - 1) * size
-		end   = start + size
-	)
-
-	if start >= len(v) {
+	// Checked before multiplying: an overflowing (page-1)*size would wrap to a
+	// negative start.
+	if page < 1 || size < 1 || page-1 > len(v)/size {
 		return VMs{}
 	}
 
-	if end > len(v) {
-		end = len(v)
+	var (
+		start = (page - 1) * size
+		end   = len(v)
+	)
+
+	if size < end-start {
+		end = start + size
 	}
 
 	return v[start:end]
+}
+
+// Named returns the VM named exactly name, else the first VM, which must
+// exist. minimega's name= filter folds case, so the VMs GetVMInfo lists for
+// one name can include another VM whose name differs only in case.
+func (v VMs) Named(name string) VM {
+	return pickVM(v, name)
 }
 
 type VM struct {
