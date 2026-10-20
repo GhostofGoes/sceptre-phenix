@@ -13,6 +13,7 @@ import (
 
 	"phenix/store"
 	"phenix/types"
+	"phenix/util/common"
 	"phenix/util/mm"
 	"phenix/util/plog"
 )
@@ -178,6 +179,51 @@ func TestUserAppQueriesVMsOnlyWhenTheyCanExist(t *testing.T) {
 				t.Fatalf("expected %d runtime VMs, got %#v", tt.want, exp.VMs)
 			}
 		})
+	}
+}
+
+// TestUserAppGetsTheHostnameSuffixes is a regression test: apps trimmed only
+// the default suffixes -minimega and -phenix from host names to tell the
+// headnode, since phenix passed them no --hostname-suffixes.
+func TestUserAppGetsTheHostnameSuffixes(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "suffixes")
+
+	//nolint:gosec // test user app must be executable
+	if err := os.WriteFile(
+		filepath.Join(dir, UserAppPrefix+"suffixes-test"),
+		[]byte("#!/bin/sh\ncat >/dev/null\nprintf %s \"$PHENIX_HOSTNAME_SUFFIXES\" > "+out+"\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	originalMM, originalSuffixes := mm.DefaultMM, common.HostnameSuffixes
+	t.Cleanup(func() {
+		mm.DefaultMM = originalMM                  //nolint:reassign // restore test double
+		common.HostnameSuffixes = originalSuffixes //nolint:reassign // restore configuration
+	})
+
+	mm.DefaultMM = new(countingRuntimeMM) //nolint:reassign // install test double
+	common.HostnameSuffixes = "-foo,-bar" //nolint:reassign // configure the test
+
+	var u UserApp
+	if err := u.Init(Name("suffixes-test")); err != nil {
+		t.Fatal(err)
+	}
+
+	exp := types.NewExperiment(store.ConfigMetadata{Name: "suffixes-test"})
+	exp.Spec.SetExperimentName("suffixes-test")
+
+	if err := u.shellOut(context.Background(), ActionConfigure, exp); err != nil {
+		t.Fatalf("running user app: %v", err)
+	}
+
+	got, err := os.ReadFile(out) //nolint:gosec // test file
+	if err != nil || string(got) != "-foo,-bar" {
+		t.Errorf("the app got PHENIX_HOSTNAME_SUFFIXES %q (%v), want -foo,-bar", got, err)
 	}
 }
 
