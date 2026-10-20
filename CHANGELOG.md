@@ -43,6 +43,7 @@ All notable changes to this project will be documented in this file.
 - **Injection Permissions (breaking)**: Refuse two modes for one base-directory source.
 - **Delayed Starts (breaking)**: Reject bad `delay.timer` values; list enforced delays.
 - **Periodic Apps (breaking)**: Skip and log periods under one second.
+- **sudo Paths (breaking)**: `sudo setsid`/`nohup phenix` use the user's paths.
 - **VM Files (breaking)**: Refuse unsafe snapshot, capture and commit names.
 - **Memory Snapshots (breaking)**: Accept plain file names, not host paths.
 - **VM Commits (breaking)**: Refuse existing images instead of truncating them.
@@ -132,7 +133,9 @@ All notable changes to this project will be documented in this file.
 - **User Commands**: Pass signals that end phenix to their groups.
 - **VM Commits**: Stop quick base image copies crashing `phenix ui`.
 - **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **sudo Config File**: Create missing `config.yaml` in `/etc/phenix`, not home.
 - **Port Forward Reaper**: Drop stopped experiments' forwards without querying minimega.
+- **Dry-Run Restart**: Let `phenix experiment start <name>` restart dry-run experiments.
 - **Experiment Delete**: Remove staged C2 startup scripts from cluster nodes.
 - **Experiment Reconfigure**: Stop sending `ns del-bridge`, which recreated the namespace.
 - **Auto Bridge Mode**: Move unbridged interfaces to the experiment's bridge.
@@ -212,6 +215,7 @@ All notable changes to this project will be documented in this file.
 - **VM Mount Uploads**: Replace existing files whole; report failed writes.
 - **VM Mounts**: Stop UI unmounts from removing CLI-made mounts.
 - **VM Mounts**: Remount after stops; keep counts when unmounts fail.
+- **SCORCH CLI**: Report missing experiments instead of panicking.
 - **SCORCH Cancel**: Run stop and cleanup stages after a cancel.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
@@ -222,6 +226,8 @@ All notable changes to this project will be documented in this file.
 - **VM Mount Path**: Honor given paths; fail if mounted elsewhere.
 - **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
 - **Start Script Labels**: Escape quotes and backslashes for minimega.
+- **minimega Passthrough**: Exit 0 from `phenix mm quit`, which minimega never answers.
+- **CLI Redeploy**: Keep the VM's CPUs and memory unless given.
 - **Port Forwards**: Send minimega the default `127.0.0.1` destination host.
 - **C2 Commands**: Clear minimega's `cc filter` after every attempt.
 - **C2 Responses**: Stop truncating guest output at header-like lines.
@@ -267,6 +273,7 @@ All notable changes to this project will be documented in this file.
 - **Experiment Stop**: End SCORCH runs first; keep their final status.
 - **Experiment Stop**: Cancel and await triggered runs; refuse new triggers.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
+- **CLI Periodic Apps**: Keep the new run's start time.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **SoH Startup Delay**: Stop waiting once the start is canceled.
 - **Failed Starts**: Run cleanup apps for every failure after pre-start.

@@ -24,7 +24,6 @@ import (
 const (
 	infoArgs               = 2
 	pauseArgs              = 2
-	defaultMem             = 512
 	redeployArgs           = 2
 	shutdownArgs           = 2
 	killArgs               = 2
@@ -626,9 +625,11 @@ func newVMRedeployCmd() *cobra.Command {
 	}
 
 	// not sure that this is the correct way to handle ints
-	cmd.Flags().IntVarP(&cpu, "cpu", "c", 1, "Number of VM CPUs (1-8 is valid)")
+	// Zero keeps the VM's current value: minimega's cloned config is only
+	// changed for the values given.
+	cmd.Flags().IntVarP(&cpu, "cpu", "c", 0, "Number of VM CPUs (1-8 is valid; default keeps the current number)")
 	cmd.Flags().
-		IntVarP(&mem, "mem", "m", defaultMem, "Amount of memory in megabytes (512, 1024, 2048, 3072, 4096, 8192, 12288, 16384 are valid)")
+		IntVarP(&mem, "mem", "m", 0, "Amount of memory in megabytes (512, 1024, 2048, 3072, 4096, 8192, 12288, 16384 are valid; default keeps the current amount)")
 	cmd.Flags().StringP("disk", "d", "", "VM backing disk image")
 	cmd.Flags().BoolP("replicate-injects", "r", false, "Recreate disk snapshot, VM injections and deletions")
 	cmd.Flags().
