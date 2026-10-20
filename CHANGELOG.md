@@ -47,6 +47,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
