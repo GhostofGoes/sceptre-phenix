@@ -8,6 +8,8 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 
+	"phenix/api/experiment"
+	"phenix/store"
 	"phenix/util/mm"
 	"phenix/util/plog"
 	"phenix/web/broker"
@@ -103,10 +105,53 @@ func deleteForward(l ft.Listener) {
 	delete(forwards, l.ToKey())
 }
 
-func reapForwards() {
+// deleteExperimentForwards deletes every port forward of the given experiment.
+// It waits for a reaper tick in progress to finish.
+func deleteExperimentForwards(exp string) {
+	forwardsMu.Lock()
+	defer forwardsMu.Unlock()
+
 	for _, l := range forwards {
-		if !forwardExists(l) {
+		if l.Exp == exp {
 			deleteForward(l)
 		}
 	}
+}
+
+// reapForwards deletes the port forwards whose tunnels are gone. It asks
+// minimega about the tunnels of running experiments only: the stopping hook
+// runs in the process that stops an experiment, such as the CLI, so this
+// process can still hold forwards of an experiment that is stopped, and asking
+// about them would create its cleared namespace again.
+func reapForwards() {
+	running := make(map[string]bool)
+
+	for _, l := range forwards {
+		up, checked := running[l.Exp]
+		if !checked {
+			up = experimentRunning(l.Exp)
+			running[l.Exp] = up
+		}
+
+		if !up || !forwardExists(l) {
+			deleteForward(l)
+		}
+	}
+}
+
+// experimentRunning reports whether the experiment is running for real. If the
+// store can't tell, it reports true and leaves the decision to minimega.
+func experimentRunning(name string) bool {
+	exp, err := experiment.Get(name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotExist) {
+			return false
+		}
+
+		plog.Warn(plog.TypeSystem, "getting experiment of port forwards", "exp", name, "err", err)
+
+		return true
+	}
+
+	return exp.Running() && !exp.DryRun()
 }

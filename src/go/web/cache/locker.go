@@ -13,6 +13,15 @@ func IsExperimentLocked(name string) Status {
 	return Locked(key)
 }
 
+// IsExperimentStopping reports whether a stop of the experiment by this
+// process is in progress. Until the stop clears the experiment's start time
+// in the store, experiment.RequireRunning still passes, although the stop may
+// have cleared the minimega namespace, which a namespaced command creates
+// again.
+func IsExperimentStopping(name string) bool {
+	return IsExperimentLocked(name) == StatusStopping
+}
+
 func UnlockExperiment(name string) {
 	key := "experiment|" + name
 
