@@ -5,13 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"go.etcd.io/bbolt"
 )
 
-const boltFileMode = 0o600
+const (
+	boltFileMode = 0o600
+	boltDirMode  = 0o750
+)
 
 type BoltDB struct {
 	mu sync.Mutex
@@ -37,6 +42,16 @@ func (b *BoltDB) Init(opts ...Option) error {
 	}
 
 	b.path = u.Host + u.Path
+
+	// bbolt creates the database file but not its directory, and the default
+	// directories phenix creates at startup only cover the default endpoint.
+	// A relative path, such as the two-slash bolt://etc/phenix/store.bdb, would
+	// create an empty store under whatever directory phenix runs in.
+	if filepath.IsAbs(b.path) {
+		if err := os.MkdirAll(filepath.Dir(b.path), boltDirMode); err != nil {
+			return fmt.Errorf("creating BoltDB directory: %w", err)
+		}
+	}
 
 	if err := b.InitializeComponent(ComponentStore); err != nil {
 		return fmt.Errorf("initializing component %s: %w", ComponentStore, err)
@@ -76,6 +91,8 @@ func (b *BoltDB) InitializeComponent(component Component) error {
 	return nil
 }
 
+// open locks the store and opens the database; Close closes it and unlocks.
+// When open fails, the caller does not call Close, so open unlocks itself.
 func (b *BoltDB) open() error {
 	b.mu.Lock()
 
@@ -83,6 +100,9 @@ func (b *BoltDB) open() error {
 
 	b.db, err = bbolt.Open(b.path, boltFileMode, &bbolt.Options{NoFreelistSync: true}) //nolint:exhaustruct // partial initialization
 	if err != nil {
+		b.db = nil
+		b.mu.Unlock()
+
 		return err
 	}
 
@@ -199,12 +219,18 @@ func (b *BoltDB) Create(c *Config) error {
 }
 
 func (b *BoltDB) Update(c *Config) error {
-	_ = b.open()
+	if err := b.open(); err != nil {
+		return err
+	}
 
 	defer func() { _ = b.Close() }()
 
 	if _, err := b.get(c.Kind, c.Metadata.Name); err != nil {
-		return ErrNotExist
+		if errors.Is(err, ErrNotExist) {
+			return ErrNotExist
+		}
+
+		return fmt.Errorf("reading config to update: %w", err)
 	}
 
 	c.Metadata.Updated = time.Now().Format(time.RFC3339)
@@ -221,17 +247,66 @@ func (b *BoltDB) Update(c *Config) error {
 	return nil
 }
 
+// Modify implements Modify in one BoltDB transaction.
+func (b *BoltDB) Modify(c *Config, change func(*Config) error) error {
+	if err := b.open(); err != nil {
+		return err
+	}
+
+	defer func() { _ = b.Close() }()
+
+	if err := b.ensureBucket(c.Kind); err != nil {
+		return err
+	}
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(c.Kind))
+
+		v := bucket.Get([]byte(c.Metadata.Name))
+		if v == nil {
+			return fmt.Errorf("%w: key %s does not exist in bucket %s", ErrNotExist, c.Metadata.Name, c.Kind)
+		}
+
+		var stored Config
+
+		if err := json.Unmarshal(v, &stored); err != nil {
+			return fmt.Errorf("unmarshaling config JSON: %w", err)
+		}
+
+		*c = stored
+
+		if err := change(c); err != nil {
+			return err
+		}
+
+		c.Metadata.Updated = time.Now().Format(time.RFC3339)
+
+		v, err := json.Marshal(c)
+		if err != nil {
+			return fmt.Errorf("marshaling config JSON: %w", err)
+		}
+
+		if err := bucket.Put([]byte(c.Metadata.Name), v); err != nil {
+			return fmt.Errorf("writing config JSON to Bolt: %w", err)
+		}
+
+		return nil
+	})
+}
+
 func (b *BoltDB) Patch(*Config, map[string]any) error {
 	return errors.New("boltDB.Patch not implemented")
 }
 
 func (b *BoltDB) Delete(c *Config) error {
-	_ = b.open()
+	if err := b.open(); err != nil {
+		return err
+	}
 
 	defer func() { _ = b.Close() }()
 
 	if err := b.ensureBucket(c.Kind); err != nil {
-		return nil
+		return fmt.Errorf("deleting key %s in bucket %s: %w", c.Metadata.Name, c.Kind, err)
 	}
 
 	err := b.db.Update(func(tx *bbolt.Tx) error {

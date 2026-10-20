@@ -74,7 +74,11 @@ All notable changes to this project will be documented in this file.
 - **VM Screenshots**: Report minimega failures instead of `screenshot not found`.
 - **VM Info**: Skip `disk info` for VMs without a disk.
 - **VM Lookups**: Pick the exact name among case-folded matches.
+- **BoltDB Store**: Create missing directories of absolute `bolt://` paths.
+- **BoltDB Store**: Stop hiding delete and update failures.
+- **Etcd Store**: Report missing, existing and unreadable configs like BoltDB.
 - **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
+- **BoltDB Store**: Stop hanging after one failed database open.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
