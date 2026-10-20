@@ -19,8 +19,22 @@ import (
 	"unicode"
 )
 
+// guestBootTimeout bounds how long a real guest image takes from `vm start`
+// to a registered miniccc client under KVM on a hosted runner.
+const guestBootTimeout = 4 * time.Minute
+
 // ccWait bounds how long ccExec and guestShell wait for a guest's answer.
 const ccWait = 2 * time.Minute
+
+// waitCCClients waits until minimega's cc server in namespace ns has a client
+// reporting each of the given hostnames, which proves the guest booted, the
+// miniccc service phenix's image build installed came up, and phenix's
+// startup injection set the hostname.
+func waitCCClients(t *testing.T, ns string, hostnames ...string) {
+	t.Helper()
+
+	waitCCClientsWithin(t, ns, guestBootTimeout, hostnames...)
+}
 
 // waitCCClientsWithin is waitCCClients with an explicit boot budget, for
 // images that boot slower than the general-purpose guest (desktop images).
@@ -43,6 +57,18 @@ func waitCCClientsWithin(t *testing.T, ns string, timeout time.Duration, hostnam
 
 		return true, ""
 	})
+}
+
+// ccExec runs argv in VM vm of namespace ns through minimega's cc (no shell
+// unless argv starts one) and returns what the command wrote to stdout once
+// the VM has responded. The command is deleted afterwards, also when no
+// answer comes: minimega sends every command it still holds to a client that
+// connects again (a new client starts at command 0, internal/ron/server.go),
+// so a guest that reboots, restarts or is restored would run it again.
+func ccExec(t *testing.T, ns, vm string, argv ...string) string {
+	t.Helper()
+
+	return ccRun(t, ns, vm, ccWait, "", argv)
 }
 
 // ccRun is ccExec waiting up to wait for the answer. When nonce is not empty,
