@@ -58,6 +58,14 @@ All notable changes to this project will be documented in this file.
 - **Web UI Accessibility**: Fixed WCAG A and AA failures that only showed with data: controls that worked only with a mouse, controls with no name, low-contrast colored buttons and tags, dialogs without a dialog role or focus return, and a keyboard trap in the terminal.
 - **Web UI Idle Timeout**: A warning time longer than the idle timeout no longer delays the logout past the timeout, and Settings rejects a warning time that is not shorter than the timeout.
 - **Web UI**: The multi-VM toolbar of a running experiment no longer shows two Restart buttons.
+- **User Commands**: Stop leaking stream readers on failed starts.
+- **User Commands**: Signal the whole process group on cancel.
+- **User Commands**: Pass signals that end phenix to their groups.
+- **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
+- **Subprocess Output**: Read lines up to 64 MiB without hanging.
+- **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
+- **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.
