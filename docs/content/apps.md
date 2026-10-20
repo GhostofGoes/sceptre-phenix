@@ -784,8 +784,13 @@ phēnix centralized logging system.
 !!! note
     It is possible for the execution of app stages to be canceled by the caller.
     In the case of user apps, `phenix` will send a `SIGTERM` to the user app
-    process and wait a maximum of 10 seconds for the process to exit gracefully
-    before killin the process with a `SIGKILL`.
+    process and the processes it started, which run in a process group of
+    their own, and wait a maximum of 10 seconds for them to exit gracefully
+    before killing the group with a `SIGKILL`. As a terminal's signals do not
+    reach that group, a `SIGINT`, `SIGTERM` or `SIGHUP` that ends `phenix`,
+    such as a second Ctrl-C, is passed on to it first, and a group already
+    sent its `SIGTERM` is killed at once. A `phenix` killed by `SIGKILL`
+    leaves the group running.
 
 ### Available User Apps
 
