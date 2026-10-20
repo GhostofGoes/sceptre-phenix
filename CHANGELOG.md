@@ -64,6 +64,7 @@ All notable changes to this project will be documented in this file.
 - **minimega Scripts (breaking)**: Refuse values minimega would split or misread.
 - **VM Label Limits (breaking)**: Refuse running-VM labels minimega cannot store.
 - **C2 Commands (breaking)**: Refuse commands minimega would cut at `#`.
+- **Screenshot Sizes (breaking)**: Accept only whole numbers 0 to 4096.
 - **Config Updates (breaking)**: Refuse a running experiment's config without force.
 - **Experiment Names (breaking)**: Refuse `.`, `..` and `all`, renames included.
 - **Base Directories (breaking)**: Refuse the root and phēnix's own directories.
@@ -124,15 +125,18 @@ All notable changes to this project will be documented in this file.
 - **User Commands**: Pass signals that end phenix to their groups.
 - **VM Commits**: Stop quick base image copies crashing `phenix ui`.
 - **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **Port Forward Reaper**: Drop stopped experiments' forwards without querying minimega.
 - **Experiment Delete**: Remove staged C2 startup scripts from cluster nodes.
 - **Experiment Reconfigure**: Stop sending `ns del-bridge`, which recreated the namespace.
 - **Auto Bridge Mode**: Move unbridged interfaces to the experiment's bridge.
 - **Failed Starts**: Delete leftover disk snapshots and report cleanup errors.
+- **Stopping Hooks**: Drop port forwards before clearing the minimega namespace.
 - **Subnet Captures**: Never overwrite an earlier capture's file.
 - **Subnet Captures**: Fail when a cluster node cannot list files.
 - **User Apps**: Query VMs only from post-start, outside dry runs.
 - **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
 - **Startup Autotunnels**: End C2 waits at stop; skip dry runs.
+- **Port Forwards**: Refuse forwards to an experiment being stopped.
 - **Linux Interface MTU**: Apply topology interface MTUs on Linux guests.
 - **Default App Order**: Run default apps in their documented order.
 - **Serial Device Default**: Suggest `/dev/ttyphenix0` instead of the guest's `/dev/ttyS0`.
@@ -152,6 +156,7 @@ All notable changes to this project will be documented in this file.
 - **Tap App**: Create no taps or namespaces on dry runs.
 - **Startup Disk Images**: Refuse unusable paths; warn on denied access.
 - **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **Role-less Requests**: Answer 403 instead of dropping the connection.
 - **Periodic Apps**: Resume after skipped ticks; stop without hanging.
 - **App Stages**: Keep others' status; never write into newer runs.
 - **Stage Triggers**: Keep running flags that refuse second SCORCH runs.
@@ -168,6 +173,7 @@ All notable changes to this project will be documented in this file.
 - **VM Mount Path**: Honor given paths; fail if mounted elsewhere.
 - **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
 - **Start Script Labels**: Escape quotes and backslashes for minimega.
+- **Port Forwards**: Send minimega the default `127.0.0.1` destination host.
 - **C2 Commands**: Clear minimega's `cc filter` after every attempt.
 - **C2 Responses**: Stop truncating guest output at header-like lines.
 - **C2 Responses**: Keep guest output lines over 1 MiB whole.
@@ -179,7 +185,10 @@ All notable changes to this project will be documented in this file.
 - **Snapshot Files**: Remove files a failed VM snapshot wrote.
 - **VM Snapshots**: Refuse VMs without disk snapshots before saving anything.
 - **Reset Disk**: Create snapshots in instance directories so VMs restart.
+- **VM Screenshots**: Cache each size separately.
 - **VM Screenshots**: Report minimega failures instead of `screenshot not found`.
+- **Screenshot Updates**: Stop logging errors for stopped experiments' VMs.
+- **Screenshot Updates**: Keep each websocket client's screenshot size its own.
 - **VM Info**: Skip `disk info` for VMs without a disk.
 - **VM Lookups**: Pick the exact name among case-folded matches.
 - **BoltDB Store**: Create missing directories of absolute `bolt://` paths.
@@ -248,6 +257,8 @@ All notable changes to this project will be documented in this file.
 - **Writable Disks**: Stop guests writing images other experiments boot from.
 - **VM Labels**: Stop minimega expanding `$` or fetching `file:` labels.
 - **minimega Commands**: Refuse arguments, such as VLANs, that crash minimega.
+- **Port Forwards**: Refuse invalid destination hosts; bound local port retries.
+- **Websocket VM Lists**: Refuse malformed requests; never crash `phenix ui`.
 - **Disk Injections**: Stop paths running commands or changing host files.
 - **Injection Permissions**: Stop chmod-ing host files; inject copies instead.
 - **minimega Scripts**: Stop config values running head node shell commands.

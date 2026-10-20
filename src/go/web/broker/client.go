@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"phenix/util/mm"
 	"phenix/util/plog"
 	bt "phenix/web/broker/brokertypes"
+	webcache "phenix/web/cache"
 	"phenix/web/middleware"
 	"phenix/web/proto"
 	"phenix/web/rbac"
@@ -44,6 +48,9 @@ const (
 	publishChannelBuffer        = 256
 	screenshotTickerInterval    = 5 * time.Second
 	defaultBrokerScreenshotSize = "200"
+
+	// maxVMListPage bounds the page number and size of a VM list request.
+	maxVMListPage = 1 << 20
 )
 
 var (
@@ -52,7 +59,6 @@ var (
 		ReadBufferSize:  socketBufferSize,
 		WriteBufferSize: socketBufferSize,
 	}
-	screenshotSize = defaultBrokerScreenshotSize //nolint:gochecknoglobals // global config
 )
 
 type Client struct {
@@ -69,6 +75,11 @@ type Client struct {
 	// the WebSocket connection.
 	vms  []vmScope
 	vmMu sync.RWMutex
+
+	// The size of the screenshots the client is sent, as it last asked;
+	// empty for the default size.
+	screenshotSize string
+	sizeMu         sync.Mutex
 }
 
 func NewClient(role rbac.Role, conn *websocket.Conn) *Client {
@@ -108,9 +119,57 @@ func (c *Client) stop() {
 	_ = c.conn.Close()
 }
 
+// vmListOptions returns the sort column and order and the page number and
+// size of an experiment/vms list request's payload. A missing field leaves the
+// list unsorted, in descending order or unpaged; a field of the wrong type, or
+// a page number or size that is not a whole number from 0 to maxVMListPage,
+// is an error.
+func vmListOptions(payload map[string]any) (string, bool, int, int, error) {
+	var (
+		sort, sortOK = payload["sort_column"].(string)
+		asc, ascOK   = payload["sort_asc"].(bool)
+	)
+
+	if !sortOK && payload["sort_column"] != nil {
+		return "", false, 0, 0, fmt.Errorf("sort_column %v is not a string", payload["sort_column"])
+	}
+
+	if !ascOK && payload["sort_asc"] != nil {
+		return "", false, 0, 0, fmt.Errorf("sort_asc %v is not a Boolean", payload["sort_asc"])
+	}
+
+	paging := make([]int, 0, 2) //nolint:mnd // page number and size
+
+	for _, key := range []string{"page_number", "page_size"} {
+		v, ok := payload[key].(float64)
+		if !ok && payload[key] != nil {
+			return "", false, 0, 0, fmt.Errorf("%s %v is not a number", key, payload[key])
+		}
+
+		if v < 0 || v > maxVMListPage || v != math.Trunc(v) {
+			return "", false, 0, 0, fmt.Errorf("%s %v is not a whole number from 0 to %d", key, v, maxVMListPage)
+		}
+
+		paging = append(paging, int(v))
+	}
+
+	return sort, asc, paging[0], paging[1], nil
+}
+
+// recoverPanic logs a panic of one of the client's goroutines, with its
+// stack, so that the panic ends only this client, which the goroutine's
+// deferred Stop then stops, and not phenix ui. The goroutine must defer it
+// directly, after its Stop.
+func (c *Client) recoverPanic(task string) {
+	if r := recover(); r != nil {
+		plog.Error(plog.TypeSystem, task, "panic", r, "stack", string(debug.Stack()))
+	}
+}
+
 //nolint:cyclop,funlen,gocyclo // complex logic
 func (c *Client) read() { //nolint:maintidx // complex logic
 	defer c.Stop()
+	defer c.recoverPanic("handling WebSocket client request")
 
 	c.conn.SetReadLimit(maxMsgSize)
 
@@ -181,10 +240,16 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 					continue
 				}
 
-				size, ok := payload["size"]
-				if ok {
+				if size, ok := payload["size"]; ok {
+					size, err := util.ScreenshotSize(size)
+					if err != nil {
+						plog.Warn(plog.TypeSystem, "refusing screenshot resolution", "err", err)
+
+						continue
+					}
+
 					plog.Debug(plog.TypeSystem, "updated screenshot resolution", "size", size)
-					screenshotSize = size
+					c.setScreenshotSize(size)
 
 					c.updateScreenshots()
 				}
@@ -356,6 +421,13 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 
 			expName := req.Resource.Name
 
+			sort, asc, page, size, err := vmListOptions(payload)
+			if err != nil {
+				plog.Error(plog.TypeSystem, "invalid WebSocket VM list request", "exp", expName, "err", err)
+
+				continue
+			}
+
 			exp, err := experiment.Get(expName)
 			if err != nil {
 				plog.Error(
@@ -420,7 +492,7 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 
 				if c.role.Allowed("vms", "list", fmt.Sprintf("%s/%s", expName, vm.Name)) {
 					if vm.Running {
-						screenshot, err := util.GetScreenshot(expName, vm.Name, screenshotSize)
+						screenshot, err := util.GetScreenshot(expName, vm.Name, c.getScreenshotSize())
 						if err != nil {
 							plog.Error(
 								plog.TypeSystem,
@@ -438,15 +510,6 @@ func (c *Client) read() { //nolint:maintidx // complex logic
 					allowed = append(allowed, vm)
 				}
 			}
-
-			var (
-				sort, _ = payload["sort_column"].(string)
-				asc     = payload["sort_asc"].(bool)
-				page    = int(payload["page_number"].(float64))
-				size    = int(payload["page_size"].(float64))
-			)
-
-			payload = map[string]any{"total": len(allowed)}
 
 			if sort != "" {
 				allowed.SortBy(sort, asc)
@@ -503,6 +566,7 @@ func (c *Client) write() {
 
 	defer ticker.Stop()
 	defer c.Stop()
+	defer c.recoverPanic("publishing to WebSocket client")
 
 	for {
 		select {
@@ -589,6 +653,7 @@ func (c *Client) setScreenshotsTicker() {
 
 	defer ticker.Stop()
 	defer c.Stop()
+	defer c.recoverPanic("updating WebSocket client screenshots")
 
 	for {
 		select {
@@ -611,11 +676,25 @@ func (c *Client) updateScreenshots() {
 
 	c.vmMu.RUnlock()
 
+	size := c.getScreenshotSize()
+
 	for exp, vms := range names {
 		for _, vm := range vms {
-			screenshot, err := util.GetScreenshot(exp, vm, screenshotSize)
+			screenshot, err := util.GetScreenshot(exp, vm, size)
 			if err != nil {
-				if errors.Is(err, mm.ErrVMNotFound) {
+				// A client may still show an experiment that has stopped, or is a
+				// dry run; none of its VMs has a screenshot until it is listed again.
+				// A stop in progress can still fail, so the VMs of an experiment
+				// being stopped stay in view, without screenshots until it ends.
+				if errors.Is(err, experiment.ErrExperimentNotRunning) {
+					if !webcache.IsExperimentStopping(exp) {
+						c.forgetVMs(exp)
+					}
+
+					break
+				}
+
+				if errors.Is(err, mm.ErrVMNotFound) || errors.Is(err, mm.ErrVMNotRunning) {
 					continue
 				}
 
@@ -650,6 +729,35 @@ func (c *Client) updateScreenshots() {
 			}
 		}
 	}
+}
+
+// getScreenshotSize returns the size of the screenshots the client is sent.
+func (c *Client) getScreenshotSize() string {
+	c.sizeMu.Lock()
+	defer c.sizeMu.Unlock()
+
+	if c.screenshotSize == "" {
+		return defaultBrokerScreenshotSize
+	}
+
+	return c.screenshotSize
+}
+
+// setScreenshotSize sets the size of the screenshots the client is sent.
+func (c *Client) setScreenshotSize(size string) {
+	c.sizeMu.Lock()
+	defer c.sizeMu.Unlock()
+
+	c.screenshotSize = size
+}
+
+// forgetVMs drops the VMs of experiment exp from the VMs the client has in
+// view.
+func (c *Client) forgetVMs(exp string) {
+	c.vmMu.Lock()
+	defer c.vmMu.Unlock()
+
+	c.vms = slices.DeleteFunc(c.vms, func(v vmScope) bool { return v.exp == exp })
 }
 
 func ServeWS(w http.ResponseWriter, r *http.Request) {
