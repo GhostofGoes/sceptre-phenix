@@ -489,6 +489,18 @@ phenix vm set my-exp my-vm -L val1=true -L val2=roger
     [`phenix vm net`](#modify-the-network-connectivity) to modify interface
     VLAN connections on a running experiment.
 
+!!! note
+    minimega cannot store some labels as tags of a running VM, so phēnix
+    refuses a label of a running VM whose key or value is empty, holds a
+    non-printable character other than a tab or line break, or holds a double
+    quote, single quote, backslash or `#` without also holding whitespace, such
+    as `a"b` or `it's`. The error names the VM and the label, and
+    labels can still be set while the experiment is stopped. With
+    `--append-labels` (or the `ADD` update mode) the VM's existing labels are
+    sent to minimega again and checked too, so while the experiment runs an
+    existing label of that kind blocks adding labels; replace the labels
+    without it instead.
+
 ## Applying Actions to Multiple VMs
 
 !!! note

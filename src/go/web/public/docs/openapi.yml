@@ -1283,6 +1283,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Hosts"
+        "500":
+          description: the cluster hosts cannot be read from minimega, for example while it is down
+          content:
+            text/plain:
+              schema:
+                type: string
   "/users":
     get:
       tags:

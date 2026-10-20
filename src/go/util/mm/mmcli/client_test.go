@@ -230,6 +230,219 @@ func TestRunRedialsAfterConnectionLoss(t *testing.T) {
 	}
 }
 
+// fakeDaemon is a fake minimega that can exit and start again on the same
+// socket, as a minimega restarted under a running phenix ui does.
+type fakeDaemon struct {
+	t      *testing.T
+	dir    string
+	handle fakeHandler
+
+	mu       sync.Mutex
+	listener net.Listener
+	conns    []net.Conn
+	serving  sync.WaitGroup
+}
+
+func newFakeDaemon(t *testing.T, handle fakeHandler) *fakeDaemon {
+	t.Helper()
+
+	d := &fakeDaemon{t: t, dir: t.TempDir(), handle: handle}
+
+	d.start()
+	t.Cleanup(d.stop)
+
+	return d
+}
+
+func (d *fakeDaemon) start() {
+	d.t.Helper()
+
+	listener, err := net.Listen("unix", filepath.Join(d.dir, "minimega"))
+	if err != nil {
+		d.t.Fatalf("listening on fake minimega socket: %v", err)
+	}
+
+	d.mu.Lock()
+	d.listener = listener
+	d.mu.Unlock()
+
+	d.serving.Add(1)
+
+	go func() {
+		defer d.serving.Done()
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			d.mu.Lock()
+			d.conns = append(d.conns, conn)
+			d.mu.Unlock()
+
+			d.serving.Add(1)
+
+			go func() {
+				defer d.serving.Done()
+
+				serveFake(conn, d.handle)
+			}()
+		}
+	}()
+}
+
+// stop closes the socket and every connection, and returns once their file
+// descriptors are closed, so a client writing next finds its peer gone.
+func (d *fakeDaemon) stop() {
+	d.mu.Lock()
+
+	if d.listener != nil {
+		_ = d.listener.Close()
+	}
+
+	for _, conn := range d.conns {
+		_ = conn.Close()
+	}
+
+	d.listener, d.conns = nil, nil
+
+	d.mu.Unlock()
+
+	d.serving.Wait()
+}
+
+// countingHandler answers every command with its own text and counts how many
+// times each one arrived.
+type countingHandler struct {
+	mu   sync.Mutex
+	seen map[string]int
+	drop string // a command answered by closing the connection
+}
+
+func (h *countingHandler) handle(cmd string) (*miniclient.Response, fakeAction) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.seen == nil {
+		h.seen = make(map[string]int)
+	}
+
+	h.seen[cmd]++
+
+	if h.drop != "" && cmd == h.drop {
+		return nil, actionClose
+	}
+
+	return reply(cmd), actionReply
+}
+
+func (h *countingHandler) count(cmd string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.seen[cmd]
+}
+
+func runText(t *testing.T, text string) (string, error) {
+	t.Helper()
+
+	cmd := NewCommand()
+	cmd.Command = text
+
+	return SingleResponse(Run(cmd))
+}
+
+// TestRunResendsACommandTheStaleConnectionNeverSent is the regression test for
+// the first command after a minimega restart failing in phenix ui. The shared
+// connection still pointed at the old daemon, so writing the command failed
+// with a broken pipe, and only the next command redialed.
+func TestRunResendsACommandTheStaleConnectionNeverSent(t *testing.T) {
+	var (
+		before = &countingHandler{}
+		after  = &countingHandler{}
+		cur    = before
+		curMu  sync.Mutex
+	)
+
+	daemon := newFakeDaemon(t, func(cmd string) (*miniclient.Response, fakeAction) {
+		curMu.Lock()
+		h := cur
+		curMu.Unlock()
+
+		return h.handle(cmd)
+	})
+
+	useFakeMinimega(t, daemon.dir)
+
+	if _, err := runText(t, "version"); err != nil {
+		t.Fatalf("command before the restart: %v", err)
+	}
+
+	daemon.stop()
+
+	curMu.Lock()
+	cur = after
+	curMu.Unlock()
+
+	daemon.start()
+
+	got, err := runText(t, "host")
+	if err != nil {
+		t.Fatalf("first command after a minimega restart failed instead of being resent: %v", err)
+	}
+
+	want := (&Command{Command: "host"}).String()
+
+	if got != want {
+		t.Errorf("first command after the restart got %q, want %q", got, want)
+	}
+
+	if n := after.count(want); n != 1 {
+		t.Errorf("the restarted minimega got the command %d times, want 1", n)
+	}
+
+	if n := before.count(want); n != 0 {
+		t.Errorf("the old minimega got the command %d times, want 0", n)
+	}
+
+	// With minimega down, the resend's dial reports why nothing answered.
+	daemon.stop()
+
+	if _, err := runText(t, "host"); err == nil || !strings.Contains(err.Error(), "unable to dial") {
+		t.Errorf("command with minimega down = %v, want an unable to dial error", err)
+	}
+
+	daemon.start()
+
+	if _, err := runText(t, "host"); err != nil {
+		t.Errorf("command once minimega is back: %v", err)
+	}
+}
+
+// TestRunDoesNotResendACommandMinimegaReceived checks that a command whose
+// connection closed after it was written is reported and not sent again, since
+// minimega may have run it.
+func TestRunDoesNotResendACommandMinimegaReceived(t *testing.T) {
+	want := (&Command{Command: "vm kill all"}).String()
+	h := &countingHandler{drop: want}
+	daemon := newFakeDaemon(t, h.handle)
+
+	useFakeMinimega(t, daemon.dir)
+
+	if _, err := runText(t, "version"); err != nil {
+		t.Fatalf("command on a healthy connection: %v", err)
+	}
+
+	if _, err := runText(t, "vm kill all"); err == nil {
+		t.Fatal("a command whose connection closed unanswered reported no error")
+	}
+
+	if n := h.count(want); n != 1 {
+		t.Errorf("minimega got the command %d times, want 1", n)
+	}
+}
+
 func TestRunWithTimeout(t *testing.T) {
 	dir := newFakeMinimega(t, func(string) (*miniclient.Response, fakeAction) {
 		return nil, actionHang
