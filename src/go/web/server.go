@@ -449,6 +449,8 @@ func Start(opts ...ServerOption) error {
 	addRoutesToRouter(api, optionRoutes...)
 
 	api.Use(middleware.Auth(o.jwtKey, o.proxyAuthHeader))
+	api.Use(refuseUnsafeVMNames)
+	api.Use(refuseStoppingExperiments)
 
 	switch o.logMiddleware {
 	case "full":

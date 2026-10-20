@@ -2,11 +2,13 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +16,10 @@ import (
 	"github.com/gorilla/mux"
 
 	"phenix/api/disk"
+	"phenix/api/experiment"
+	"phenix/api/vm"
+	"phenix/store"
+	ifaces "phenix/types/interfaces"
 	"phenix/util/mm"
 	"phenix/util/plog"
 	"phenix/web/middleware"
@@ -31,6 +37,7 @@ func GetDisks(w http.ResponseWriter, r *http.Request) {
 		query           = r.URL.Query()
 		expName         = query.Get("expName")
 		diskType        = query.Get("diskType")
+		assignable      = query.Get("assignable") == "true"
 		defaultDiskType = disk.VMImage | disk.ContainerImage | disk.ISOImage | disk.UNKNOWN
 	)
 
@@ -54,11 +61,42 @@ func GetDisks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The images also hold the backing images of the files directory's and
+	// the topology's images, which may be anywhere, but a VM may be given only
+	// some of them.
+	var topo ifaces.TopologySpec
+
+	if assignable {
+		if expName == "" {
+			http.Error(w, "assignable needs the expName of the experiment whose VMs get the disks", http.StatusBadRequest)
+
+			return
+		}
+
+		exp, err := experiment.Get(expName)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+
+			http.Error(w, err.Error(), status)
+
+			return
+		}
+
+		topo = exp.Spec.Topology()
+	}
+
 	disks, err := disk.GetImages(expName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return
+	}
+
+	if assignable {
+		disks = slices.DeleteFunc(disks, func(d disk.Details) bool { return !vm.AssignableDisk(topo, d.FullPath) })
 	}
 
 	filtered := []disk.Details{}

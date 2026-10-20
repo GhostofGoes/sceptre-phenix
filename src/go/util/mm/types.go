@@ -118,10 +118,6 @@ func (h Hosts) IncrHostMemCommit(name string, incr int) error {
 	return ErrHostNotFound
 }
 
-type Cluster struct {
-	Hosts []Host `json:"hosts"`
-}
-
 type Host struct {
 	Name        string    `json:"name"`
 	CPUs        int       `json:"cpus"`

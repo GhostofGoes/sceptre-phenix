@@ -10,6 +10,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"golang.org/x/net/websocket"
 
+	"phenix/api/experiment"
 	"phenix/api/vm"
 	"phenix/util/mm"
 	"phenix/util/plog"
@@ -118,10 +119,37 @@ func GetVNCWebSocket(w http.ResponseWriter, r *http.Request) {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "GetVNCWebSocket")
 
 	var (
-		vars = mux.Vars(r)
-		exp  = vars["exp"]
-		name = vars["name"]
+		ctx     = r.Context()
+		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+		vars    = mux.Vars(r)
+		exp     = vars["exp"]
+		name    = vars["name"]
 	)
+
+	// The websocket carries the VM's console, so it needs the same permission
+	// as the VNC page that opens it.
+	if !role.Allowed("vms/vnc", "get", exp+"/"+name) {
+		plog.Warn(
+			plog.TypeSecurity,
+			"vnc websocket access not allowed",
+			"user",
+			ctx.Value(middleware.ContextKeyUser),
+			"exp",
+			exp,
+			"vm",
+			name,
+		)
+		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(exp); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
 
 	endpoint, err := mm.GetVNCEndpoint(mm.NS(exp), mm.VMName(name))
 	if err != nil {

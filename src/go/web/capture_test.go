@@ -34,6 +34,10 @@ func (m *captureHandlerTestMM) GetVMInfo(...mm.Option) mm.VMs {
 	return m.vmInfo
 }
 
+func (m *captureHandlerTestMM) GetVMInfoErr(...mm.Option) (mm.VMs, error) {
+	return m.vmInfo, nil
+}
+
 func (m *captureHandlerTestMM) GetVMCaptures(...mm.Option) []mm.Capture {
 	return m.captures
 }

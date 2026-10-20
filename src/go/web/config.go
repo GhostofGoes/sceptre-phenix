@@ -496,6 +496,40 @@ func GetConfig(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// authorizeConfigRename returns a web error unless the role may store c, the
+// body of an update of the config name, under its own kind and name.
+// config.Update stores the body under the body's kind and name: a body of
+// another kind or name renames the config of the URL, creating the new config
+// and deleting the old one, and config.Update refuses one whose name is taken.
+// So a rename, a kind change included, needs the permissions to create and
+// update the new config and to delete the old one, not only to update the old
+// one.
+func authorizeConfigRename(ctx context.Context, role rbac.Role, name string, c *store.Config) error {
+	newName := store.ConfigFullName(c.Kind, c.Metadata.Name)
+
+	if newName == "" {
+		return weberror.NewWebError(nil, "config %s cannot be updated to %s/%s", name, c.Kind, c.Metadata.Name)
+	}
+
+	if newName == name {
+		return nil
+	}
+
+	allowed := role.Allowed("configs", "create", newName) &&
+		role.Allowed("configs", "update", newName) &&
+		role.Allowed("configs", "delete", name)
+	if allowed {
+		return nil
+	}
+
+	user, _ := ctx.Value(middleware.ContextKeyUser).(string)
+	plog.Warn(plog.TypeSecurity, "renaming config not allowed", "user", user, "config", name, "new", newName)
+
+	err := weberror.NewWebError(nil, "renaming config %s to %s not allowed for %s", name, newName, user)
+
+	return err.SetStatus(http.StatusForbidden)
+}
+
 // UpdateConfig - PUT /configs/{kind}/{name}.
 //
 //nolint:funlen // handler
@@ -624,10 +658,8 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) error {
 		)
 	}
 
-	// The config is stored under the body's kind and name, which can differ from
-	// the path's (a rename or another config), so check that config too.
-	if target := c.FullName(); target != name && !role.Allowed("configs", "update", target) {
-		return configForbidden(ctx, "updating", target)
+	if err := authorizeConfigRename(ctx, role, name, c); err != nil {
+		return err
 	}
 
 	if c.Kind == kindExperiment {

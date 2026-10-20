@@ -482,6 +482,15 @@ func uploadExperimentFiles(authEnabled bool) http.HandlerFunc {
 			return
 		}
 
+		// Refuse the whole upload before any file is written.
+		for _, header := range files {
+			if err := checkUploadName(filepath.Base(header.Filename)); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+		}
+
 		dir := exp.FilesDir()
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			http.Error(w, "creating experiment files directory: "+err.Error(), http.StatusInternalServerError)
@@ -492,11 +501,6 @@ func uploadExperimentFiles(authEnabled bool) http.HandlerFunc {
 		var uploaded int
 		for _, header := range files {
 			name := filepath.Base(header.Filename)
-			if name == "" || name == "." {
-				http.Error(w, "invalid upload filename", http.StatusBadRequest)
-
-				return
-			}
 
 			clientFile, err := header.Open()
 			if err != nil {
@@ -536,6 +540,24 @@ func uploadExperimentFiles(authEnabled bool) http.HandlerFunc {
 		}
 
 		renderFileServerIndex(w, r, fmt.Sprintf("Uploaded %d file(s) to %s.", uploaded, exp.Metadata.Name), authEnabled)
+	}
+}
+
+// checkUploadName returns an error unless name may be the name of a file
+// uploaded to an experiment's files directory.
+//
+// A restore gives the VM the <vm>__<name>.hdd disk and the .state migration
+// stream it finds there, which QEMU, running as root, opens and loads: an
+// uploaded qcow2 disk names any host file as its backing file, and QEMU does
+// not guard against a hostile migration stream. Only phenix writes them.
+func checkUploadName(name string) error {
+	switch ext := filepath.Ext(name); {
+	case name == "" || name == "." || name == "/":
+		return errors.New("invalid upload filename")
+	case ext == ".hdd" || ext == ".state":
+		return fmt.Errorf("invalid upload filename %q: %s files are VM snapshots, which only phenix may write", name, ext)
+	default:
+		return nil
 	}
 }
 
