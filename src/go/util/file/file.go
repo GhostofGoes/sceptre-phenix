@@ -20,6 +20,12 @@ const scorchComponentIndex = 2
 type ClusterFiles interface {
 	GetExperimentFiles(exp, filter string) (Files, error)
 
+	// Returns the path, relative to the experiment's files directory, of every
+	// file a cluster node holds there. GetExperimentFiles drops the listing of a
+	// node that fails; this fails instead, so a path it does not return is free
+	// on every node of the mesh. A missing files directory lists as empty.
+	GetExperimentFilePaths(exp string) ([]string, error)
+
 	// Looks in experiment directory on each cluster node for matching filenames
 	// that end in both `.SNAP` and `.qc2`.
 	GetExperimentSnapshots(exp string) ([]string, error)
@@ -37,6 +43,10 @@ type ClusterFiles interface {
 
 func GetExperimentFiles(exp, filter string) (Files, error) {
 	return DefaultClusterFiles.GetExperimentFiles(exp, filter) //nolint:wrapcheck // passthrough
+}
+
+func GetExperimentFilePaths(exp string) ([]string, error) {
+	return DefaultClusterFiles.GetExperimentFilePaths(exp) //nolint:wrapcheck // passthrough
 }
 
 func GetExperimentSnapshots(exp string) ([]string, error) {
@@ -66,19 +76,13 @@ func (MMClusterFiles) GetExperimentFiles(exp, filter string) (Files, error) {
 		root    = exp + "/files/"
 	)
 
-	// First get file listings from mesh, then from headnode.
-	commands := []string{
-		fmt.Sprintf("mesh send all file list %s recursive", root),
-		fmt.Sprintf("file list %s recursive", root),
-	}
-
 	cmd := mmcli.NewCommand()
 
 	// Build a Boolean expression tree and determine
 	// the fields that should be searched
 	filterTree := BuildTree(filter)
 
-	for _, command := range commands {
+	for _, command := range experimentFileListings(root) {
 		cmd.Command = command
 
 		for _, row := range mmcli.RunTabular(cmd) {
@@ -168,6 +172,39 @@ func (MMClusterFiles) GetExperimentFiles(exp, filter string) (Files, error) {
 	}
 
 	return files, nil
+}
+
+func (MMClusterFiles) GetExperimentFilePaths(exp string) ([]string, error) {
+	var (
+		root  = exp + "/files/"
+		cmd   = mmcli.NewCommand()
+		paths []string
+	)
+
+	for _, command := range experimentFileListings(root) {
+		cmd.Command = command
+
+		rows, err := mmcli.RunTabularErr(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s on the cluster: %w", root, err)
+		}
+
+		for _, row := range rows {
+			paths = append(paths, strings.TrimPrefix(row["name"], root))
+		}
+	}
+
+	return paths, nil
+}
+
+// experimentFileListings returns the commands that list the files below root,
+// an experiment's files directory: first on the mesh, then on the head node.
+// minimega lists a missing directory as empty.
+func experimentFileListings(root string) []string {
+	return []string{
+		fmt.Sprintf("mesh send all file list %s recursive", root),
+		fmt.Sprintf("file list %s recursive", root),
+	}
 }
 
 func (MMClusterFiles) GetExperimentSnapshots(exp string) ([]string, error) {

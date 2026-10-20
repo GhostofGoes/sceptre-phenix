@@ -70,6 +70,20 @@ start also drops the `exec-once` commands older versions stored.
 C2 delivery is also used automatically when the node's first drive sets
 `inject_partition: 0`, and is skipped entirely for `do_not_boot` nodes.
 
+## `phenix/do-not-boot-reason` (`startup` app, `pre-start` stage)
+
+Set by phenix, not by users. When the startup app finds no file at a node's
+first disk image (a relative path is looked up in minimega's files directory,
+its `-filepath`), it sets the node's `do_not_boot` and warns
+`node "<hostname>" will not boot: disk image "<path>" not found`. Unless the
+node already had `do_not_boot` set, it also records the reason here, as
+`missing disk image`, and a later start that finds the image boots the node
+again and removes the annotation. A `do_not_boot` without the annotation is
+the user's and is kept; `phenix vm set --do-not-boot` makes the flag the user's
+and removes the annotation. The `delay.c2` checks accept a wait on a node that
+is `do_not_boot` only for this reason at experiment create, and name the
+reason when they refuse it at start.
+
 ## `vrouter/vyos-password` (`vrouter` app)
 
 Overrides the default `vyos` login password used when templating the boot

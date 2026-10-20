@@ -152,14 +152,18 @@ func vmMatchesAnyLabel(vmInfo mm.VM, labels []string) (bool, error) {
 	return false, nil
 }
 
+// listVMsByLabel returns the VMs of experiment expName that match labels.
+// When some hosts did not list their VMs, it returns those of the others that
+// match together with vm.List's error wrapping vm.ErrPartialList, so that
+// callers that only show VMs can show them.
 func listVMsByLabel(expName string, labels []string) ([]mm.VM, error) {
-	allVMs, err := vm.List(expName)
-	if err != nil {
-		return nil, err
+	allVMs, listErr := vm.List(expName)
+	if listErr != nil && !errors.Is(listErr, vm.ErrPartialList) {
+		return nil, listErr
 	}
 
 	if slices.ContainsFunc(labels, func(label string) bool { return strings.EqualFold(label, "all") }) {
-		return allVMs, nil
+		return allVMs, listErr
 	}
 
 	var matchedVMs []mm.VM
@@ -175,11 +179,19 @@ func listVMsByLabel(expName string, labels []string) ([]mm.VM, error) {
 		}
 	}
 
-	if len(matchedVMs) == 0 {
+	switch {
+	case len(matchedVMs) == 0 && listErr != nil:
+		// The VMs of the hosts that did not list theirs may match.
+		return nil, fmt.Errorf(
+			"no VMs matched label(s) %s among the VMs listed: %s",
+			strings.Join(labels, ", "),
+			listErr.Error(),
+		)
+	case len(matchedVMs) == 0:
 		return nil, fmt.Errorf("no VMs matched label(s): %s", strings.Join(labels, ", "))
 	}
 
-	return matchedVMs, nil
+	return matchedVMs, listErr
 }
 
 type vmInfoFilter struct {
@@ -427,7 +439,11 @@ func newVMInfoCmd() *cobra.Command {
 				}
 
 				vms, err = listVMsByLabel(args[0], labels)
-				if err != nil {
+
+				switch {
+				case errors.Is(err, vm.ErrPartialList):
+					plog.Warn(plog.TypeSystem, "showing the matching VMs the other hosts listed", "exp", args[0], "err", err)
+				case err != nil:
 					err := util.HumanizeError(err, "Unable to get a filtered list of VMs")
 
 					return err.Humanized()
@@ -436,7 +452,11 @@ func newVMInfoCmd() *cobra.Command {
 				switch len(args) {
 				case 1:
 					vms, err = vm.List(args[0])
-					if err != nil {
+
+					switch {
+					case errors.Is(err, vm.ErrPartialList):
+						plog.Warn(plog.TypeSystem, "showing the VMs the other hosts listed", "exp", args[0], "err", err)
+					case err != nil:
 						err := util.HumanizeError(err, "Unable to get a list of VMs")
 
 						return err.Humanized()
@@ -610,7 +630,7 @@ func newVMRedeployCmd() *cobra.Command {
 	cmd.Flags().
 		IntVarP(&mem, "mem", "m", defaultMem, "Amount of memory in megabytes (512, 1024, 2048, 3072, 4096, 8192, 12288, 16384 are valid)")
 	cmd.Flags().StringP("disk", "d", "", "VM backing disk image")
-	cmd.Flags().BoolP("replicate-injects", "r", false, "Recreate disk snapshot and VM injections")
+	cmd.Flags().BoolP("replicate-injects", "r", false, "Recreate disk snapshot, VM injections and deletions")
 	cmd.Flags().
 		IntVarP(&part, "partition", "p", 1, "Partition of disk to inject files into (only used if disk option is specified)")
 	addVMLabelFlag(cmd)
@@ -1250,17 +1270,20 @@ func newVMMemorySnapshotCmd() *cobra.Command {
 	desc := `Create an ELF memory snapshot of the VM
 
   Used to create an ELF memory snapshot for a running virtual machine
-  that is compatible with memory forensic toolkits Volatility and Google's Rekall.`
+  that is compatible with memory forensic toolkits Volatility and Google's Rekall.
+  The snapshot is written to the experiment's files directory as
+  <snapshot file name>.elf. The name may hold only letters, digits, '.', '_'
+  and '-', and must start with a letter or digit.`
 
 	cmd := &cobra.Command{
-		Use:               "memory-snapshot <experiment name> <vm name> <snapshot file path>",
+		Use:               "memory-snapshot <experiment name> <vm name> <snapshot file name>",
 		Short:             "Create an ELF memory snapshot of a VM",
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != memSnapArgs {
 				return errors.New(
-					"must provide an experiment name, VM name, and snapshot file path",
+					"must provide an experiment name, VM name, and snapshot file name",
 				)
 			}
 
