@@ -89,6 +89,9 @@ All notable changes to this project will be documented in this file.
 - **Netflow**: Refuse netflow capture on dry-run experiments with 409.
 - **Triggered User Apps**: Skip minimega VM lookup for stopped experiments.
 - **Triggered Stages**: Pass `PHENIX_DRYRUN=true` to user apps of dry runs.
+- **SoH App**: Skip minimega in dry-run cleanup and running stages.
+- **Refused Starts**: Skip minimega in SoH and user app cleanups.
+- **SoH App**: End startup delay and checks on stops elsewhere.
 - **Start Progress**: Never create or re-create the minimega namespace.
 - **VM Operations**: Refuse VM commands on stopped or dry-run experiments.
 - **Failed Delayed Start**: Run cleanup apps, then clear namespace once.
@@ -202,6 +205,7 @@ All notable changes to this project will be documented in this file.
 - **Failed Starts**: Stop only the start's own run, never twice.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
+- **SoH Startup Delay**: Stop waiting once the start is canceled.
 - **Failed Starts**: Run cleanup apps for every failure after pre-start.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
