@@ -256,6 +256,32 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 			},
 		},
 	},
+	// The wind turbine topology injects the configs this image's Grafana and
+	// Elasticsearch run with; booted as is, both run with their package
+	// defaults.
+	"grafana": {
+		vcpus: 2, memory: 4096,
+		// Elasticsearch takes up to about a minute to answer after boot.
+		checksWait: 3 * time.Minute,
+		checks: []imageCheck{
+			{
+				name: "Grafana health",
+				script: "timeout 90 sh -c 'until curl -fs -o /dev/null --max-time 5 http://localhost:3000/api/health; do sleep 2; done'; " +
+					`curl -fs --max-time 5 http://localhost:3000/api/health | sed -n 's/.*"database": *"\([a-z]*\)".*/\1/p'`,
+				want: "ok",
+			},
+			{name: "grafana service", script: "systemctl is-active grafana-server.service", want: "active"},
+			{name: "Grafana 12", script: "dpkg-query -W -f '${Version}' grafana | cut -d. -f1", want: "12"},
+			{
+				name: "Elasticsearch listening",
+				script: `timeout 120 sh -c 'until ss -Hltn "sport = :9200" | grep -q .; do sleep 3; done'; ` +
+					`ss -Hltn "sport = :9200" | grep -q . && echo listening`,
+				want: "listening",
+			},
+			{name: "elasticsearch service", script: "systemctl is-active elasticsearch.service", want: "active"},
+			commandsPresent("loki installed", "loki"),
+		},
+	},
 	// The phenix caldera app boots this image with its own conf/default.yml,
 	// opens the server in Firefox from root's desktop session, and has its
 	// agent scripts download Sandcat from the server; the SCORCH caldera
