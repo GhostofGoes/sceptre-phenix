@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,11 +37,19 @@ const (
 	// experiment name too.
 	MaxBridgeNameLength = 15
 
-	// ReservedName is the experiment name [Create] refuses in any letter case.
+	// ReservedName is the experiment name [CheckName] refuses in any letter
+	// case.
 	ReservedName = "all"
 
-	c2CheckInterval = 5 * time.Second
+	// minVLANID and maxVLANID bound the VLAN IDs minimega assigns. It assigns
+	// a VLAN range's IDs from its min up to, but not including, its max, so a
+	// min is 1-4095 and a max 2-4096.
+	minVLANID = 1
+	maxVLANID = 4095
 )
+
+// c2CheckInterval is how often a C2-delayed VM's wait checks its gates.
+var c2CheckInterval = 5 * time.Second //nolint:gochecknoglobals // shortened by tests
 
 var (
 	ErrExperimentNotFound   = errors.New("experiment not found")
@@ -87,27 +96,51 @@ func hookStartup(exp *types.Experiment, c *store.Config) error {
 	return nil
 }
 
+// CheckName refuses the experiment names that pass the config name check but
+// that no experiment may have, whether it is created or renamed: the reserved
+// name "all" in any letter case, which the CLI takes for every experiment, and
+// "." and "..", which as a path element make the default base directory, which
+// deleting the experiment removes, the experiments directory or phenix's base
+// directory.
+func CheckName(name string) error {
+	if strings.EqualFold(name, ReservedName) {
+		return fmt.Errorf("cannot use '%s' for experiment name", ReservedName)
+	}
+
+	if name == "." || name == ".." {
+		return fmt.Errorf("cannot use '%s' for experiment name", name)
+	}
+
+	return nil
+}
+
 func hookCreate(exp *types.Experiment, c *store.Config) error {
+	if err := CheckName(c.Metadata.Name); err != nil {
+		return err
+	}
+
 	exp.Spec.SetExperimentName(c.Metadata.Name)
 
-	err := exp.Spec.Init()
+	err := setAutoModeBridge(exp, c.Metadata.Name)
+	if err != nil {
+		return err
+	}
+
+	err = exp.Spec.Init()
 	if err != nil {
 		return fmt.Errorf("initializing experiment: %w", err)
 	}
 
-	if common.BridgeMode == common.BridgeModeAuto {
-		if len(c.Metadata.Name) > MaxBridgeNameLength {
-			return fmt.Errorf(
-				"experiment name must be %d characters or less when using auto bridge mode",
-				MaxBridgeNameLength,
-			)
-		}
-
-		exp.Spec.SetDefaultBridge(c.Metadata.Name)
+	if err := checkBaseDir(exp.Spec.BaseDir()); err != nil {
+		return fmt.Errorf("spec.baseDir: %w", err)
 	}
 
 	if len(exp.Spec.DefaultBridge()) > MaxBridgeNameLength {
 		return fmt.Errorf("default bridge name must be %d characters or less", MaxBridgeNameLength)
+	}
+
+	if err := CheckVLANRange(exp.Spec.VLANs().Min(), exp.Spec.VLANs().Max()); err != nil {
+		return fmt.Errorf("spec.vlans: %w", err)
 	}
 
 	exp.Spec.SetUseGREMesh(exp.Spec.UseGREMesh() || common.UseGREMesh)
@@ -141,35 +174,53 @@ func hookCreate(exp *types.Experiment, c *store.Config) error {
 		return fmt.Errorf("applying apps to experiment: %w", err)
 	}
 
+	// The configure apps may have added the nodes the C2 delays wait on.
+	if err := validateC2Delays(exp); err != nil {
+		return fmt.Errorf("initializing experiment: %w", err)
+	}
+
 	c.Spec = structs.MapDefaultCase(exp.Spec, structs.CASESNAKE)
 	return nil
 }
 
-func hookUpdate(exp *types.Experiment, c *store.Config) error {
-	if exp.Running() {
-		// Halt this update if the experiment is running.
-		return errors.New("cannot update running experiment")
+// validateC2Delays refuses the C2 delays experiment start would wait on
+// forever. Callers run it once the apps that add nodes or mark them
+// do-not-boot have run (see ValidateC2Delays).
+func validateC2Delays(exp *types.Experiment) error {
+	topo, ok := exp.Spec.Topology().(interface{ ValidateC2Delays() error })
+	if !ok {
+		return nil
 	}
 
-	err := exp.Spec.Init()
+	return topo.ValidateC2Delays() //nolint:wrapcheck // wrapped by the caller
+}
+
+// hookUpdate checks and initializes an updated experiment config. Whether the
+// experiment may be updated while it runs is config.Update's to decide: only
+// a forced update, such as phenix config edit --force, reaches here then.
+func hookUpdate(exp *types.Experiment, c *store.Config) error {
+	// A config update renames the experiment when the name changes.
+	if err := CheckName(c.Metadata.Name); err != nil {
+		return err
+	}
+
+	// Just in case the updated experiment reset the default bridge.
+	err := setAutoModeBridge(exp, c.Metadata.Name)
+	if err != nil {
+		return err
+	}
+
+	err = exp.Spec.Init()
 	if err != nil {
 		return fmt.Errorf("re-initializing experiment (after update): %w", err)
 	}
 
-	// Just in case the updated experiment reset the default bridge.
-	if common.BridgeMode == common.BridgeModeAuto {
-		if len(c.Metadata.Name) > MaxBridgeNameLength {
-			return fmt.Errorf(
-				"experiment name must be %d characters or less when using auto bridge mode",
-				MaxBridgeNameLength,
-			)
-		}
-
-		exp.Spec.SetDefaultBridge(c.Metadata.Name)
-	}
-
 	if len(exp.Spec.DefaultBridge()) > MaxBridgeNameLength {
 		return fmt.Errorf("default bridge name must be %d characters or less", MaxBridgeNameLength)
+	}
+
+	if err := CheckVLANRange(exp.Spec.VLANs().Min(), exp.Spec.VLANs().Max()); err != nil {
+		return fmt.Errorf("spec.vlans: %w", err)
 	}
 
 	exp.Spec.SetUseGREMesh(exp.Spec.UseGREMesh() || common.UseGREMesh)
@@ -194,21 +245,44 @@ func hookUpdate(exp *types.Experiment, c *store.Config) error {
 	}
 
 	if exp.Spec.ExperimentName() != c.Metadata.Name {
-		if strings.Contains(exp.Spec.BaseDir(), exp.Spec.ExperimentName()) {
-			// If the experiment's base directory contains the current experiment
-			// name, replace it with the new name.
-			dir := strings.ReplaceAll(
-				exp.Spec.BaseDir(),
-				exp.Spec.ExperimentName(),
-				c.Metadata.Name,
-			)
-			exp.Spec.SetBaseDir(dir)
+		// If the last element of the experiment's base directory contains the
+		// current experiment name, replace it with the new name there. The
+		// parent directories are left alone: they may hold the name too, as
+		// "experiments" holds "exp".
+		dir := exp.Spec.BaseDir()
+		if last := filepath.Base(dir); strings.Contains(last, exp.Spec.ExperimentName()) {
+			last = strings.ReplaceAll(last, exp.Spec.ExperimentName(), c.Metadata.Name)
+			exp.Spec.SetBaseDir(filepath.Join(filepath.Dir(dir), last))
 		}
 
 		exp.Spec.SetExperimentName(c.Metadata.Name)
 	}
 
+	if err := checkBaseDir(exp.Spec.BaseDir()); err != nil {
+		return fmt.Errorf("spec.baseDir: %w", err)
+	}
+
 	c.Spec = structs.MapDefaultCase(exp.Spec, structs.CASESNAKE)
+	return nil
+}
+
+// setAutoModeBridge makes the experiment name the default bridge in the auto
+// bridge mode. It must run before Init, which puts every interface that names
+// no bridge of its own on the default bridge.
+func setAutoModeBridge(exp *types.Experiment, name string) error {
+	if common.BridgeMode != common.BridgeModeAuto {
+		return nil
+	}
+
+	if len(name) > MaxBridgeNameLength {
+		return fmt.Errorf(
+			"experiment name must be %d characters or less when using auto bridge mode",
+			MaxBridgeNameLength,
+		)
+	}
+
+	exp.Spec.SetDefaultBridge(name)
+
 	return nil
 }
 
@@ -225,15 +299,136 @@ func hookDelete(exp *types.Experiment) error {
 		)
 	}
 
-	err = os.RemoveAll(exp.Spec.BaseDir())
+	err = deleteStagedStartupScripts(exp)
 	if err != nil {
-		errors = multierror.Append(
-			errors,
-			fmt.Errorf("deleting experiment base directory: %w", err),
-		)
+		errors = multierror.Append(errors, err)
+	}
+
+	err = removeBaseDir(exp.Spec.BaseDir())
+	if err != nil {
+		errors = multierror.Append(errors, err)
 	}
 
 	return errors //nolint:wrapcheck // returning multierror
+}
+
+// checkBaseDir refuses an experiment base directory that deleting the
+// experiment, which removes the directory with everything in it, must not
+// remove: a relative path, a path with a "." or ".." element, the root, one
+// of the directories phenix and minimega keep their data in (see
+// [protectedDirs]), or a parent of one. The create and update hooks check the base directory once the spec's Init
+// has made a relative one absolute against the working directory, and refuse
+// such a config; the delete paths refuse to remove such a directory of an
+// experiment stored before.
+func checkBaseDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("base directory %q is not an absolute path", dir)
+	}
+
+	for elem := range strings.SplitSeq(dir, "/") {
+		if elem == "." || elem == ".." {
+			return fmt.Errorf("base directory %s holds a '%s' element", dir, elem)
+		}
+	}
+
+	dir = filepath.Clean(dir)
+	if dir == "/" {
+		return errors.New("base directory cannot be the root directory")
+	}
+
+	protected, err := protectedDirs()
+	if err != nil {
+		return err
+	}
+
+	for _, other := range protected {
+		if dir == other || strings.HasPrefix(other, dir+"/") {
+			return fmt.Errorf("base directory %s would hold %s, which phenix or minimega keeps its data in", dir, other)
+		}
+	}
+
+	return nil
+}
+
+// protectedDirs returns, made absolute, the directories phenix and minimega
+// keep their data in, which no experiment's base directory may be or hold:
+// phenix's base directory, its experiments, images and configs directories,
+// the injects, topologies and mounts directories, and minimega's base
+// directory.
+func protectedDirs() ([]string, error) {
+	var (
+		base    = common.PhenixBase
+		injects = common.InjectsBase
+		topos   = common.TopologiesBase
+	)
+
+	// Only the root command sets these; their defaults derive from base.
+	if injects == "" {
+		injects = filepath.Join(base, "injects")
+	}
+
+	if topos == "" {
+		topos = filepath.Join(base, "topologies")
+	}
+
+	dirs := []string{
+		base,
+		filepath.Join(base, "experiments"),
+		filepath.Join(base, "images"),
+		filepath.Join(base, "configs"),
+		injects,
+		topos,
+		common.MountDir(),
+		common.MinimegaBase,
+	}
+
+	for i, dir := range dirs {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolving directory %s: %w", dir, err)
+		}
+
+		dirs[i] = abs
+	}
+
+	return dirs, nil
+}
+
+// removeBaseDir removes an experiment's base directory with everything in it,
+// unless [checkBaseDir] refuses the directory.
+func removeBaseDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+
+	if err := checkBaseDir(dir); err != nil {
+		return fmt.Errorf("not deleting experiment base directory: %w", err)
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("deleting experiment base directory: %w", err)
+	}
+
+	return nil
+}
+
+// deleteStagedStartupScripts deletes, from every cluster node, the startup
+// scripts the startup app staged in minimega's files directory for C2
+// delivery. They live outside the experiment's base directory, and minimega
+// copies them to the node of each VM that fetches one.
+func deleteStagedStartupScripts(exp *types.Experiment) error {
+	globs, err := app.StagedStartupScripts(exp.Spec.ExperimentName())
+	if err != nil {
+		return fmt.Errorf("finding staged startup scripts of experiment %s: %w", exp.Metadata.Name, err)
+	}
+
+	for _, glob := range globs {
+		if err := file.DeleteFile(glob); err != nil {
+			return fmt.Errorf("deleting staged startup scripts %s: %w", glob, err)
+		}
+	}
+
+	return nil
 }
 
 // Hook is a function to be called during the different lifecycle stages of an
@@ -323,20 +518,8 @@ func Get(name string) (*types.Experiment, error) {
 func Create(ctx context.Context, opts ...CreateOption) error {
 	o := newCreateOptions(opts...)
 
-	if o.name == "" {
-		return errors.New("no experiment name provided")
-	}
-
-	if strings.ToLower(o.name) == ReservedName {
-		return fmt.Errorf("cannot use '%s' for experiment name", ReservedName)
-	}
-
-	if o.topology == "" {
-		return errors.New("no topology name provided")
-	}
-
-	if len(o.defaultBridge) > MaxBridgeNameLength {
-		return fmt.Errorf("default bridge name must be %d characters or less", MaxBridgeNameLength)
+	if err := o.validate(); err != nil {
+		return err
 	}
 
 	var (
@@ -418,6 +601,75 @@ func Create(ctx context.Context, opts ...CreateOption) error {
 
 	for _, hook := range hooks["create"] {
 		hook("create", o.name)
+	}
+
+	return nil
+}
+
+// validate checks the options of Create that need no store lookup.
+func (o createOptions) validate() error {
+	if o.name == "" {
+		return errors.New("no experiment name provided")
+	}
+
+	if err := CheckName(o.name); err != nil {
+		return err
+	}
+
+	if o.topology == "" {
+		return errors.New("no topology name provided")
+	}
+
+	if len(o.defaultBridge) > MaxBridgeNameLength {
+		return fmt.Errorf("default bridge name must be %d characters or less", MaxBridgeNameLength)
+	}
+
+	return CheckVLANRange(o.vlanMin, o.vlanMax)
+}
+
+// CheckVLANRange refuses a VLAN range that the minimega script does not render,
+// that minimega refuses when the experiment starts, or that holds VLAN IDs
+// minimega does not take. minimega assigns VLAN IDs from min up to, but not
+// including, max, takes VLAN IDs below 4096 and refuses a max that is not
+// above the min, so CheckVLANRange refuses a min outside 1-4095, a max outside
+// 2-4096, and a min that is not less than the max. The script renders a range
+// only when both ends are set, so CheckVLANRange refuses a range with only one
+// end set too; 0 for both ends leaves the range unset.
+func CheckVLANRange(minVal, maxVal int) error {
+	ends := []struct {
+		name      string
+		id        int
+		low, high int
+	}{
+		{"min", minVal, minVLANID, maxVLANID},
+		{"max", maxVal, minVLANID + 1, maxVLANID + 1},
+	}
+
+	for _, end := range ends {
+		if end.id != 0 && (end.id < end.low || end.id > end.high) {
+			return fmt.Errorf("%s VLAN ID %d is outside %d-%d", end.name, end.id, end.low, end.high)
+		}
+	}
+
+	switch {
+	case minVal == 0 && maxVal == 0:
+		return nil
+	case maxVal == 0:
+		return fmt.Errorf(
+			"max VLAN ID is unset while min VLAN ID is %d; set both ends of the VLAN range, or neither",
+			minVal,
+		)
+	case minVal == 0:
+		return fmt.Errorf(
+			"min VLAN ID is unset while max VLAN ID is %d; set both ends of the VLAN range, or neither",
+			maxVal,
+		)
+	case minVal >= maxVal:
+		return fmt.Errorf(
+			"VLAN range %d-%d: min VLAN ID must be less than max VLAN ID, as minimega assigns VLAN IDs below the max",
+			minVal,
+			maxVal,
+		)
 	}
 
 	return nil
@@ -538,6 +790,10 @@ func Start(ctx context.Context, opts ...StartOption) error {
 		exp.Spec.VLANs().SetMax(o.vlanMax)
 	}
 
+	if err := CheckVLANRange(exp.Spec.VLANs().Min(), exp.Spec.VLANs().Max()); err != nil {
+		return err
+	}
+
 	err = app.ApplyApps(
 		ctx,
 		exp,
@@ -548,6 +804,23 @@ func Start(ctx context.Context, opts ...StartOption) error {
 		return fmt.Errorf("applying apps to experiment: %w", err)
 	}
 
+	// The startup app marks a node do-not-boot at pre-start when its image is
+	// missing, and `phenix vm` updates change do_not_boot without the update
+	// hook, so the C2 delays are checked again against the nodes minimega
+	// launches.
+	if err := validateC2Delays(exp); err != nil {
+		err = fmt.Errorf("validating experiment %s: %w", o.name, err)
+
+		// A dry run waits for no VM, and what the pre-start apps found, such
+		// as a disk image missing on this host, need not hold where the
+		// experiment really starts, so a dry run only warns.
+		if !o.dryrun {
+			return cleanUpApps(exp, o.dryrun, err)
+		}
+
+		notes.AddWarnings(ctx, false, err)
+	}
+
 	var (
 		mmScript = fmt.Sprintf("%s/mm_files/%s.mm", exp.Spec.BaseDir(), exp.Spec.ExperimentName())
 		ccScript = fmt.Sprintf(
@@ -556,6 +829,13 @@ func Start(ctx context.Context, opts ...StartOption) error {
 			exp.Spec.ExperimentName(),
 		)
 	)
+
+	// Rendering the script sets the permissions of injected sources in the
+	// base directory, and minimega injects into every node afterwards.
+	err = v1.CheckInjectionModes(exp.Spec.BaseDir(), exp.Spec.Topology().Nodes())
+	if err != nil {
+		return cleanUpApps(exp, o.dryrun, fmt.Errorf("generating minimega script: %w", err))
+	}
 
 	err = tmpl.CreateFileFromTemplate("minimega_script.tmpl", exp.Spec, mmScript)
 	if err != nil {
@@ -1391,12 +1671,9 @@ func Delete(name string) error {
 		)
 	}
 
-	err = os.RemoveAll(exp.Spec.BaseDir())
+	err = removeBaseDir(exp.Spec.BaseDir())
 	if err != nil {
-		errors = multierror.Append(
-			errors,
-			fmt.Errorf("deleting experiment base directory: %w", err),
-		)
+		errors = multierror.Append(errors, err)
 	}
 
 	for _, hook := range hooks["delete"] {

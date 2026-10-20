@@ -37,6 +37,7 @@ All notable changes to this project will be documented in this file.
 - **Workflow Schema (breaking)**: Workflow configs are validated against the new `Workflow` schema, so unknown or misspelled keys, values of the wrong type and a missing `spec` return 400 instead of being ignored. ([#445](https://github.com/sandialabs/sceptre-phenix/pull/445))
 - **CLI**: `phenix mm` now stops parsing its own flags at the first minimega argument, so flags meant for minimega (for example the `-a` in `phenix mm cc exec ls -a`) are passed through. `phenix mm` and global flags must now come *before* the minimega command.
 - **CLI**: Upgraded cobra from v1.0.0 to v1.10.2 and pflag from v1.0.3 to v1.0.9. `phenix completion bash` now generates cobra's V2 Bash script, and `phenix completion powershell` includes descriptions.
+- **VLAN Ranges (breaking)**: Refuse one-ended, inverted, empty or out-of-bounds ranges.
 - **Pinned VLANs (breaking)**: Refuse IDs at or above the max.
 - **C2 Delays (breaking)**: Refuse waits on hostnames that never register.
 - **Default Apps (breaking)**: Honor `"false"` and `0`; refuse invalid values.
@@ -50,6 +51,9 @@ All notable changes to this project will be documented in this file.
 - **minimega Scripts (breaking)**: Refuse values minimega would split or misread.
 - **VM Label Limits (breaking)**: Refuse running-VM labels minimega cannot store.
 - **C2 Commands (breaking)**: Refuse commands minimega would cut at `#`.
+- **Config Updates (breaking)**: Refuse a running experiment's config without force.
+- **Experiment Names (breaking)**: Refuse `.`, `..` and `all`, renames included.
+- **Base Directories (breaking)**: Refuse the root and phēnix's own directories.
 
 ### Removed
 
@@ -80,6 +84,11 @@ All notable changes to this project will be documented in this file.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
 - **Running Trigger**: Keep the status the app's running stage prints.
 - **VLAN Range Errors**: Name the max VLAN ID correctly.
+- **Workflow VLAN Range**: Refuse an invalid `vlanRange` with 400 upfront.
+- **Workflow VLANs**: Refuse pinned IDs outside `vlanRange` with 400.
+- **VLAN Range Docs**: Say minimega never assigns a range's max.
+- **Experiment Rename**: Rename only the base directory's last element.
+- **Forced Config Edits**: Keep running experiments' status; never rename them.
 - **Experiment Stop**: Leave runs another process started meanwhile untouched.
 - **Running VM Labels**: Escape label quotes and backslashes for minimega.
 - **VM Flush**: Keep other powered-off VMs on kill and redeploy.
@@ -87,12 +96,15 @@ All notable changes to this project will be documented in this file.
 - **C2 Startup**: Queue scripts with `cc exec` so they run.
 - **C2 Startup**: Read a stored `phenix/startup-via-cc: 0` as false.
 - **Linux Startup Scripts**: Make hostname, DNS and domain join idempotent.
+- **VLAN IDs**: Treat 0 as unpinned.
 - **Linux Hostname Script**: Rename adjacent `phenix` and `phenix.<domain>` aliases.
 - **User Commands**: Stop leaking stream readers on failed starts.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
 - **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **Experiment Delete**: Remove staged C2 startup scripts from cluster nodes.
 - **Experiment Reconfigure**: Stop sending `ns del-bridge`, which recreated the namespace.
+- **Auto Bridge Mode**: Move unbridged interfaces to the experiment's bridge.
 - **Failed Starts**: Delete leftover disk snapshots and report cleanup errors.
 - **User Apps**: Query VMs only from post-start, outside dry runs.
 - **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
@@ -148,6 +160,7 @@ All notable changes to this project will be documented in this file.
 - **Failed Starts**: Stop only the start's own run, never twice.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
+- **Failed Starts**: Run cleanup apps for every failure after pre-start.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.
@@ -186,6 +199,7 @@ All notable changes to this project will be documented in this file.
 - **Disk Injections**: Stop paths running commands or changing host files.
 - **Injection Permissions**: Stop chmod-ing host files; inject copies instead.
 - **minimega Scripts**: Stop config values running head node shell commands.
+- **Experiment Deletes**: Stop crafted names or base directories wiping data.
 
 ## [1.0.0]
 

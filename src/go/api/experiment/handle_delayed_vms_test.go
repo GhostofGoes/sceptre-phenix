@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
 	"github.com/hashicorp/go-multierror"
 
+	"phenix/store"
+	"phenix/util/common"
 	"phenix/util/mm"
 )
 
@@ -108,5 +111,124 @@ func TestHandleDelayedVMsNoDelaysOrC2sReturnsNilWithoutClearingNamespace(t *test
 
 	if calls := fake.calls(); calls != 0 {
 		t.Fatalf("expected ClearNamespace not to be called, called %d time(s)", calls)
+	}
+}
+
+// c2GateMM is a test double for mm.MM that counts C2 checks and namespace
+// clears; no C2 client ever registers.
+type c2GateMM struct {
+	countingMM
+
+	c2Checks int
+}
+
+func (m *c2GateMM) IsC2ClientActive(...mm.C2Option) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.c2Checks++
+
+	return mm.ErrC2ClientNotActive
+}
+
+// TestHandleDelayedVMsGivesUpOnceStoppedElsewhere is a regression test: a stop
+// from another process (phenix experiment stop while phenix ui or the CLI waits
+// for delayed VMs) cannot cancel the waits, so they kept running C2 checks and
+// VM starts in the cleared namespace, and minimega created it again; a C2 wait
+// did so every five seconds until the process exited. The waits stop once the
+// stored start time is no longer theirs, and leave the namespace alone.
+func TestHandleDelayedVMsGivesUpOnceStoppedElsewhere(t *testing.T) {
+	const ns = "delay-stopped"
+
+	original, originalStore, originalInterval := mm.DefaultMM, store.DefaultStore, c2CheckInterval
+	originalBase := common.MinimegaBase
+
+	t.Cleanup(func() {
+		mm.DefaultMM = original            //nolint:reassign // restore test double
+		store.DefaultStore = originalStore //nolint:reassign // restore test double
+		c2CheckInterval = originalInterval
+		common.MinimegaBase = originalBase //nolint:reassign // restore test fixture
+	})
+
+	c2CheckInterval = 10 * time.Millisecond
+
+	// A VM start the waits must not send fails here instead of reaching a
+	// minimega that runs on this host.
+	common.MinimegaBase = t.TempDir() //nolint:reassign // test fixture
+
+	tests := []struct {
+		name   string
+		stored string // the start time the store holds; "" once stopped
+		absent bool   // the experiment was deleted
+	}{
+		{name: "stopped", stored: ""},
+		{name: "stopped and started again", stored: "2026-10-18T12:05:00Z"},
+		{name: "deleted", absent: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := store.NewMockStore(gomock.NewController(t))
+			m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+				if tt.absent {
+					return store.ErrNotExist
+				}
+
+				*c = store.Config{
+					Version:  "phenix.sandia.gov/v1",
+					Kind:     "Experiment",
+					Metadata: store.ConfigMetadata{Name: ns},
+					Spec: map[string]any{
+						"experimentName": ns,
+						"topology":       map[string]any{"nodes": []map[string]any{}},
+					},
+					Status: map[string]any{"startTime": tt.stored},
+				}
+
+				return nil
+			}).AnyTimes()
+
+			fake := new(c2GateMM)
+
+			mm.DefaultMM = fake    //nolint:reassign // install test double
+			store.DefaultStore = m //nolint:reassign // install test double
+
+			done := make(chan error, 1)
+
+			go func() {
+				done <- handleDelayedVMs(
+					context.Background(),
+					ns,
+					"2026-10-18T12:00:00Z",
+					map[string]time.Duration{"timer": 10 * time.Millisecond},
+					map[string]map[string]bool{"gated": {"gate": false}},
+				)
+			}()
+
+			var err error
+
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the delayed VMs still wait although the experiment was stopped")
+			}
+
+			if !errors.Is(err, errStoppedWhileStarting) {
+				t.Fatalf("handleDelayedVMs returned %v, want it to report the stop", err)
+			}
+
+			var delayErr DelayedVMError
+			if errors.As(err, &delayErr) {
+				t.Errorf("handleDelayedVMs reported VM %s failing to start (%v), want no VM start attempted", delayErr.VM, err)
+			}
+
+			if fake.c2Checks != 0 {
+				t.Errorf("the C2 wait checked its gate %d times after the stop, want none", fake.c2Checks)
+			}
+
+			if calls := fake.calls(); calls != 0 {
+				t.Errorf("ClearNamespace called %d time(s), want none: the stop already cleared it", calls)
+			}
+		})
 	}
 }

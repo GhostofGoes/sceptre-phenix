@@ -217,6 +217,11 @@ spec:
 | `phenix/startup-via-cc: true` | C2, selected explicitly |
 | Only `general.snapshot: false` | Disk injection; this setting alone does not enable C2 |
 
+For C2 delivery, the `startup` app stages the generated scripts in minimega's
+files directory as `<experiment>/<hostname>-*.sh` (`<hostname>-startup.ps1` for
+Windows). Every start stages them again, and deleting the experiment removes
+them from every cluster node.
+
 Each script is queued in the experiment's cc script as a `cc send` followed by
 a `cc exec`. minimega gives both to the guest's `miniccc` client every time it
 connects, so the scripts run at every boot, as injected scripts do. The client
