@@ -50,6 +50,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **User Commands**: Stop leaking stream readers on failed starts.
+- **User Commands**: Signal the whole process group on cancel.
+- **User Commands**: Pass signals that end phenix to their groups.
+- **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
+- **Subprocess Output**: Read lines up to 64 MiB without hanging.
+- **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
+- **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.
