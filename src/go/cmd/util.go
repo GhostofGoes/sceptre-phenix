@@ -48,7 +48,7 @@ func newUtilAppJSONCmd() *cobra.Command {
 				return err.Humanized()
 			}
 
-			if err := app.PopulateRuntime(exp); err != nil {
+			if err := app.PopulateRuntime(exp, exp.Running() && !exp.DryRun()); err != nil {
 				err := util.HumanizeError(err, "Unable to collect runtime experiment information")
 
 				return err.Humanized()

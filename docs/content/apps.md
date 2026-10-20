@@ -18,6 +18,9 @@ their `running` stage only when manually triggered by the user.
 | startup | configures guest operating systems at startup using disk injection or C2                     |
 | vrouter | customizes Vyatta/VyOS and minirouter routers, including setting interfaces, ACL rules, etc. |
 
+The `configure`, `pre-start`, `post-start`, and `cleanup` stages run the default
+apps in the order of this table, before the scenario's apps.
+
 ### Disable Default Apps for a VM
 
 To keep a VM managed by `phenix` and minimega without applying the built-in
@@ -37,7 +40,11 @@ spec:
 This skips the `ntp`, `serial`, `startup`, and `vrouter` apps for that node
 during every lifecycle stage. User apps configured in a scenario are
 unaffected. Omit the annotation, or set it to `true`, to retain the default
-behavior.
+behavior. The value may also be a string Go's `strconv.ParseBool` accepts, in
+any case, such as `"false"`, `"f"` or `"TRUE"`, or a number, where `0` is false
+and any other number is true. Any other value, such as `"no"` or an empty
+string, makes experiment create, reconfigure and start fail with an error
+naming the node.
 
 ### startup App
 
@@ -52,6 +59,15 @@ By default, phēnix injects the generated scripts into the VM's first drive. For
 images where disk injection is unavailable or intentionally disabled, phēnix
 can instead send and execute the scripts through minimega command and control
 (C2).
+
+At pre-start, the `startup` app also checks each node's first disk image; a
+relative path is looked up in minimega's files directory. A node whose image
+does not exist gets `do_not_boot` and the warning `node "<hostname>" will not
+boot: disk image "<path>" not found`, and the app records why in the node
+annotation `phenix/do-not-boot-reason`, so a later start that finds the image
+boots the node again. A `do_not_boot` the user set is kept. An image phēnix
+may not read is only warned about, since minimega may run as another user;
+any other error checking the image of a node that boots fails the start.
 
 #### Scenario Configuration
 
@@ -201,13 +217,29 @@ spec:
 | `phenix/startup-via-cc: true` | C2, selected explicitly |
 | Only `general.snapshot: false` | Disk injection; this setting alone does not enable C2 |
 
+Each script is queued in the experiment's cc script as a `cc send` followed by
+a `cc exec`. minimega gives both to the guest's `miniccc` client every time it
+connects, so the scripts run at every boot, as injected scripts do. The client
+also connects again within a boot, for example after missed heartbeats, a pause
+or a memory snapshot restore. A staged Linux script therefore records the
+guest's boot ID under `/run/phenix/startup-c2` before it runs and does nothing
+when it already ran in the current boot, even if that run failed, since
+running a script again could undo what it changed; the Windows script keeps
+its own `done` flag in the registry. The scripts are not queued with `cc exec-once`: minimega marks such a
+command sent as soon as it is queued, before the guest has connected, so the
+guest would never run it.
+
 !!! warning
     C2 delivery requires the `miniccc` agent to be installed and configured to
     start in the guest. Linux, RHEL, and CentOS guests must provide `bash`, and
     Windows guests must provide PowerShell.
 
-The `startup` app does not generate scripts for router nodes or nodes with
-[`phenix/default-apps: false`](#disable-default-apps-for-a-vm).
+The `startup` app does not generate scripts for nodes with
+[`phenix/default-apps: false`](#disable-default-apps-for-a-vm), or for router
+nodes other than `minirouter` ones (the `vrouter` app sets a Vyatta or VyOS
+router's hostname). A node with `os_type: minirouter` gets only the hostname
+script, delivered like a Linux node's, since minirouter configures its
+interfaces itself.
 
 ### ntp App
 
@@ -600,7 +632,8 @@ spec:
 
 !!! note
     Currently, the `ipsec`, `emulators`, `snmp`, and `snat`/`dnat` metadata sections only
-    apply to Vyatta/VyOS routers.
+    apply to Vyatta/VyOS routers. A router's `snat` rules replace the source NAT
+    of its topology `network.nat`, which applies only when `snat` gives no rules.
 
 !!! note
     Currently, the `stateful` setting for ACL rules only applies to Vyatta/VyOS
@@ -671,6 +704,17 @@ the taps to already exist when the experiment starts. Valid values are
 `pre-start` and `post-start`; when unset, it defaults to `post-start` to
 preserve backwards compatibility.
 
+Each VLAN can be tapped only once. The app checks every tap before it creates
+any: each needs a `vlan`, and the `vlan` and `bridge` must be single words
+without quotes, `#` or `$`, and an `ip` must be an address, optionally with a
+prefix length. When a tap cannot be created the app deletes the taps it already
+created, so a failed stage leaves no taps or network namespaces behind.
+Triggering the stage again, such as with
+`phenix experiment trigger post-start <experiment> tap`, deletes the taps the
+app created before and creates new ones; when a delete fails, the app's status
+keeps only the taps it could not delete, for the next trigger or the cleanup. A
+dry run (`phenix experiment start --dry-run`) checks the taps but creates none.
+
 The following is an example of how the `tap` app can be configured via a
 `Scenario` configuration, showing all the possible options.
 
@@ -694,7 +738,7 @@ spec:
             vlan: MGMT
             # IP address to use for host tap -- VMs on the tapped VLAN would use this
             # address as their gateway if they need external access (and it's enabled
-            # below)
+            # below); external access requires the prefix length, such as /24
             ip: 172.20.5.254/24
             # IP subnet to use for veth pair between host and tap's network
             # namespace when external access is enabled (will default to a /30
@@ -773,6 +817,10 @@ string over `STDIN`.
     `pre-start` stages, the `status` value will be null or otherwise ignored.
     The
     `spec` value will be [experiment schema](schema.md#experiment-schema).
+    Alongside them, phēnix adds `hosts`, the minimega cluster hosts, and, for
+    the `post-start`, `running`, and `cleanup` stages of a running experiment
+    that isn't a dry run, `vms`, the experiment's VMs as minimega reports them.
+    A stage triggered for a stopped experiment gets no `vms`.
 
 !!! tip
     You can run `phenix util app-json <exp name>` to see an example of what the
@@ -786,12 +834,27 @@ containing `level`, `msg`, and `time` fields to be fully integrated into the
 phēnix centralized logging system.
 
 !!! note
-    `phenix` will only process updates to the `spec` value for the `configure`
-    and `pre-start` stages, and will only process updates to the `status` value
-    for the `post-start`, `running`, and `cleanup` stages. More specifically, it
-    will only process updates to `status.apps.<app name>`, which can be anything
-    the app wants it to be (e.g. a simple string, an array, or a
-    map/dictionary).
+    `phenix` will only process updates to the `spec` value for the `configure`,
+    `pre-start` and `cleanup` stages, and will only process updates to the
+    `status` value for the `post-start`, `running`, and `cleanup` stages. More
+    specifically, it will only process updates to `status.apps.<app name>`,
+    which can be anything the app wants it to be (e.g. a simple string, an
+    array, or a map/dictionary).
+
+!!! note
+    `phenix` checks the spec a user app returns from its `configure` or
+    `pre-start` stage on every node that is not external, `do_not_boot` nodes
+    included: its injections, deletions and `advanced` settings must pass the
+    checks experiment create applies to them (see
+    [Optional Values](configuration.md#optional-values)). One such check
+    refuses an injection whose `src` is empty or `null`, which would copy the
+    experiment's whole base directory into the VM. The stage fails with an
+    error such as
+    `user app <app name> returned an experiment phenix refuses: node <hostname>: injection to "<dst>" has no source`,
+    and the experiment keeps the spec it had before the app ran. A spec the
+    `cleanup` stage returns is kept even when it fails these checks: phenix
+    logs a warning, so the cleanup of later apps still runs, and the next
+    experiment start refuses the spec.
 
 !!! note
     It is possible for the execution of app stages to be canceled by the caller.
