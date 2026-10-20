@@ -13,9 +13,12 @@ the web UI/API, or from the CLI with
 
 With that flag the CLI stays in the foreground re-running each app's
 `running` stage on its interval until the process is interrupted
-(SIGINT/SIGTERM), so it is not usable as a fire-and-forget start. Default apps
-are never run periodically, and an unparsable duration is logged and skipped
-rather than failing the start.
+(SIGINT/SIGTERM) or the experiment is stopped from any process, so it is not
+usable as a fire-and-forget start. The periodic runs of the web UI also end
+when the experiment is stopped from another process, within five seconds or
+once the app's current `running` stage ends, and a dry run's run as a dry run.
+Default apps are never run periodically, and an unparsable duration, or one
+shorter than one second, is logged and skipped rather than failing the start.
 
 ## `fromScenario`
 
@@ -37,8 +40,9 @@ per-experiment overrides without duplicating app config.
 
 ## Apps
 
-Built-in apps that always run for every experiment: `ntp`, `serial`,
-`startup`, `vrouter`. A node opts out of them with the
+Built-in apps that always run for every experiment, in this order and before
+the scenario's apps in every stage but `running`: `ntp`, `serial`, `startup`,
+`vrouter`. A node opts out of them with the
 `phenix/default-apps: false` annotation (see
 [annotations.md](annotations.md)).
 

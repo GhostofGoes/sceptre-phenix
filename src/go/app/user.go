@@ -11,6 +11,8 @@ import (
 
 	"phenix/scheduler"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
+	v1 "phenix/types/version/v1"
 	"phenix/util"
 	"phenix/util/common"
 	"phenix/util/mm"
@@ -31,17 +33,43 @@ type UserApp struct {
 	options Options
 }
 
-// PopulateRuntime adds current minimega host and VM details to an experiment.
-func PopulateRuntime(exp *types.Experiment) error {
+// PopulateRuntime adds the current minimega cluster hosts to an experiment
+// and, if withVMs is true, the details of the VMs in its namespace. Pass false
+// when the namespace cannot hold the experiment's VMs: minimega creates a
+// namespace for any command sent to it, so asking would leave an empty
+// namespace behind.
+func PopulateRuntime(exp *types.Experiment, withVMs bool) error {
 	cluster, err := mm.GetClusterHosts(true)
 	if err != nil {
 		return fmt.Errorf("getting cluster hosts: %w", err)
 	}
 
 	exp.Hosts = cluster
-	exp.VMs = mm.GetVMInfo(mm.NS(exp.Spec.ExperimentName()))
+	exp.VMs = nil
+
+	if withVMs {
+		exp.VMs = mm.GetVMInfo(mm.NS(exp.Spec.ExperimentName()))
+	}
 
 	return nil
+}
+
+// stageHasVMs reports whether the experiment's VMs can exist in minimega
+// during the given stage. They are launched after pre-start, and a dry run
+// never launches them.
+func stageHasVMs(action Action, dryRun bool) bool {
+	if dryRun {
+		return false
+	}
+
+	switch action {
+	case ActionPostStart, ActionRunning, ActionCleanup:
+		return true
+	case ActionConfigure, ActionPreStart:
+		return false
+	}
+
+	return false
 }
 
 func (u *UserApp) Init(opts ...Option) error {
@@ -110,7 +138,10 @@ func (u UserApp) shellOut(ctx context.Context, action Action, exp *types.Experim
 		)
 	}
 
-	if err := PopulateRuntime(exp); err != nil {
+	// A stage triggered for a stopped experiment finds no VMs either, and
+	// neither does the cleanup of a start refused after a stored dry run.
+	hasVMs := stageHasVMs(action, u.options.DryRun) && exp.Running() && !exp.DryRun()
+	if err := PopulateRuntime(exp, hasVMs); err != nil {
 		return err
 	}
 
@@ -181,18 +212,70 @@ func (u UserApp) shellOut(ctx context.Context, action Action, exp *types.Experim
 		return fmt.Errorf("unmarshaling experiment from JSON: %w", err)
 	}
 
+	return u.adoptResult(action, exp, result)
+}
+
+// adoptResult takes into exp what the app's stage may change of the
+// experiment it returned.
+func (u UserApp) adoptResult(action Action, exp, result *types.Experiment) error {
 	switch action {
 	case ActionConfigure, ActionPreStart:
+		if err := checkInjections(result.Spec); err != nil {
+			return fmt.Errorf("user app %s returned an experiment phenix refuses: %w", u.options.Name, err)
+		}
+
 		exp.SetSpec(result.Spec)
 	case ActionPostStart, ActionRunning:
 		if metadata, ok := result.Status.AppStatus()[u.options.Name]; ok {
 			exp.Status.SetAppStatus(u.options.Name, metadata)
 		}
 	case ActionCleanup:
+		// Nothing renders the spec of a stopping experiment, and failing here
+		// would skip the cleanup of every app after this one; the next
+		// configure or start refuses the spec instead.
+		if err := checkInjections(result.Spec); err != nil {
+			plog.Warn(
+				plog.TypePhenixApp,
+				"user app returned an experiment the next configure or start refuses",
+				"app", u.options.Name, "exp", exp.Metadata.Name, "err", err,
+			)
+		}
+
 		exp.SetSpec(result.Spec)
 
 		if metadata, ok := result.Status.AppStatus()[u.options.Name]; ok {
 			exp.Status.SetAppStatus(u.options.Name, metadata)
+		}
+	}
+
+	return nil
+}
+
+// checkInjections refuses an experiment spec a user app returned when a node
+// minimega launches has an injection, a deletion or an advanced setting
+// phenix refuses, such as an injection that names no source, which the
+// minimega script would render as the experiment's base directory. External
+// nodes are never injected into or launched.
+func checkInjections(spec ifaces.ExperimentSpec) error {
+	if spec == nil {
+		return nil
+	}
+
+	for _, node := range spec.Topology().Nodes() {
+		if node.External() {
+			continue
+		}
+
+		if err := v1.CheckInjections(node.Injections()); err != nil {
+			return fmt.Errorf("node %s: %w", node.General().Hostname(), err)
+		}
+
+		if err := v1.CheckDeletions(node.Deletions()); err != nil {
+			return fmt.Errorf("node %s: %w", node.General().Hostname(), err)
+		}
+
+		if err := v1.CheckAdvanced(node.Advanced()); err != nil {
+			return fmt.Errorf("node %s: %w", node.General().Hostname(), err)
 		}
 	}
 

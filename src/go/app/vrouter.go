@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/activeshadow/libminimega/miniclient"
+	"github.com/hashicorp/go-multierror"
 	"github.com/mitchellh/mapstructure"
 	"inet.af/netaddr"
 
@@ -127,11 +129,17 @@ func (r NATRule) TranslationPort() string {
 	return ""
 }
 
+// vrouterRunMM sends one router command to minimega.
+var vrouterRunMM = mmcli.Run //nolint:gochecknoglobals // overridden by tests
+
 type Vrouter struct {
 	ipsecPresharedKeys map[string]string
+	options            Options
 }
 
-func (Vrouter) Init(...Option) error {
+func (v *Vrouter) Init(opts ...Option) error {
+	v.options = NewOptions(opts...)
+
 	return nil
 }
 
@@ -347,9 +355,9 @@ func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
 			}
 		}
 
-		// If app host metadata didn't include NAT configs, then see if NAT was
-		// specified in the topology network config.
-		if _, ok := data["nat"]; !ok {
+		// The topology's network NAT supplies the source NAT rules only when the
+		// app's host metadata gave none, so app snat rules take precedence.
+		if rules, _ := data["snat"].([]NATRule); len(rules) == 0 {
 			var sources []NATRule
 
 			for _, n := range node.Network().NAT() {
@@ -416,8 +424,8 @@ func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
-//nolint:cyclop,funlen,gocyclo,maintidx // complex logic
-func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
+//nolint:cyclop,funlen,gocognit,gocyclo,maintidx // complex logic
+func (v Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 	var app ifaces.ScenarioApp
 
 	// check if experiment contains a scenario config for this app
@@ -449,6 +457,10 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 
 		cmd := mmcli.NewNamespacedCommand(exp.Metadata.Name)
 
+		if err := v.clearStagedRouter(cmd, node.General().Hostname()); err != nil {
+			return err
+		}
+
 		for idx, iface := range node.Network().Interfaces() {
 			switch strings.ToLower(iface.Proto()) {
 			case "static":
@@ -460,7 +472,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 						iface.Gateway(),
 					)
 
-					err := mmcli.ErrorResponse(mmcli.Run(cmd))
+					err := v.runRouterCommand(cmd)
 					if err != nil {
 						return fmt.Errorf(
 							"configuring default gateway for router %s: %w",
@@ -481,7 +493,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 					iface.Mask(),
 				)
 
-				err := mmcli.ErrorResponse(mmcli.Run(cmd))
+				err := v.runRouterCommand(cmd)
 				if err != nil {
 					return fmt.Errorf(
 						"configuring interface for router %s: %w",
@@ -496,7 +508,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 					idx,
 				)
 
-				err := mmcli.ErrorResponse(mmcli.Run(cmd))
+				err := v.runRouterCommand(cmd)
 				if err != nil {
 					return fmt.Errorf(
 						"configuring interface for router %s: %w",
@@ -515,7 +527,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 				route.Next(),
 			)
 
-			err := mmcli.ErrorResponse(mmcli.Run(cmd))
+			err := v.runRouterCommand(cmd)
 			if err != nil {
 				return fmt.Errorf(
 					"configuring static route for router %s: %w",
@@ -532,7 +544,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 				node.Network().OSPF().RouterID(),
 			)
 
-			err := mmcli.ErrorResponse(mmcli.Run(cmd))
+			err := v.runRouterCommand(cmd)
 			if err != nil {
 				return fmt.Errorf(
 					"configuring router ID for router %s: %w",
@@ -572,7 +584,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 								idx,
 							)
 
-							err := mmcli.ErrorResponse(mmcli.Run(cmd))
+							err := v.runRouterCommand(cmd)
 							if err != nil {
 								return fmt.Errorf(
 									"configuring OSPF area network for router %s: %w",
@@ -590,7 +602,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 			if name := iface.RulesetIn(); name != "" {
 				for _, ruleset := range node.Network().Rulesets() {
 					if ruleset.Name() == name {
-						err := addChainRules(cmd, node.General().Hostname(), ruleset)
+						err := v.addChainRules(cmd, node.General().Hostname(), ruleset)
 						if err != nil {
 							return fmt.Errorf("processing ruleset rules: %w", err)
 						}
@@ -602,7 +614,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 							idx,
 						)
 
-						err = mmcli.ErrorResponse(mmcli.Run(cmd))
+						err = v.runRouterCommand(cmd)
 						if err != nil {
 							return fmt.Errorf(
 								"applying firewall chain to interface for router %s: %w",
@@ -619,7 +631,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 			if name := iface.RulesetOut(); name != "" {
 				for _, ruleset := range node.Network().Rulesets() {
 					if ruleset.Name() == name {
-						err := addChainRules(cmd, node.General().Hostname(), ruleset)
+						err := v.addChainRules(cmd, node.General().Hostname(), ruleset)
 						if err != nil {
 							return fmt.Errorf("processing ruleset rules: %w", err)
 						}
@@ -631,7 +643,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 							idx,
 						)
 
-						err = mmcli.ErrorResponse(mmcli.Run(cmd))
+						err = v.runRouterCommand(cmd)
 						if err != nil {
 							return fmt.Errorf(
 								"applying firewall chain to interface for router %s: %w",
@@ -672,7 +684,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 								r.HighAddr,
 							)
 
-							err := mmcli.ErrorResponse(mmcli.Run(cmd))
+							err := v.runRouterCommand(cmd)
 							if err != nil {
 								return fmt.Errorf(
 									"configuring DHCP range for router %s: %w",
@@ -690,7 +702,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 								d.DefaultRoute,
 							)
 
-							err := mmcli.ErrorResponse(mmcli.Run(cmd))
+							err := v.runRouterCommand(cmd)
 							if err != nil {
 								return fmt.Errorf(
 									"configuring DHCP default route for router %s: %w",
@@ -708,7 +720,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 								ns,
 							)
 
-							err := mmcli.ErrorResponse(mmcli.Run(cmd))
+							err := v.runRouterCommand(cmd)
 							if err != nil {
 								return fmt.Errorf(
 									"configuring DHCP DNS server for router %s: %w",
@@ -727,7 +739,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 								ip,
 							)
 
-							err := mmcli.ErrorResponse(mmcli.Run(cmd))
+							err := v.runRouterCommand(cmd)
 							if err != nil {
 								return fmt.Errorf(
 									"configuring DHCP static assignment for router %s: %w",
@@ -750,7 +762,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 					for ip, name := range dns {
 						cmd.Command = fmt.Sprintf("router %s dns %s %s", host.Hostname(), ip, name)
 
-						err := mmcli.ErrorResponse(mmcli.Run(cmd))
+						err := v.runRouterCommand(cmd)
 						if err != nil {
 							return fmt.Errorf(
 								"configuring DNS mapping for router %s: %w",
@@ -765,7 +777,7 @@ func (Vrouter) PostStart(ctx context.Context, exp *types.Experiment) error {
 
 		cmd.Command = fmt.Sprintf("router %s commit", node.General().Hostname())
 
-		err := mmcli.ErrorResponse(mmcli.Run(cmd))
+		err := v.runRouterCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("committing config for router %s: %w", node.General().Hostname(), err)
 		}
@@ -1092,7 +1104,81 @@ func configureNTP(exp *types.Experiment, hostname string) (string, error) {
 	return "", ErrNTPConfigNotFound
 }
 
-func addChainRules(cmd *mmcli.Command, node string, ruleset ifaces.NodeNetworkRuleset) error {
+// clearStagedRouter removes the router config minimega has staged for a
+// minirouter. minimega keeps what an earlier post-start staged, so a
+// re-triggered post-start would fail on the addresses the router already has
+// and duplicate its firewall rules and DNS records. "clear router" needs an
+// existing router, which any router subcommand creates (0.0.0.0 is the ID clear
+// resets to), and it keeps the gateway.
+func (v Vrouter) clearStagedRouter(cmd *mmcli.Command, router string) error {
+	if v.options.DryRun {
+		return nil // nothing is staged
+	}
+
+	cmd.Command = fmt.Sprintf("router %s rid 0.0.0.0", router)
+
+	err := v.runRouterCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("creating router %s to clear: %w", router, err)
+	}
+
+	for _, command := range []string{"clear router " + router, "clear router " + router + " gw"} {
+		cmd.Command = command
+
+		err := clearRouterError(vrouterRunMM(cmd), router)
+		if err != nil {
+			return fmt.Errorf("clearing staged config for router %s: %w", router, err)
+		}
+	}
+
+	return nil
+}
+
+// clearRouterError returns the errors of a "clear router <vm>" command.
+// minimega runs it on every host of the namespace, and a host without the VM
+// answers "no such vm <vm>" instead of the "vm not found: <vm>" it drops from
+// the answers to other VM commands, so those answers are dropped here once a
+// host has cleared the router.
+func clearRouterError(responses chan *miniclient.Response, vm string) error {
+	var (
+		errs     error
+		cleared  bool
+		notFound = "no such vm " + vm
+	)
+
+	for response := range responses {
+		for _, resp := range response.Resp {
+			switch resp.Error {
+			case "":
+				cleared = true
+			case notFound:
+			default:
+				errs = multierror.Append(errs, errors.New(resp.Error))
+			}
+		}
+	}
+
+	if errs == nil && !cleared {
+		return errors.New(notFound)
+	}
+
+	return errs
+}
+
+// runRouterCommand sends one router command to minimega, except in a dry run:
+// it launches no VMs, and minimega refuses router commands for VMs it does not
+// have. The commands are still built, so a dry run checks the app metadata.
+func (v Vrouter) runRouterCommand(cmd *mmcli.Command) error {
+	if v.options.DryRun {
+		plog.Debug(plog.TypePhenixApp, "dry run: not sending router command", "cmd", cmd.Command)
+
+		return nil
+	}
+
+	return mmcli.ErrorResponse(vrouterRunMM(cmd))
+}
+
+func (v Vrouter) addChainRules(cmd *mmcli.Command, node string, ruleset ifaces.NodeNetworkRuleset) error {
 	for _, rule := range ruleset.Rules() {
 		dst := rule.Destination().Address()
 
@@ -1129,7 +1215,7 @@ func addChainRules(cmd *mmcli.Command, node string, ruleset ifaces.NodeNetworkRu
 			)
 		}
 
-		err := mmcli.ErrorResponse(mmcli.Run(cmd))
+		err := v.runRouterCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("adding firewall rule for router %s: %w", node, err)
 		}
@@ -1141,7 +1227,7 @@ func addChainRules(cmd *mmcli.Command, node string, ruleset ifaces.NodeNetworkRu
 			ruleset.Default(),
 		)
 
-		err = mmcli.ErrorResponse(mmcli.Run(cmd))
+		err = v.runRouterCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("setting default firewall chain action for router %s: %w", node, err)
 		}
