@@ -198,11 +198,14 @@ GitHub Actions is path-scoped: `ci.yml` generates, lints, and tests Go;
 `frontend.yml` runs Vitest, builds UI/backend, and runs Playwright smoke tests;
 `examples.yml` checks Go/Python examples; `packages.yml` builds Docker, Debian,
 and Podman outputs; `docs.yml` builds the documentation site for pull requests
-and publishes it to GitHub Pages from `main`. `lint.yml` runs every prek hook
-on all changes. Update affected path filters, inputs, generated artifacts,
-tool versions, and local-equivalent commands together. Preserve least-privilege
-permissions, supported action versions, lockfile caches, and shared version
-values.
+and publishes it to GitHub Pages from `main`; `e2e.yml` runs the `src/go/e2e/`
+tests against a real minimega and KVM guests, one runner per shard of
+`.github/e2e/shards.json`, when `src/go/` or the E2E setup changes and nightly,
+and the apps and images repositories call it (see `src/go/e2e/README.md`).
+`lint.yml` runs every prek hook on all changes. Update affected path filters,
+inputs, generated artifacts, tool versions, and local-equivalent commands
+together. Preserve least-privilege permissions, supported action versions,
+lockfile caches, and shared version values.
 
 Do not publish artifacts, push images, or create releases under any
 circumstances. The only exception is packages that a fork's own workflows
