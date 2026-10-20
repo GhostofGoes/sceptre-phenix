@@ -133,7 +133,7 @@ spec:
   vlans:
     aliases: {EXP-1: 101}               # phenix vlan alias
     min: 100                            # --vlan-min / phenix vlan range
-    max: 200                            # --vlan-max
+    max: 200                            # --vlan-max; minimega assigns 100-199
   schedules: {server-00: compute-01}    # phenix experiment schedule <exp> <algorithm>
   deployMode: all                       # inherited from --deploy-mode / config.yaml
   useGREMesh: false                     # inherited from --use-gre-mesh
@@ -230,8 +230,12 @@ curl -H "X-Phenix-Auth-Token: $TOKEN" http://localhost:3000/api/v1/experiments
   at its stored version, so validation refuses any other `apiVersion`, such as a v1
   Scenario, whatever its `apps`, with `kind Scenario is not valid at apiVersion v1`.
 - **`phenix config edit` on a running experiment's config requires `--force`** — edits are
-  normally blocked once an experiment exists to avoid drift between the stored config and
-  the deployed state.
+  normally blocked while an experiment runs to avoid drift between the stored config and
+  the deployed state. A forced edit stores the status the edited config carries, so it
+  keeps the experiment running, and it cannot rename a running experiment. Every other
+  config update (`PUT /api/v1/configs/experiment/{name}`, a workflow config upsert) is
+  refused while the stored experiment runs, whatever status the body carries, and when
+  the body's own status says it runs.
 - **`phenix experiment trigger-running` is deprecated** — use
   `phenix experiment trigger running <exp> [app ...]`, which also reaches the
   `configure`, `pre-start`, `post-start`, and `cleanup` stages.

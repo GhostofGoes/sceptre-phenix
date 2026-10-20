@@ -222,6 +222,70 @@ func TestSpecValidate(t *testing.T) {
 	}
 }
 
+// TestSpecValidateVLANRange checks that a vlanRange the minimega script does
+// not render or minimega would refuse, such as an inverted one or one with only
+// one end set, is refused before an apply stops a running experiment.
+func TestSpecValidateVLANRange(t *testing.T) {
+	cases := []struct {
+		name    string
+		vlans   *workflow.VLANRange
+		wantErr string // empty when the spec is valid
+	}{
+		{name: "no range", vlans: nil},
+		{name: "both ends unset", vlans: &workflow.VLANRange{}},
+		{name: "ascending", vlans: &workflow.VLANRange{Min: 330, Max: 340}},
+		{name: "a single VLAN", vlans: &workflow.VLANRange{Min: 330, Max: 331}},
+		{name: "up to 4096", vlans: &workflow.VLANRange{Min: 330, Max: 4096}},
+		{
+			name:    "only the min",
+			vlans:   &workflow.VLANRange{Min: 340},
+			wantErr: "vlanRange: max VLAN ID is unset while min VLAN ID is 340; set both ends of the VLAN range, or neither",
+		},
+		{
+			name:    "only the max",
+			vlans:   &workflow.VLANRange{Max: 330},
+			wantErr: "vlanRange: min VLAN ID is unset while max VLAN ID is 330; set both ends of the VLAN range, or neither",
+		},
+		{
+			name:    "equal ends",
+			vlans:   &workflow.VLANRange{Min: 330, Max: 330},
+			wantErr: "vlanRange: VLAN range 330-330: min VLAN ID must be less than max VLAN ID",
+		},
+		{
+			name:    "inverted",
+			vlans:   &workflow.VLANRange{Min: 340, Max: 330},
+			wantErr: "vlanRange: VLAN range 340-330: min VLAN ID must be less than max VLAN ID",
+		},
+		{
+			name:    "a max above 4096",
+			vlans:   &workflow.VLANRange{Min: 330, Max: 4097},
+			wantErr: "vlanRange: max VLAN ID 4097 is outside 2-4096",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := workflow.Spec{VLANRange: tc.vlans}.Validate()
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() unexpected error: %v", err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, workflow.ErrInvalidSpec) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidSpec", err)
+			}
+
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateName(t *testing.T) {
 	valid := []string{"main", "a", "9lives", "feature-1", "v1.2.3", "A_b.c-D", "a..b", "hw-test"}
 	invalid := []string{"", ".", "..", ".hidden", "-dash", "_under", "a/b", "../etc", "a b", "a\nb", "main\n", "a\tb", "a\\b", "naïve"}
@@ -366,5 +430,41 @@ func TestSpecExperimentDeployMode(t *testing.T) {
 		if got := spec.ExperimentDeployMode(); got != tc.want {
 			t.Errorf("ExperimentDeployMode() with deployMode %q = %q, want %q", tc.mode, got, tc.want)
 		}
+	}
+}
+
+// TestValidateVLANsInRange is a regression test: a workflow pinning a VLAN ID
+// that vlanRange leaves out passed Validate, and an update then dropped the
+// experiment's refusal of the range and kept the old one, reporting success,
+// while a create stored both.
+func TestValidateVLANsInRange(t *testing.T) {
+	r := &workflow.VLANRange{Min: 300, Max: 310}
+
+	for _, tc := range []struct {
+		name    string
+		spec    workflow.Spec
+		wantErr string
+	}{
+		{"inside", workflow.Spec{VLANRange: r, VLANs: map[string]int{"EXP": 300, "B": 309}}, ""},
+		{"unpinned", workflow.Spec{VLANRange: r, VLANs: map[string]int{"EXP": 0}}, ""},
+		{"no range", workflow.Spec{VLANs: map[string]int{"EXP": 4000}}, ""},
+		{"at max", workflow.Spec{VLANRange: r, VLANs: map[string]int{"EXP": 310}}, "VLAN EXP (VLAN ID 310) is not in vlanRange, whose VLAN IDs are 300 to 309"},
+		{"below min", workflow.Spec{VLANRange: r, VLANs: map[string]int{"A": 300, "EXP": 299}}, "VLAN EXP (VLAN ID 299)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.spec.Validate()
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() unexpected error: %v", err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, workflow.ErrInvalidSpec) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() error = %v, want ErrInvalidSpec containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

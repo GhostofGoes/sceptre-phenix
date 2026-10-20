@@ -3,7 +3,9 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 
 	"github.com/mitchellh/mapstructure"
 
@@ -107,6 +109,28 @@ func (s Spec) Validate() error {
 		)
 	}
 
+	// The experiment's start refuses an invalid range too, but a restart has
+	// stopped the running experiment by then.
+	if err := experiment.CheckVLANRange(s.VLANMin(), s.VLANMax()); err != nil {
+		return fmt.Errorf("%w: vlanRange: %w", ErrInvalidSpec, err)
+	}
+
+	// An experiment refuses a range that leaves out a pinned VLAN ID: minimega
+	// assigns a range's IDs from min up to, but not including, max.
+	minVal, maxVal := s.VLANMin(), s.VLANMax()
+
+	for _, alias := range slices.Sorted(maps.Keys(s.VLANMappings())) {
+		id := s.VLANMappings()[alias]
+
+		// CheckVLANRange passed, so both ends are set or neither is.
+		if id != 0 && maxVal != 0 && (id < minVal || id >= maxVal) {
+			return fmt.Errorf(
+				"%w: vlans: VLAN %s (VLAN ID %d) is not in vlanRange, whose VLAN IDs are %d to %d",
+				ErrInvalidSpec, alias, id, minVal, maxVal-1,
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -181,7 +205,8 @@ func (s Spec) ExperimentDeployMode() common.DeploymentMode {
 	return mode
 }
 
-// VLANMin returns the lowest VLAN ID to use, or 0 when vlanRange is not set.
+// VLANMin returns the lowest VLAN ID minimega may assign, or 0 when vlanRange is
+// not set.
 func (s Spec) VLANMin() int {
 	if s.VLANRange == nil {
 		return 0
@@ -190,7 +215,8 @@ func (s Spec) VLANMin() int {
 	return s.VLANRange.Min
 }
 
-// VLANMax returns the highest VLAN ID to use, or 0 when vlanRange is not set.
+// VLANMax returns the end of the VLAN range, which minimega assigns up to but
+// not including, or 0 when vlanRange is not set.
 func (s Spec) VLANMax() int {
 	if s.VLANRange == nil {
 		return 0
