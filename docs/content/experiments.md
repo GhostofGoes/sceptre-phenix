@@ -61,7 +61,17 @@ phenix exp stop --keep-injection-snapshots <experiment name>
 ```
 
 Only `phenix exp stop` accepts this option. Stopping an experiment from the
-Web-UI, or with `phenix exp restart`, always deletes the snapshots.
+Web-UI, or with `phenix exp restart`, always deletes the snapshots. A start that
+fails in minimega, unless `--treat-mm-errors-as-warnings` is given, runs the
+cleanup apps, clears the experiment's minimega namespace and deletes the
+snapshots it created too.
+
+A stop first ends what still uses the experiment, such as its SCORCH runs,
+which can take minutes. If another process stops the experiment, or stops and
+starts it again, meanwhile, the stop leaves the stored run alone and fails
+with `experiment <name>: experiment was stopped or started again while it was
+stopping: stored start time "<time>", read "<time>"`, which gives the start
+time stored now and the one the stop read; an empty one means stopped.
 
 The `phenix exp --help` command will output:
 
@@ -308,7 +318,6 @@ interchangeable:
 | Targets specific apps | Yes, via `[<app name> ...]` | No, always applies to every app |
 | Validates the experiment config | No | Yes |
 | Runs registered config hooks | No | Yes |
-| Resets the minimega bridge | No | Yes (deletes it so it's recreated with current settings, unless using the GRE mesh) |
 | Guards against running experiments | No | Yes (refuses to run if the experiment is running) |
 
 Use `phenix experiment reconfigure` after changing an experiment's stored

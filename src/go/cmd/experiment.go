@@ -778,13 +778,12 @@ func newExperimentReconfigureCmd() *cobra.Command {
   experiments.
 
   This differs from 'phenix experiment trigger configure' in that it re-runs
-  config validation and any registered config hooks, deletes the experiment's
-  minimega bridge so it gets recreated with current settings, and always
-  applies to all apps. Use this after editing an experiment's stored topology,
-  scenario, or deployment settings. Use 'trigger configure' to manually re-run
-  a specific app's (or apps') configure hook on demand for debugging; note it
-  does not validate the config, run config hooks, reset the minimega bridge,
-  or guard against running experiments the way 'reconfigure' does.`
+  config validation and any registered config hooks, and always applies to
+  all apps. Use this after editing an experiment's stored topology, scenario,
+  or deployment settings. Use 'trigger configure' to manually re-run a
+  specific app's (or apps') configure hook on demand for debugging; note it
+  does not validate the config, run config hooks, or guard against running
+  experiments the way 'reconfigure' does.`
 
 	cmd := &cobra.Command{
 		Use:               "reconfigure <experiment name>",
@@ -1057,9 +1056,9 @@ func newExperimentTriggerCmd() *cobra.Command {
 
   Triggering the "configure" stage is not the same as
   'phenix experiment reconfigure': this command does not validate the
-  experiment config, run config hooks, reset the minimega bridge, or guard
-  against running experiments. Use 'phenix experiment reconfigure' after
-  editing an experiment's stored topology, scenario, or deployment settings.
+  experiment config, run config hooks, or guard against running experiments.
+  Use 'phenix experiment reconfigure' after editing an experiment's stored
+  topology, scenario, or deployment settings.
 
   Valid lifecycles and shorthands: %s.`, experimentLifecycleChoices())
 

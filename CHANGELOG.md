@@ -60,13 +60,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Netflow**: Refuse netflow capture on dry-run experiments with 409.
 - **Triggered User Apps**: Skip minimega VM lookup for stopped experiments.
 - **Triggered Stages**: Pass `PHENIX_DRYRUN=true` to user apps of dry runs.
 - **Start Progress**: Never create or re-create the minimega namespace.
+- **Failed Delayed Start**: Run cleanup apps, then clear namespace once.
+- **Delayed VMs**: Abandon waits when another process stops the experiment.
+- **Stop During Start**: Await the canceled UI start before cleanup.
 - **Stop During Start**: Skip remaining default post-start apps too.
 - **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
 - **Running Trigger**: Keep the status the app's running stage prints.
 - **VLAN Range Errors**: Name the max VLAN ID correctly.
+- **Experiment Stop**: Leave runs another process started meanwhile untouched.
 - **Running VM Labels**: Escape label quotes and backslashes for minimega.
 - **VM Flush**: Keep other powered-off VMs on kill and redeploy.
 - **Per-VM Start**: Start every VM despite failures; name failed VMs.
@@ -78,6 +83,8 @@ All notable changes to this project will be documented in this file.
 - **User Commands**: Signal the whole process group on cancel.
 - **User Commands**: Pass signals that end phenix to their groups.
 - **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **Experiment Reconfigure**: Stop sending `ns del-bridge`, which recreated the namespace.
+- **Failed Starts**: Delete leftover disk snapshots and report cleanup errors.
 - **User Apps**: Query VMs only from post-start, outside dry runs.
 - **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
 - **Startup Autotunnels**: End C2 waits at stop; skip dry runs.
@@ -88,6 +95,7 @@ All notable changes to this project will be documented in this file.
 - **minimega Restarts**: Retry unsent commands once on a fresh connection.
 - **C2 Commands**: Pass `$` to guests instead of minimega's environment.
 - **Cluster Hosts**: Report the failed minimega `host` command's error.
+- **CLI Start**: Mark running during delays; run cleanup on failure.
 - **Scheduling**: Keep minimega's host names; trim suffixes only for display.
 - **Tap External Access**: Refuse prefixless or empty `ip` without panicking.
 - **Tap Failures**: Delete created taps when a later one fails.
@@ -102,6 +110,8 @@ All notable changes to this project will be documented in this file.
 - **App Stages**: Keep others' status; never write into newer runs.
 - **Stage Triggers**: Keep running flags that refuse second SCORCH runs.
 - **Periodic Apps**: Refuse to schedule apps of stopped experiments.
+- **SCORCH Runs**: Accept runs again after a stop that panicked.
+- **Netflow**: Drop captures of experiments stopped from the CLI.
 - **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
 - **Subprocess Output**: Read lines up to 64 MiB without hanging.
 - **Disk Images**: Check `-filepath`; boot skipped nodes once images appear.
@@ -118,6 +128,7 @@ All notable changes to this project will be documented in this file.
 - **BoltDB Store**: Create missing directories of absolute `bolt://` paths.
 - **BoltDB Store**: Stop hiding delete and update failures.
 - **Etcd Store**: Report missing, existing and unreadable configs like BoltDB.
+- **Experiment Start**: Fail when minimega leaves VMs in `ERROR` state.
 - **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
 - **vrouter NAT**: Prefer app `snat` rules over topology masquerade rules.
 - **minirouter Hostnames**: Set minirouter hostnames in the startup app.
@@ -125,6 +136,7 @@ All notable changes to this project will be documented in this file.
 - **vrouter Re-Triggers**: Clear staged minirouter config before re-running post-start.
 - **BoltDB Store**: Stop hanging after one failed database open.
 - **Experiment Runs**: Never write a stopped or restarted run back.
+- **Failed Starts**: Stop only the start's own run, never twice.
 - **Periodic Apps**: End promptly when runs end; honor dry runs.
 - **App Termination**: Stop racing on output errors after kill delay.
 - **Topology Builder**:
