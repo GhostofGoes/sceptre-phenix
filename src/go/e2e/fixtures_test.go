@@ -290,6 +290,18 @@ func waitNBDReleased(t *testing.T, dev string) {
 	t.Logf("%s: pid file %s at first look; released after %v", dev, before, time.Since(start).Round(time.Millisecond))
 }
 
+// readGuestFile reads a file inside a mounted guest filesystem.
+func readGuestFile(t *testing.T, root, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(root, path))
+	if err != nil {
+		t.Fatalf("reading %s from the guest disk: %v", path, err)
+	}
+
+	return string(data)
+}
+
 // guestFile reads a file of a mounted guest filesystem, reporting false when it
 // is absent.
 func guestFile(root, path string) (string, bool) {
@@ -299,6 +311,17 @@ func guestFile(root, path string) (string, bool) {
 	}
 
 	return string(data), true
+}
+
+// staticIface returns a static /24 interface for a node's interfaces list.
+func staticIface(name, vlan, address string) string {
+	return fmt.Sprintf(`
+      - name: %s
+        type: ethernet
+        proto: static
+        vlan: %s
+        address: %s
+        mask: 24`, name, vlan, address)
 }
 
 // hollowNode returns a hollow Linux node on the ext4 fixture with one static

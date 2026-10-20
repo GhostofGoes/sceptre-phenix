@@ -526,6 +526,16 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+// fileSize returns the size of a file, or 0 when it does not exist.
+func fileSize(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+
+	return st.Size()
+}
+
 // hostCmd runs a command on the host and returns its trimmed combined output.
 func hostCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput() //nolint:gosec // test harness
@@ -801,6 +811,29 @@ func api(t *testing.T, method, path string, body any) (int, []byte) {
 	}
 
 	return resp.StatusCode, data
+}
+
+// apiGet sends a GET to the REST API and returns the status, headers and body.
+func apiGet(t *testing.T, path string) (int, http.Header, []byte) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+cfg.uiAddr+"/api/v1"+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s: reading body: %v", path, err)
+	}
+
+	return resp.StatusCode, resp.Header, data
 }
 
 // apiOK calls the REST API, fails the test unless the status is 2xx, and
