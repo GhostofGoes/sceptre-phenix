@@ -1,4 +1,8 @@
 #!/bin/bash
 
-sed -i -e 's/phenix/{{ . }}/g' /etc/hosts
+# This script can run more than once, so rename only the whole name "phenix",
+# or its first label in a name such as phenix.localdomain: a hostname that
+# contains it must not be renamed again. A match consumes the blank after it,
+# so the second pass renames a "phenix" that directly followed another.
+sed -i -E 's/(^|[[:space:]])phenix([.[:space:]]|$)/\1{{ . }}\2/g; s/(^|[[:space:]])phenix([.[:space:]]|$)/\1{{ . }}\2/g' /etc/hosts
 hostnamectl set-hostname {{ . }}

@@ -43,8 +43,10 @@ behavior.
 
 The `startup` app generates scripts that configure supported guest operating
 systems when an experiment starts. These scripts configure settings such as the
-hostname, time zone, and network interfaces. Scenario metadata for the app can
-also add settings such as Windows domain membership.
+hostname, time zone, and network interfaces. On Linux guests they also set each
+interface's `mtu` from the topology; an interface without one keeps the guest's
+MTU. Scenario metadata for the app can also add settings such as Windows domain
+membership.
 
 By default, phēnix injects the generated scripts into the VM's first drive. For
 images where disk injection is unavailable or intentionally disabled, phēnix
@@ -63,7 +65,7 @@ The supported metadata is:
 
 | Metadata | Guest OS | Fields | Result |
 |----------|----------|--------|--------|
-| `domain_controller` | Linux, RHEL, or CentOS | `domain`, `username`, `password` | Joins the guest to the domain with `realm join`. |
+| `domain_controller` | Linux, RHEL, or CentOS | `domain`, `username`, `password` | Joins the guest to the domain with `realm join`, unless `realm list` already lists it. |
 | `domain_controller` | Windows | `domain`, `ip`, `username`, `password` | Uses `ip` as the first network adapter's DNS server, then joins the domain. |
 | `auto_logon` | Windows | `username`, `password`, and optional `local` | Configures automatic logon and adds the account to the local Administrators group. |
 
@@ -335,6 +337,16 @@ spec:
             type: ethernet
             vlan: MGMT
 ```
+
+### serial App
+
+The `serial` app links the `type: serial` interfaces of `linux` nodes over UDP
+multicast on the interface's VLAN. In the guest, a `serial-startup` systemd unit
+runs `socat`, which creates a pseudo-terminal and links it at the interface's
+`device` path, replacing whatever is there. Use a path the guest does not
+already have, such as the schema default `/dev/ttyphenix0`: `/dev/ttyS0` is the
+guest's own first serial port. The guest needs `socat`, `ping`, and `route`
+(net-tools).
 
 ### vrouter App
 

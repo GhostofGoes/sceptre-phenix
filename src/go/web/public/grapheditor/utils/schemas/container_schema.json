@@ -1455,9 +1455,9 @@
             "device": {
               "type": "string",
               "title": "device",
-              "default": "/dev/ttyS0",
+              "default": "/dev/ttyphenix0",
               "examples": [
-                "/dev/ttyS0"
+                "/dev/ttyphenix0"
               ],
               "pattern": "^[\\w\\/]+\\w+$"
             }
