@@ -10,6 +10,7 @@ type MM interface { //nolint:interfacebloat // legacy interface
 	GetLaunchProgress(string, int) (float64, error)
 
 	GetVMInfo(...Option) VMs
+	GetVMInfoErr(...Option) (VMs, error)
 	GetVMScreenshot(...Option) ([]byte, error)
 	GetVNCEndpoint(...Option) (string, error)
 	StartVM(...Option) error
@@ -27,7 +28,7 @@ type MM interface { //nolint:interfacebloat // legacy interface
 	CreateBridge(...Option) error
 
 	CreateTunnel(...Option) error
-	GetTunnels(...Option) []map[string]string
+	GetTunnels(...Option) ([]map[string]string, error)
 	CloseTunnel(...Option) error
 
 	StartVMCapture(...Option) error

@@ -159,7 +159,11 @@ phenix vm restart my-exp --label all
 Labels are written with `phenix vm set --label-changes/-L key=value` (repeatable);
 `--append-labels` merges them into the VM's existing labels rather than
 replacing the set. Labels are the only VM setting that can be changed while an
-experiment is running.
+experiment is running. On a running VM, a label whose key or value is empty,
+holds a non-printable character other than a tab or line break, or holds `"`,
+`'`, `\` or `#` without whitespace (such as `a"b` or `it's`) is refused with
+`label "<key>" of VM <vm>: ...: minimega cannot store this label of a running VM`
+(400 over REST), because minimega would exit or change it.
 
 ```bash
 phenix vm set my-exp node1 -L role=web -L site=east --append-labels

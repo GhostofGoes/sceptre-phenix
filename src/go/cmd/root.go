@@ -22,6 +22,7 @@ import (
 	_ "phenix/api/scorch"
 	"phenix/store"
 	"phenix/util/common"
+	"phenix/util/mm"
 	"phenix/util/plog"
 	"phenix/web"
 )
@@ -156,6 +157,9 @@ var rootCmd = &cobra.Command{
 			"base-dir.minimega",
 			cmd.Flags().Changed("base-dir.minimega"),
 		)
+
+		// Only now that both bases are set may phenix dial minimega.
+		mm.ResolveFilesDirectory()
 		common.MountBase = getEffectiveString( //nolint:reassign // configuration injection
 			"mount-dir",
 			cmd.Flags().Changed("mount-dir"),
