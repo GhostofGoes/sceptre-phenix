@@ -9,6 +9,9 @@ if command -v 'ip' &>/dev/null; then
     dev=$(ip -oneline -4 link show | grep -iv 'LOOPBACK' | awk 'NR=={{ addInt $idx 1 }} {split($2, devname, ":"); print devname[1]}')
     ip link set dev "$dev" down
     ip addr flush dev "$dev"
+    {{ if gt $iface.MTU 0 }}
+    ip link set dev "$dev" mtu {{ $iface.MTU }}
+    {{ end }}
 
     {{ if or ($iface.QinQ) (eq $iface.Proto "manual") }}
     ip link set dev "$dev" up
@@ -23,7 +26,7 @@ if command -v 'ip' &>/dev/null; then
         {{ end }}
     {{ end }}
     {{ range $server := $iface.DNS }}
-    echo "nameserver {{ $server }}" >> /etc/resolv.conf
+    grep -qxF "nameserver {{ $server }}" /etc/resolv.conf 2>/dev/null || echo "nameserver {{ $server }}" >> /etc/resolv.conf
     {{ end }}
 {{ end }}
 {{ range $route := .Network.Routes }}
@@ -34,6 +37,9 @@ else
 {{ range $idx, $iface := .Network.Interfaces }}
     dev=$(ifconfig -s -a | grep -ivE '^lo|Iface' | awk 'NR=={{ addInt $idx 1 }} { print $1 }')
     ifconfig "$dev" down
+    {{ if gt $iface.MTU 0 }}
+    ifconfig "$dev" mtu {{ $iface.MTU }}
+    {{ end }}
 
     {{ if or ($iface.QinQ) (eq $iface.Proto "manual") }}
     ifconfig "$dev" up
@@ -48,7 +54,7 @@ else
         {{ end }}
     {{ end }}
     {{ range $server := $iface.DNS }}
-    echo "nameserver {{ $server }}" >> /etc/resolv.conf
+    grep -qxF "nameserver {{ $server }}" /etc/resolv.conf 2>/dev/null || echo "nameserver {{ $server }}" >> /etc/resolv.conf
     {{ end }}
 {{ end }}
 {{ range $route := .Network.Routes }}

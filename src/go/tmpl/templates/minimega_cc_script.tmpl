@@ -4,9 +4,9 @@
   {{- end }}
 
   {{- if .Commands }}
-## VM: {{ .General.Hostname }} ##
+## VM: {{ .ScriptWord "hostname" .General.Hostname }} ##
 cc filter name={{ .General.Hostname }}
-    {{- range .Commands }}
+    {{- range .CCCommands }}
 cc {{ . }}
     {{- end }}
   {{- end }}
