@@ -201,6 +201,16 @@ three options available to set, but on only one option can be set:
    setting, per hostname, that will watch for the UUID instead of the hostname
    to register with minimega command and control.
 
+`phenix experiment start` waits until every `timer` and `c2` delayed VM has
+started and the post-start apps have run. The experiment is reported running
+while it waits. If a delayed VM fails to start or the command is interrupted,
+the experiment is stopped, including its cleanup apps. If the experiment is
+stopped while delayed VMs wait or post-start apps run, from this process or
+another one such as `phenix experiment stop` while `phenix ui` started it, the
+waits end without starting their VMs, the post-start apps not yet run are
+skipped, and `phenix experiment start` fails with `experiment <name> was
+stopped while it was starting`.
+
 !!! note
     If one or more VMs are set with a delayed start, the UI will display a blue
     tag in the Delay column next to the Screenshot column. The tag will indicate

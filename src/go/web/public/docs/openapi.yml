@@ -605,6 +605,88 @@ paths:
               schema:
                 type: string
                 format: binary
+  "/experiments/{exp_name}/netflow":
+    get:
+      tags:
+        - Experiments
+      summary: Check whether the experiment captures netflow
+      description: ""
+      operationId: getExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: the experiment captures netflow
+        "404":
+          description: the experiment captures no netflow
+    post:
+      tags:
+        - Experiments
+      summary: Start capturing the experiment's netflow
+      description: ""
+      operationId: postExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: successful operation
+        "400":
+          description: the experiment does not exist, or already captures netflow
+        "409":
+          description: >
+            the experiment is stopped or a dry run, or its default bridge is
+            phenix
+        "500":
+          description: the capture cannot start
+    delete:
+      tags:
+        - Experiments
+      summary: Stop capturing the experiment's netflow
+      description: ""
+      operationId: deleteExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: successful operation
+        "404":
+          description: the experiment captures no netflow
+        "500":
+          description: the capture cannot stop
+  "/experiments/{exp_name}/netflow/ws":
+    get:
+      tags:
+        - Experiments
+      summary: Stream the experiment's netflow records over a WebSocket
+      description: ""
+      operationId: getExperimentsNameNetflowWs
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "101":
+          description: switching protocols
+        "404":
+          description: the experiment captures no netflow
   "/experiments/{exp_name}/vms":
     get:
       tags:

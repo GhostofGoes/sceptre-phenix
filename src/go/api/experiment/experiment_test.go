@@ -3,6 +3,7 @@ package experiment_test
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -168,16 +169,42 @@ func TestTriggerRejectsAllAppsWhenNoneSupportStage(t *testing.T) {
 	}
 }
 
+//nolint:gochecknoglobals // the app registry is global, so the apps are registered once
+var (
+	triggerAppsOnce sync.Once
+	triggerDryRuns  = make(map[string]*[]bool) // the record of each dry-run recorder app
+)
+
+// registerTriggerApps registers the user apps of the trigger tests once, so
+// that go test -count=N works.
+func registerTriggerApps(t *testing.T) {
+	t.Helper()
+
+	triggerAppsOnce.Do(func() {
+		const name = "test-all-apps-running-supported"
+
+		if err := app.RegisterUserApp(name, func() app.App { return &noopApp{name: name} }); err != nil {
+			t.Fatalf("registering user app: %v", err)
+		}
+
+		for _, appName := range []string{"test-trigger-dry-run-running", "test-trigger-dry-run-dry-run"} {
+			err := app.RegisterUserApp(appName, func() app.App {
+				return &dryRunRecorderApp{noopApp: noopApp{name: appName}, dryRuns: triggerDryRuns[appName]}
+			})
+			if err != nil {
+				t.Fatalf("registering user app: %v", err)
+			}
+		}
+	})
+}
+
 func TestTriggerAllowsAllAppsWhenAtLeastOneSupportsStage(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
+	registerTriggerApps(t)
+
 	name := "test-all-apps-running-supported"
-	if err := app.RegisterUserApp(name, func() app.App {
-		return &noopApp{name: name}
-	}); err != nil {
-		t.Fatalf("registering user app: %v", err)
-	}
 
 	cfg := triggerTestConfig("trigger-all-apps-running-supported", name)
 
@@ -197,5 +224,68 @@ func TestTriggerAllowsAllAppsWhenAtLeastOneSupportsStage(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("expected no error triggering running stage when a scenario app supports it, got: %v", err)
+	}
+}
+
+// dryRunRecorderApp records the dry-run option each Init call receives.
+type dryRunRecorderApp struct {
+	noopApp
+
+	dryRuns *[]bool
+}
+
+func (a *dryRunRecorderApp) Init(opts ...app.Option) error {
+	*a.dryRuns = append(*a.dryRuns, app.NewOptions(opts...).DryRun)
+
+	return nil
+}
+
+// TestTriggerTellsAppsAboutDryRuns is a regression test: a stage triggered in
+// an experiment started with --dry-run ran its apps as if VMs existed, so user
+// apps saw PHENIX_DRYRUN=false and queried the experiment's namespace.
+func TestTriggerTellsAppsAboutDryRuns(t *testing.T) {
+	tests := []struct {
+		name      string
+		startTime string
+		want      bool
+	}{
+		{name: "running", startTime: "2024-01-01T00:00:00Z", want: false},
+		{name: "dry-run", startTime: "2024-01-01T00:00:00Z-DRYRUN", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+
+			var (
+				appName = "test-trigger-dry-run-" + tt.name
+				dryRuns []bool
+			)
+
+			triggerDryRuns[appName] = &dryRuns
+
+			registerTriggerApps(t)
+
+			cfg := triggerTestConfig("trigger-dry-run-"+tt.name, appName)
+			cfg.Status["startTime"] = tt.startTime
+
+			m := store.NewMockStore(ctrl)
+			m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+				*c = cfg
+				return nil
+			}).AnyTimes()
+			m.EXPECT().Update(gomock.Any()).Return(nil).AnyTimes()
+
+			store.DefaultStore = m //nolint:reassign // monkey patching for test
+
+			err := experiment.Trigger(context.Background(), cfg.Metadata.Name, app.ActionRunning, appName)
+			if err != nil {
+				t.Fatalf("triggering running stage: %v", err)
+			}
+
+			if len(dryRuns) != 1 || dryRuns[0] != tt.want {
+				t.Fatalf("expected the app to be initialized with dry run %t, got %v", tt.want, dryRuns)
+			}
+		})
 	}
 }

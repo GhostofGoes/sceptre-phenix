@@ -84,14 +84,30 @@ scheduling problems from minimega problems. `--honor-run-periodically` keeps
 the process in the foreground re-running `running` stages on their
 `runPeriodically` interval.
 
+`start` returns once every `timer` and `c2` delayed VM has started and the
+post-start apps have run. The experiment is reported running while it waits,
+so `phenix experiment stop` works; if a delayed VM fails to start, a
+post-start app fails, or the command is interrupted with Ctrl-C, `start` stops
+the experiment (cleanup apps included) and exits nonzero. A stop from another
+process ends the waits of `start`, and of a start through `phenix ui`, at
+their next check without starting the delayed VMs, and skips the post-start
+apps not yet run; the start never stores the experiment running again or tears
+down a run started since, and `start` exits nonzero with
+`experiment <name> was stopped while it was starting`. Likewise, a `stop` that
+finds, once its SCORCH runs have ended, that another process stopped the
+experiment or started it again leaves that run alone and exits nonzero with
+`experiment <name>: experiment was stopped or started again while it was
+stopping: stored start time "<time>", read "<time>"` (the start time stored
+now and the one the stop read; an empty one means stopped).
+
 `trigger` takes the lifecycle stage as its first argument; each stage has a
 shorthand: `configure` (`config`), `pre-start` (`pre`), `post-start` (`post`),
 `running` (`run`), `cleanup` (`clean`). Passing `all` instead of an experiment
 name triggers the stage in every experiment, and passing no app names triggers
 every app. The `running` stage is skipped for stopped experiments. Triggering
 `configure` is not equivalent to `phenix experiment reconfigure`: it does not
-validate the experiment config, run config hooks, reset the minimega bridge, or
-guard against running experiments.
+validate the experiment config, run config hooks, or guard against running
+experiments.
 
 ```bash
 phenix experiment trigger running my-exp             # every app's running stage
