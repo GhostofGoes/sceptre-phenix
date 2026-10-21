@@ -354,6 +354,14 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 				},
 				{name: "Firefox runs", script: "firefox --version | grep -o '^Mozilla Firefox'", want: "Mozilla Firefox"},
 				{
+					// Firefox 138 and later cover the page with a Terms of Use
+					// dialog at first launch unless a policy skips it. The
+					// caldera app replaces this file with one that sets it too.
+					name:   "Firefox policy skips the Terms of Use dialog",
+					script: `grep -o '"SkipTermsOfUse": *true' /etc/firefox/policies/policies.json | tr -d '" '`,
+					want:   "SkipTermsOfUse:true",
+				},
+				{
 					// lightdm logs root in as the desktop comes up, around the
 					// time miniccc registers.
 					name: "root desktop session for the autostart entry",
@@ -786,6 +794,13 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 					name:   "Mozilla's Firefox, not Ubuntu's snap wrapper",
 					script: `readlink -f "$(command -v firefox)"`,
 					want:   "/usr/lib/firefox/firefox",
+				},
+				{
+					// Firefox 138 and later cover Kibana with a Terms of Use
+					// dialog at first launch unless a policy skips it.
+					name:   "Firefox policy skips the Terms of Use dialog",
+					script: `grep -o '"SkipTermsOfUse": *true' /etc/firefox/policies/policies.json | tr -d '" '`,
+					want:   "SkipTermsOfUse:true",
 				},
 				{
 					name: "root desktop session for the Kibana autostart entry",
