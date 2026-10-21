@@ -190,15 +190,16 @@ set vpn ipsec esp-group ESP-1W pfs enable
 set vpn ipsec esp-group ESP-1W proposal 1 encryption aes256
 set vpn ipsec esp-group ESP-1W proposal 1 hash sha1
 set vpn ipsec ike-group IKE-1W lifetime 3600
-set vpn ipsec esp-group IKE-1W proposal 1 encryption aes256
-set vpn ipsec esp-group IKE-1W proposal 1 hash sha1
+set vpn ipsec ike-group IKE-1W proposal 1 encryption aes256
+set vpn ipsec ike-group IKE-1W proposal 1 hash sha1
         {{- range $ipsec.Interfaces }}
 set vpn ipsec interface {{ . }}
         {{- end }}
         {{- range $site := $ipsec.Sites }}
-set vpn ipsec authentication psk PSK-KEY id '{{ $site.Local }}'
-set vpn ipsec authentication psk PSK-KEY id '{{ $site.Remote }}'
-set vpn ipsec authentication psk PSK-KEY secret '{{ $site.PresharedKey }}'
+{{- /* One named key per peer: a router with several sites needs each site's own secret. */}}
+set vpn ipsec authentication psk PSK-{{ $site.Peer }} id '{{ $site.Local }}'
+set vpn ipsec authentication psk PSK-{{ $site.Peer }} id '{{ $site.Remote }}'
+set vpn ipsec authentication psk PSK-{{ $site.Peer }} secret '{{ $site.PresharedKey }}'
 set vpn ipsec site-to-site peer {{ $site.Peer }} authentication mode pre-shared-secret
 set vpn ipsec site-to-site peer {{ $site.Peer }} authentication local-id '{{ $site.Local }}'
 set vpn ipsec site-to-site peer {{ $site.Peer }} authentication remote-id '{{ $site.Remote }}'
