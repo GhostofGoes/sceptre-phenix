@@ -343,8 +343,9 @@ jobs:
         run: |
           set -euo pipefail
           # The Makefile injects ./miniccc (and ./minirouter for the router
-          # image) from the working directory.
-          cp /usr/local/bin/miniccc /usr/local/bin/minirouter .
+          # image, ./protonuke for the protonuke image) from the working
+          # directory.
+          cp /usr/local/bin/miniccc /usr/local/bin/minirouter /usr/local/bin/protonuke .
           start=$(date +%s)
           if [ "$IMAGE" = vyos ]; then
             # VyOS is not debootstrapped: its script repacks the release ISO as
