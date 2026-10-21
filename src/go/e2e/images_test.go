@@ -241,7 +241,10 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 	"kali": {
 		vcpus: 2, memory: 3072,
 		checks: append(
-			[]imageCheck{commandsPresent("top 10 tools", "nmap", "sqlmap", "hydra", "john")},
+			[]imageCheck{
+				commandsPresent("top 10 tools", "nmap", "sqlmap", "hydra", "john"),
+				firefoxSkipsTermsOfUse,
+			},
 			desktopChecks...,
 		),
 	},
