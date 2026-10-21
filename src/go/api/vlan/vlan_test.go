@@ -2,6 +2,7 @@ package vlan
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/activeshadow/structs"
@@ -106,6 +107,43 @@ func TestAliasID(t *testing.T) {
 				t.Fatalf("expected no error, got %v", err)
 			case got != test.want:
 				t.Fatalf("expected VLAN ID %d, got %d", test.want, got)
+			}
+		})
+	}
+}
+
+// TestSetRangeRejectsInvalidRange proves phenix vlan range refuses a range
+// minimega would refuse at start before it reads the experiment, and lets a
+// valid range go on to the experiment lookup.
+func TestSetRangeRejectsInvalidRange(t *testing.T) {
+	tests := []struct {
+		name     string
+		min, max int
+		wantErr  string
+	}{
+		{name: "inverted", min: 360, max: 350, wantErr: "VLAN range 360-350: min VLAN ID must be less than max VLAN ID"},
+		{name: "equal ends", min: 350, max: 350, wantErr: "VLAN range 350-350: min VLAN ID must be less than max VLAN ID"},
+		{name: "max above 4096", min: 300, max: 4097, wantErr: "max VLAN ID 4097 is outside 2-4096"},
+		{name: "negative min", min: -1, max: 200, wantErr: "min VLAN ID -1 is outside 1-4095"},
+		{name: "valid", min: 300, max: 4096, wantErr: "getting experiment vrange"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := store.NewMockStore(gomock.NewController(t))
+
+			if !strings.Contains(test.wantErr, "VLAN ID") {
+				m.EXPECT().Get(gomock.Any()).Return(store.ErrNotExist)
+			}
+
+			previous := store.DefaultStore
+			store.DefaultStore = m //nolint:reassign // monkey patching for test
+
+			t.Cleanup(func() { store.DefaultStore = previous }) //nolint:reassign // restore test double
+
+			err := SetRange(Experiment("vrange"), Min(test.min), Max(test.max))
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("SetRange(%d, %d) error = %v, want it to contain %q", test.min, test.max, err, test.wantErr)
 			}
 		})
 	}

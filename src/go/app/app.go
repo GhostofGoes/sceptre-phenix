@@ -4,11 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"phenix/store"
 	"phenix/types"
 	ifaces "phenix/types/interfaces"
+	"phenix/util"
 	"phenix/util/notes"
 	"phenix/util/plog"
 	"phenix/util/pubsub"
@@ -20,6 +27,10 @@ type Action string
 
 // AppFactory is a function that returns a new app struct.
 type AppFactory func() App
+
+// CreateTunnelTopic is the pubsub topic the startup app publishes CreateTunnel
+// requests to. Only phenix ui subscribes to it.
+const CreateTunnelTopic = "create-tunnel"
 
 type CreateTunnel struct {
 	Experiment string
@@ -49,6 +60,7 @@ const (
 	defaultAppsAnnotation = "phenix/default-apps"
 	osWindows             = "windows"
 	osLinux               = "linux"
+	osMinirouter          = "minirouter"
 )
 
 // Actions returns the supported experiment app lifecycle actions.
@@ -184,15 +196,10 @@ func GetApp(name string) App { //nolint:ireturn // factory
 	return app()
 }
 
-// DefaultApps returns a slice of all the initialized default phenix apps.
+// DefaultApps returns the names of the default phenix apps in the order every
+// lifecycle stage runs them: sorted by name, as the documentation lists them.
 func DefaultApps() []string {
-	apps := make([]string, 0, len(defaultApps))
-
-	for app := range defaultApps {
-		apps = append(apps, app)
-	}
-
-	return apps
+	return slices.Sorted(maps.Keys(defaultApps))
 }
 
 // ExperimentApps returns the names of all apps (default and scenario) that
@@ -222,15 +229,64 @@ func StageApplicable(stage Action, name string) bool {
 	return true
 }
 
+// defaultAppsEnabled reports whether the default apps apply to the node. An
+// annotation defaultAppsSetting cannot read keeps them enabled; ApplyApps
+// refuses it in the configure and pre-start stages.
 func defaultAppsEnabled(node ifaces.NodeSpec) bool {
-	enabled, ok := node.GetAnnotation(defaultAppsAnnotation)
+	enabled, err := defaultAppsSetting(node)
+
+	return err != nil || enabled
+}
+
+// defaultAppsSetting reads the node's phenix/default-apps annotation: a
+// boolean, a string [strconv.ParseBool] accepts in any case, such as "false" or
+// "0", or a number, where 0 is false. An absent annotation means true.
+func defaultAppsSetting(node ifaces.NodeSpec) (bool, error) {
+	value, ok := node.GetAnnotation(defaultAppsAnnotation)
 	if !ok {
-		return true
+		return true, nil
 	}
 
-	value, ok := enabled.(bool)
+	switch v := value.(type) {
+	case bool:
+		return v, nil
+	case string:
+		if enabled, err := strconv.ParseBool(strings.ToLower(strings.TrimSpace(v))); err == nil {
+			return enabled, nil
+		}
+	case int:
+		return v != 0, nil
+	case int64:
+		return v != 0, nil
+	case uint64:
+		return v != 0, nil
+	case float64:
+		return v != 0, nil
+	}
 
-	return !ok || value
+	shown := fmt.Sprint(value)
+	if v, ok := value.(string); ok {
+		shown = strconv.Quote(v)
+	}
+
+	return true, fmt.Errorf(
+		"node %s: annotation %s is %s, want true or false",
+		node.General().Hostname(), defaultAppsAnnotation, shown,
+	)
+}
+
+// checkDefaultAppsSettings returns an error naming every node whose
+// phenix/default-apps annotation defaultAppsSetting cannot read.
+func checkDefaultAppsSettings(exp *types.Experiment) error {
+	var errs []error
+
+	for _, node := range exp.Spec.Topology().Nodes() {
+		if _, err := defaultAppsSetting(node); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // App is the interface that identifies all the required functionality for a
@@ -308,6 +364,22 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 		return ok
 	}
 
+	// setCleanupPending records whether the named app's cleanup stage is
+	// pending. A triggered stage also stores it at once, since its caller
+	// stores only the spec afterwards (see experiment.Trigger), so that what
+	// others store during the stage is kept.
+	setCleanupPending := func(name string, pending bool) {
+		exp.Status.SetAppCleanup(name, pending)
+
+		if options.Trigger {
+			_ = updateStoredStatus(exp, func(status ifaces.ExperimentStatus) error {
+				status.SetAppCleanup(name, pending)
+
+				return nil
+			})
+		}
+	}
+
 	queueCleanup := func(name string) {
 		if !options.Trigger {
 			return
@@ -315,10 +387,18 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 
 		switch options.Stage {
 		case ActionConfigure, ActionPreStart, ActionPostStart:
-			exp.Status.SetAppCleanup(name, true)
+			setCleanupPending(name, true)
 		case ActionRunning, ActionCleanup:
 			// Running stage: apps handle cleanup at experiment stop time.
 			// Cleanup stage: the cleanup queue is consumed, not added to.
+		}
+	}
+
+	// Refuse an annotation the default apps would otherwise read as enabled
+	// when the experiment is created, configured or started.
+	if options.Stage == ActionConfigure || options.Stage == ActionPreStart {
+		if err := checkDefaultAppsSettings(exp); err != nil {
+			return fmt.Errorf("applying default apps for action %s: %w", options.Stage, err)
 		}
 	}
 
@@ -329,6 +409,14 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 
 		if !matchesFilter(name) {
 			continue
+		}
+
+		// A stop from another process cannot cancel ctx; the scenario apps
+		// notice it as they mark themselves running (see runMarked).
+		if options.Stage == ActionPostStart && !options.Trigger {
+			if err := checkRunUnchanged(exp); err != nil {
+				return fmt.Errorf("applying default app %s for action %s: %w", name, options.Stage, err)
+			}
 		}
 
 		a := GetApp(name)
@@ -367,7 +455,7 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 		}
 
 		if options.Stage == ActionCleanup {
-			exp.Status.SetAppCleanup(a.Name(), false)
+			setCleanupPending(a.Name(), false)
 		}
 
 		publish(a.Name(), "success", nil)
@@ -421,33 +509,17 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 
 			switch options.Stage {
 			case ActionConfigure:
-				exp.Status.SetAppRunning(app.Name(), true)
-				_ = exp.WriteToStore(true)
-
-				err = a.Configure(ctx, exp)
-
-				exp.Status.SetAppRunning(app.Name(), false)
-				_ = exp.WriteToStore(true)
+				err = runMarked(ctx, exp, app.Name(), options.Trigger, a.Configure)
 			case ActionPreStart:
-				exp.Status.SetAppRunning(app.Name(), true)
-				_ = exp.WriteToStore(true)
-
-				err = a.PreStart(ctx, exp)
-
-				exp.Status.SetAppRunning(app.Name(), false)
-				_ = exp.WriteToStore(true)
+				err = runMarked(ctx, exp, app.Name(), options.Trigger, a.PreStart)
 			case ActionPostStart:
-				exp.Status.SetAppRunning(app.Name(), true)
-				_ = exp.WriteToStore(true)
-
-				err = a.PostStart(ctx, exp)
-
-				exp.Status.SetAppRunning(app.Name(), false)
-				_ = exp.WriteToStore(true)
+				err = runMarked(ctx, exp, app.Name(), options.Trigger, a.PostStart)
 			case ActionRunning:
 				// Check to make sure this app isn't already running via an automatic
-				// periodic execution.
-				if running := exp.Status.AppRunning()[app.Name()]; running {
+				// periodic execution. The check and the mark are one store update, so
+				// a periodic run cannot start between them.
+				storeErr := exp.UpdateStatus(MarkRunningStage(app.Name()))
+				if errors.Is(storeErr, ErrAppAlreadyRunning) {
 					notes.AddInfo(
 						ctx,
 						false,
@@ -460,10 +532,12 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 					continue
 				}
 
-				exp.Status.SetAppRunning(app.Name(), true)
+				if errors.Is(storeErr, types.ErrExperimentRunChanged) {
+					err = storeErr
 
-				// storeErr is local to issues here
-				storeErr := exp.WriteToStore(true)
+					break
+				}
+
 				if storeErr != nil {
 					notes.AddErrors(
 						ctx,
@@ -476,13 +550,12 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 					)
 				}
 
+				before, hadStatus := appStatusSnapshot(exp, app.Name())
+
 				// Assign to the function-level err to carry out
 				err = a.Running(ctx, exp)
 
-				_ = exp.Reload() // reload experiment from store in case status was updated during run
-				exp.Status.SetAppRunning(app.Name(), false)
-
-				storeErr = exp.WriteToStore(true)
+				storeErr = exp.UpdateStatus(runningStageDone(exp, app.Name(), before, hadStatus, err))
 				if storeErr != nil {
 					notes.AddErrors(
 						ctx,
@@ -495,13 +568,7 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 					)
 				}
 			case ActionCleanup:
-				exp.Status.SetAppRunning(app.Name(), true)
-				_ = exp.WriteToStore(true)
-
-				err = a.Cleanup(ctx, exp)
-
-				exp.Status.SetAppRunning(app.Name(), false)
-				_ = exp.WriteToStore(true)
+				err = runMarked(ctx, exp, app.Name(), options.Trigger, a.Cleanup)
 			}
 
 			if err != nil {
@@ -530,7 +597,7 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 			}
 
 			if options.Stage == ActionCleanup {
-				exp.Status.SetAppCleanup(a.Name(), false)
+				setCleanupPending(a.Name(), false)
 			}
 
 			publish(a.Name(), "success", nil)
@@ -550,11 +617,178 @@ func ApplyApps(ctx context.Context, exp *types.Experiment, opts ...Option) error
 	return nil
 }
 
+// checkRunUnchanged returns an error wrapping types.ErrExperimentRunChanged
+// when the stored experiment was stopped, or started again, since exp was
+// read: a start's post-start apps must not run for a run that ended, as the
+// commands they send to minimega would create the cleared namespace again.
+// An experiment that cannot be read is left for the stage to report.
+func checkRunUnchanged(exp *types.Experiment) error {
+	c, _ := store.NewConfig("experiment/" + exp.Metadata.Name)
+
+	if err := store.Get(c); err != nil {
+		return nil //nolint:nilerr // only a changed run ends the stage
+	}
+
+	if stored, _ := c.Status["startTime"].(string); stored != exp.Status.StartTime() {
+		return fmt.Errorf(
+			"%w since it was read: stored start time %q, read %q",
+			types.ErrExperimentRunChanged,
+			stored,
+			exp.Status.StartTime(),
+		)
+	}
+
+	return nil
+}
+
+// runMarked runs stage, a stage other than running of the named app, with the
+// app marked running in the experiment's stored status, so that the app's
+// running stage, a periodic tick or a SCORCH run refuses to start meanwhile
+// (see MarkRunningStage). It stores only the mark and the app's own status
+// entry, each in one store update, so what others store during the stage,
+// such as another app's status, is kept; exp's other changes are left for the
+// stage's caller to store. A stage of a start or a stop clears the mark when
+// it ends. A triggered stage leaves a mark it found alone instead: the app's
+// running stage, such as a SCORCH run, holds it and clears it as it ends.
+//
+// The stage does not run, and the error wraps types.ErrExperimentRunChanged,
+// when the experiment was stopped, or started again, since exp was read: the
+// commands the app sends to minimega would create the cleared namespace again.
+func runMarked(
+	ctx context.Context,
+	exp *types.Experiment,
+	name string,
+	trigger bool,
+	stage func(context.Context, *types.Experiment) error,
+) error {
+	before, hadStatus := appStatusSnapshot(exp, name)
+
+	// held reports whether the app's running stage held the mark when this
+	// stage began.
+	var held bool
+
+	err := updateStoredStatus(exp, func(status ifaces.ExperimentStatus) error {
+		held = trigger && status.AppRunning()[name]
+		status.SetAppRunning(name, true)
+
+		return nil
+	})
+	if err == nil {
+		err = stage(ctx, exp)
+	}
+
+	after, hasStatus := exp.Status.AppStatus()[name]
+	changed := hasStatus != hadStatus || !reflect.DeepEqual(before, after)
+	running := held
+
+	// A stop from another process during the stage refuses this update too;
+	// the stop cleared what the stage would store.
+	_ = updateStoredStatus(exp, func(status ifaces.ExperimentStatus) error {
+		if changed {
+			status.SetAppStatus(name, after)
+		}
+
+		if !held {
+			status.SetAppRunning(name, false)
+		}
+
+		running = status.AppRunning()[name]
+
+		return nil
+	})
+
+	exp.Status.SetAppRunning(name, running)
+
+	return err
+}
+
+// updateStoredStatus applies change to the experiment's stored status in one
+// store update (see types.Experiment.UpdateStatus) and, unlike UpdateStatus,
+// leaves exp's status as it is: the caller of a stage, such as a start,
+// stores exp's other changes itself. It returns only an error wrapping
+// types.ErrExperimentRunChanged; an experiment being created is not stored
+// yet, so it has no status to update.
+func updateStoredStatus(exp *types.Experiment, change func(ifaces.ExperimentStatus) error) error {
+	status := exp.Status
+
+	err := exp.UpdateStatus(change)
+
+	exp.Status = status
+
+	if errors.Is(err, types.ErrExperimentRunChanged) {
+		return err
+	}
+
+	return nil
+}
+
+// ErrAppAlreadyRunning reports that an app already executes its running
+// stage.
+var ErrAppAlreadyRunning = errors.New("app is already executing its running stage")
+
+// MarkRunningStage returns the status change that marks the named app as
+// executing its running stage, or that fails with ErrAppAlreadyRunning when it
+// already is. Applied with types.Experiment.UpdateStatus, the check and the
+// mark are one store update, so no other run can start between them.
+func MarkRunningStage(name string) func(ifaces.ExperimentStatus) error {
+	return func(status ifaces.ExperimentStatus) error {
+		if status.AppRunning()[name] {
+			return ErrAppAlreadyRunning
+		}
+
+		status.SetAppRunning(name, true)
+
+		return nil
+	}
+}
+
+// runningStageDone returns the status change that ends the named app's
+// running stage on exp: it clears the app's running flag and stores the
+// app's status entry in exp only when the stage, which failed with stageErr,
+// changed it from before (see appStatusSnapshot). Applied with
+// Experiment.UpdateStatus, it keeps what others stored during the stage, such
+// as another app's status or running flag, and a status the app itself
+// stored in the store meanwhile.
+func runningStageDone(
+	exp *types.Experiment,
+	name string,
+	before any,
+	hadStatus bool,
+	stageErr error,
+) func(ifaces.ExperimentStatus) error {
+	after, hasStatus := exp.Status.AppStatus()[name]
+	changed := stageErr == nil && (hasStatus != hadStatus || !reflect.DeepEqual(before, after))
+
+	return func(status ifaces.ExperimentStatus) error {
+		if changed {
+			status.SetAppStatus(name, after)
+		}
+
+		status.SetAppRunning(name, false)
+
+		return nil
+	}
+}
+
+// appStatusSnapshot returns a copy of the status.apps entry of the named app,
+// and whether it has one. Map values are copied deeply, so an app that changes
+// its entry in place still compares as changed.
+func appStatusSnapshot(exp *types.Experiment, name string) (any, bool) {
+	status, ok := exp.Status.AppStatus()[name]
+
+	switch v := status.(type) {
+	case map[string]any:
+		return util.CopyableMap(v).DeepCopy(), ok
+	case []any:
+		return util.CopyableSlice(v).DeepCopy(), ok
+	default:
+		return status, ok
+	}
+}
+
 // PeriodicallyRunApps checks the configuration for each app in the scenario to
 // see if it's configured to have its "running" stage run periodically. A
 // Goroutine is scheduled for each applicable app.
-//
-//nolint:funlen // complex logic
 func PeriodicallyRunApps(ctx context.Context, wg *sync.WaitGroup, exp *types.Experiment) error {
 	if exp.Spec.Scenario() != nil {
 		for _, app := range exp.Spec.Scenario().Apps() {
@@ -564,8 +798,20 @@ func PeriodicallyRunApps(ctx context.Context, wg *sync.WaitGroup, exp *types.Exp
 			}
 
 			if app.RunPeriodically() != "" {
+				// A copy of a stopped experiment, such as one read just after a stop
+				// from another process, has no run for the app to follow.
+				if !exp.Running() {
+					return fmt.Errorf(
+						"experiment %s is not running, so app %s cannot run periodically",
+						exp.Metadata.Name,
+						app.Name(),
+					)
+				}
+
+				// A period shorter than minPeriod would run the app almost without a
+				// pause.
 				duration, err := time.ParseDuration(app.RunPeriodically())
-				if err != nil {
+				if err != nil || duration < minPeriod {
 					plog.Error(
 						plog.TypePhenixApp,
 						"[✗] invalid periodic duration for app",
@@ -573,6 +819,8 @@ func PeriodicallyRunApps(ctx context.Context, wg *sync.WaitGroup, exp *types.Exp
 						app.Name(),
 						"duration",
 						app.RunPeriodically(),
+						"minimum",
+						minPeriod.String(),
 					)
 
 					continue
@@ -587,138 +835,20 @@ func PeriodicallyRunApps(ctx context.Context, wg *sync.WaitGroup, exp *types.Exp
 					app.RunPeriodically(),
 				)
 
+				run := periodicRun{
+					name:      exp.Metadata.Name,
+					start:     exp.Status.StartTime(),
+					app:       app.Name(),
+					frequency: app.RunPeriodically(),
+				}
+
 				wg.Add(1)
 
-				go func(exp *types.Experiment, app ifaces.ScenarioApp, duration time.Duration) {
+				go func() {
 					defer wg.Done()
 
-					exp.Status.SetAppFrequency(app.Name(), app.RunPeriodically())
-					exp.Status.SetAppRunning(app.Name(), false)
-
-					err := exp.WriteToStore(true)
-					if err != nil {
-						plog.Error(
-							plog.TypePhenixApp,
-							"[✗] error updating store with experiment",
-							"exp",
-							exp.Metadata.Name,
-							"err",
-							err,
-						)
-					}
-
-					timer := time.NewTimer(duration)
-
-					for {
-						select {
-						case <-ctx.Done():
-							if !timer.Stop() {
-								<-timer.C
-							}
-
-							exp.Status.SetAppFrequency(app.Name(), "")
-							exp.Status.SetAppRunning(app.Name(), false)
-
-							err := exp.WriteToStore(true)
-							if err != nil {
-								plog.Error(
-									plog.TypePhenixApp,
-									"[✗] error updating store with experiment",
-									"exp",
-									exp.Metadata.Name,
-									"err",
-									err,
-								)
-							}
-
-							return
-						case <-timer.C:
-							// Check to make sure this app wasn't triggered manually between
-							// periodic runs.
-							if running := exp.Status.AppRunning()[app.Name()]; running {
-								plog.Info(
-									plog.TypePhenixApp,
-									"[✓] app is currently already executing its running stage -- skipping",
-									"app",
-									app.Name(),
-								)
-
-								continue
-							}
-
-							// NOTE: there is a chance for a race condition here. Between the
-							// time we pull the experiment config from the store and read its
-							// app running status above, a manual trigger could have set
-							// running too. As of now, if this happens, multiple instances of
-							// the running stage will be executing at the same time. This
-							// might be a good place for optimistic locking.
-
-							a := GetApp(app.Name())
-							_ = a.Init(Name(app.Name()))
-
-							exp.Status.SetAppRunning(app.Name(), true)
-
-							err := exp.WriteToStore(true)
-							if err != nil {
-								plog.Error(
-									plog.TypePhenixApp,
-									"[✗] error updating store with experiment",
-									"exp",
-									exp.Metadata.Name,
-									"err",
-									err,
-								)
-							}
-
-							pubsub.Publish("trigger-app", TriggerPublication{ //nolint:exhaustruct // partial initialization
-								Experiment: exp.Spec.ExperimentName(),
-								App:        app.Name(),
-								State:      "start",
-							})
-
-							err = a.Running(ctx, exp)
-							if err != nil {
-								pubsub.Publish("trigger-app", TriggerPublication{ //nolint:exhaustruct // partial initialization
-									Experiment: exp.Spec.ExperimentName(),
-									App:        app.Name(),
-									State:      "error",
-									Error:      err,
-								})
-
-								plog.Error(
-									plog.TypePhenixApp,
-									"[✗] error periodically running app",
-									"app",
-									app.Name(),
-									"err",
-									err,
-								)
-							}
-
-							pubsub.Publish("trigger-app", TriggerPublication{ //nolint:exhaustruct // partial initialization
-								Experiment: exp.Spec.ExperimentName(),
-								App:        app.Name(),
-								State:      "success",
-							})
-
-							exp.Status.SetAppRunning(app.Name(), false)
-
-							err = exp.WriteToStore(true)
-							if err != nil {
-								plog.Error(
-									plog.TypePhenixApp,
-									"[✗] error updating store with experiment",
-									"exp",
-									exp.Metadata.Name,
-									"err",
-									err,
-								)
-							}
-
-							timer.Reset(duration)
-						}
-					}
-				}(exp, app, duration)
+					runPeriodically(ctx, run, duration)
+				}()
 			}
 		}
 	}

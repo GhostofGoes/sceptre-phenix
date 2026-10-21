@@ -413,6 +413,8 @@ func Start(opts ...ServerOption) error {
 	}
 
 	api.Use(middleware.Auth(o.jwtKey, o.proxyAuthHeader))
+	api.Use(refuseUnsafeVMNames)
+	api.Use(refuseStoppingExperiments)
 
 	switch o.logMiddleware {
 	case "full":
@@ -426,6 +428,10 @@ func Start(opts ...ServerOption) error {
 	plog.Info(plog.TypeSystem, "starting websockets broker")
 
 	go broker.Start()
+
+	plog.Info(plog.TypeSystem, "starting port forward service")
+
+	forward.Start()
 
 	plog.Info(plog.TypeSystem, "starting scorch processors")
 

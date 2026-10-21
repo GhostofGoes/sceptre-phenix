@@ -3,6 +3,7 @@ package soh
 import (
 	"errors"
 	"fmt"
+	"net"
 	"time"
 )
 
@@ -160,6 +161,8 @@ type sohMetadata struct {
 	c2Timeout    time.Duration
 	startupDelay time.Duration
 	uuidHosts    map[string]struct{}
+	elasticIP    net.IP // packet capture only
+	elasticMask  int    // packet capture only
 }
 
 func (m *sohMetadata) init() error {
@@ -204,6 +207,16 @@ func (m *sohMetadata) init() error {
 		m.AppProfileKey = "sohProfile"
 	}
 
+	if len(m.PacketCapture.CaptureHosts) > 0 {
+		var err error
+
+		addr := m.PacketCapture.ElasticServer.IPAddress
+
+		if m.elasticIP, m.elasticMask, err = parseIPv4CIDR(addr); err != nil {
+			return fmt.Errorf("parsing packetCapture.elasticServer.ipAddress '%s': %w", addr, err)
+		}
+	}
+
 	m.uuidHosts = make(map[string]struct{})
 
 	if useUUID, ok := m.Other["hostsToUseUUIDForC2Active"]; ok {
@@ -232,6 +245,26 @@ func (m *sohMetadata) init() error {
 	}
 
 	return nil
+}
+
+// parseIPv4CIDR returns the address and prefix length of an IPv4 address in
+// CIDR notation. The packet capture monitors' addresses count up from the
+// Elastic server's, which only works for IPv4.
+func parseIPv4CIDR(addr string) (net.IP, int, error) {
+	const want = "must be an IPv4 address in CIDR notation, such as 172.16.200.1/16"
+
+	ip, ipNet, err := net.ParseCIDR(addr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", want, err)
+	}
+
+	ones, bits := ipNet.Mask.Size()
+
+	if ip.To4() == nil || bits != 8*net.IPv4len {
+		return nil, 0, errors.New(want)
+	}
+
+	return ip.To4(), ones, nil
 }
 
 func (m sohMetadata) useUUIDForC2Active(host string) bool {

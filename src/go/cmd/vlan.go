@@ -183,7 +183,17 @@ func vlanAliasArgsCompletion(
 func newVlanRangeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "range <experiment name> <range minimum> <range maximum>",
-		Short: "View or set a range for a give VLAN",
+		Short: "View or set an experiment's VLAN range",
+		Long: `View or set an experiment's VLAN range
+
+  With no arguments, lists the VLAN range of every experiment, or, for a
+  running experiment, the lowest and highest VLAN IDs it holds; with an
+  experiment name, lists that experiment's. With a minimum and a maximum,
+  sets the experiment's range: minimega assigns its VLAN IDs from the minimum
+  up to, but not including, the maximum, so the minimum is 1-4095 and the
+  maximum 2-4096 and above the minimum. While the experiment runs, minimega
+  reserves the range and refuses to start another experiment whose range
+  overlaps it.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch len(args) {
 			case 0:
@@ -256,7 +266,7 @@ func newVlanRangeCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolP("force", "f", false, "Force update on set action if alias already exists")
+	cmd.Flags().BoolP("force", "f", false, "Replace the experiment's VLAN range if it already has one")
 
 	return cmd
 }

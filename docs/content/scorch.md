@@ -6,6 +6,12 @@ A phēnix [scenario](configuration.md#scenario) configuration file is used to de
 
 The screenshots and [configuration file](#example-configuration) in the rest of this document are from an example Scorch scenario, `scorch-demo`.
 
+A Scorch run of a running experiment is started from the [Scorch pipeline](#scorch-pipeline), with `phenix experiment scorch <experiment> [--run <run ID>]`, or through the app's `running` stage: `phenix experiment trigger running <experiment> scorch`, the experiment trigger API, and `runPeriodically` on the Scorch app all execute run 0. One Scorch run executes per experiment at a time; a trigger of the `running` stage while a run executes is skipped, and `phenix experiment scorch` is refused.
+
+Canceling a run, by interrupting `phenix experiment scorch` (Ctrl-C or `SIGTERM`), stopping it in the pipeline, or stopping the experiment from the process that executes the run, ends the components of its `configure` and `start` stages and still runs its `stop` and `cleanup` stages, one that was already running included. A `pause` or `break` component releases nothing, so a cancel ends or skips it at once in every stage. From the cancel, those stages get 4 minutes in all, at every loop level: a component still running then is canceled, the stages left run only what needs no time, and the run fails. A canceled run is not an error, and `phenix experiment scorch` exits 0, unless one of those `stop` or `cleanup` stages fails or runs out of time; a second Ctrl-C or `SIGTERM` ends it at once, without the rest of its teardown, and passes the signal on to the components still running, killing those the cancel already sent `SIGTERM`. Stopping an experiment from the UI or the API ends the runs started there before it kills the experiment's VMs: it waits up to 5 minutes for them, and refuses new runs until it is done. A stop from another process, such as `phenix experiment stop` while `phenix ui` executes a run, or a stop from the UI while `phenix experiment scorch` executes one, does not end the run: it goes on, and its components act on the stopped experiment.
+
+A dry-run experiment's runs execute too. Its user components get `PHENIX_DRYRUN=true`, but the `tap` component, and a `break` component with a `tap`, still create their taps in minimega, which creates the experiment's minimega namespace.
+
 ## Scorch Components
 
 A Scorch component is simply an executable available to be called by the Scorch app within phēnix. A component is expected to implement any or all of the various [stages](#stages) in the [Scorch pipeline](#scorch-pipeline).
@@ -28,13 +34,37 @@ During component execution, the Scorch app assumes anything written to STDOUT by
 
 The Scorch app expects a component executable to exit with a value of `0` upon completion if the component was successful, and exit with any other value otherwise. An exit value of anything other than `0` will result in Scorch halting execution of the current stage and jumping to the next appropriate stage to complete the Scorch run.
 
+### Background Components
+
+A user component, or a built-in `pause` or `soh` component, with `background: true` in the Scorch app configuration runs its `configure` and `start` stages in the background: Scorch starts the stage and moves on to the next component without waiting for it, and the pipeline shows the component as backgrounded. The same component's `cleanup` stage ends its backgrounded `configure` stage, and its `stop` stage ends its backgrounded `start` stage, in the same loop and count; a nested loop that names the component has stages of its own, and a stage that lists the component twice backgrounds it twice, both of which the one `stop` or `cleanup` stage ends. For a user component, Scorch sends the backgrounded stage, and the processes it started, `SIGTERM`, kills them if they are still running 10 seconds later, and waits up to 30 seconds for it to exit before it runs the component's own `stop` or `cleanup` stage, so files the component writes as it stops are in place before later components run and the run is archived. A backgrounded `pause` or `soh` stage is canceled instead, and Scorch waits up to 30 seconds for it to end; that `stop` or `cleanup` stage then does nothing else, so it neither pauses nor runs the checks again. A backgrounded stage that no `stop` or `cleanup` stage ends is ended the same way once the run, or the loop iteration that started it, has run its own `stop` and `cleanup` stages, so no component outlives its run.
+
+A backgrounded stage that fails before it is ended is shown as failed in the pipeline, and the `stop` or `cleanup` stage that ends it fails with its error, so the run fails. A backgrounded stage that exits once it is sent `SIGTERM`, or canceled, is not a failure, whatever its exit status.
+
+The built-in `break` and `tap` components cannot run in the background: with `background: true`, the run still waits for each of their stages, and the pipeline shows them as backgrounded, not as successful, once a stage ends.
+
+```yaml
+spec:
+  apps:
+  - name: scorch
+    metadata:
+      components:
+      - name: hoststats
+        type: hoststats
+        background: true
+      runs:
+      - start: [hoststats]
+        stop: [hoststats]
+```
+
 ### Automated Component Data Collection
 
 The Scorch app is capable of generating a configuration file for and starting an instance of [Filebeat](https://www.elastic.co/beats/filebeat) in the background before execution of each Scorch run. As each Scorch component is executed, any data it generates and collects can be configured to be automatically processed by Filebeat for indexing in [Elasticsearch](https://www.elastic.co/elasticsearch/). At a minimum, this requires the following.
 
-1. Filebeat to be enabled and configured in the Scorch app configuration.
+1. Filebeat to be enabled and configured in the Scorch app configuration, either for every run (`filebeat` in the app metadata) or for one run (`filebeat` in that run, which takes precedence over the app-level setting).
 1. A Filebeat input to be configured for each component generating and collecting data.
-1. The `filebeat` executable installed and in the `PATH` of the user running phēnix.
+1. The `filebeat` executable installed and in the `PATH` of the user running phēnix. Without it, phēnix logs a warning and executes the run without Filebeat.
+
+Filebeat keeps running when a run is canceled, so it also ships what the run's `stop` and `cleanup` stages write, until the run's teardown time runs out.
 
 See the [example configuration](#example-configuration) below for examples of how Filebeat and Filebeat inputs are configured in the Scorch app configuration.
 
@@ -49,7 +79,7 @@ The following Scorch component types are considered `core` components, in that t
 
 ### `break` Component
 
-The `break` component is comparable to a source code break point when debugging an application in that it pauses execution of the current Scorch run until a user exits the break. While the `break` component is running, users have access to a shell on the server running phēnix as the user running phēnix. The first user to access the shell via the terminal modal in the UI will have read-write access. If other users access the shell, they will have read-only access but will get live updates as the user with read-write access uses the terminal.
+The `break` component is comparable to a source code break point when debugging an application in that it pauses execution of the current Scorch run until a user exits the break. While the `break` component is running, users have access to a shell on the server running phēnix as the user running phēnix. The first user to access the shell via the terminal modal in the UI whose role may start the experiment's runs (`experiments/trigger` `create`) will have read-write access, and only such a user can exit the shell. If other users who can get the experiment (`experiments` `get`) access the shell, they will have read-only access but will get live updates as the user with read-write access uses the terminal. Users who cannot get the experiment can neither see its terminals nor read its components' output.
 
 It's possible to configure the `break` component in the Scorch app configuration to create a minimega tap when the component is executed. When the component is executed, the tap will be deleted. In addition to the tap, external network access can also be configured (e.g., Internet access).
 
@@ -130,6 +160,13 @@ health checks are run, and can also be configured to fail if any of the health
 checks fail. The log level can also be configured, which will limit what logs
 get sent to the component's UI modal while the component is running.
 
+If the State of Health app is already executing its `running` stage when the
+component runs, the component skips its checks: it fails with `state of health
+checks: app already running` when `failOnError` is set, and succeeds otherwise.
+The component runs the checks on the experiment as stored when it starts, and
+fails with `state of health checks: experiment not running` once the
+experiment is stopped.
+
 ```yaml
 spec:
   apps:
@@ -162,7 +199,7 @@ spec:
 
 The `tap` component implements the exact same functionality described above in the [`break`](#break-component) component for creating a minimega tap and, optionally, external network access, but allows for the tap (and external network access, if configured) to exist while other components are executed (as opposed to only existing for the duration of the [`break`](#break-component) component).
 
-An example of configuring a `tap` component to create a tap and configure external network access is as follows. The `tap` component can only be configured to run in the `start` stage (create the tap) and the `stop` stage (delete the tap).
+An example of configuring a `tap` component to create a tap and configure external network access is as follows. The `tap` component can only be configured to run in the `start` stage (create the tap) and the `stop` stage (delete the tap). Before it creates its tap, the `tap` component, like a `break` component with a `tap`, checks it as the [tap app](apps.md#tap-app) does: the `vlan` and `bridge` must be single words without quotes, `#` or `$`, and the `ip` must be an address, optionally with a prefix length.
 
 ```yaml
 spec:
@@ -330,6 +367,8 @@ For a given Scorch pipeline, there are four stages of execution:
 1. `cleanup`
 
 A Scorch component may implement any or all of the various stages, and Scorch will execute each stage inside the components in order. Each component can be configured in the Scorch app scenario [configuration file](configuration.md).
+
+Every name a run, or one of its loops, lists in a stage must be the name of a component defined in the app's `components`. phēnix refuses to create an experiment whose Scorch runs name an undefined component, and fails such a run before it starts, naming the run, the stage and the component.
 
 !!! note
     There is additional `done` stage in the UI obtained when `cleanup` has been completed. It is meant to report the completion of all stages in the Pipeline UI.

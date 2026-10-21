@@ -22,6 +22,7 @@ import (
 	_ "phenix/api/scorch"
 	"phenix/store"
 	"phenix/util/common"
+	"phenix/util/mm"
 	"phenix/util/plog"
 	"phenix/web"
 )
@@ -156,6 +157,9 @@ var rootCmd = &cobra.Command{
 			"base-dir.minimega",
 			cmd.Flags().Changed("base-dir.minimega"),
 		)
+
+		// Only now that both bases are set may phenix dial minimega.
+		mm.ResolveFilesDirectory()
 		common.MountBase = getEffectiveString( //nolint:reassign // configuration injection
 			"mount-dir",
 			cmd.Flags().Changed("mount-dir"),
@@ -286,22 +290,8 @@ func init() {
 
 	viper.AddConfigPath("/etc/phenix")
 
-	// If a config file is found, read it in.
-	err := viper.ReadInConfig()
-	if err == nil {
+	if readConfig(viper.GetViper(), os.Geteuid() == 0, defaultConfigDir, configDir) {
 		viper.WatchConfig()
-	} else if errors.As(err, &viper.ConfigFileNotFoundError{}) {
-		// If the config file doesn't exist, create it so we can watch it for
-		// changes at runtime.
-		err := os.MkdirAll(defaultConfigDir, 0o750)
-		if err == nil {
-			targetFile := filepath.Join(defaultConfigDir, "config.yaml")
-			_ = viper.SafeWriteConfigAs(targetFile)
-			err := viper.ReadInConfig()
-			if err == nil {
-				viper.WatchConfig()
-			}
-		}
 	}
 
 	viper.SetConfigName("users")
@@ -314,8 +304,7 @@ func init() {
 	viper.AddConfigPath(configDir)
 
 	// If a users config file is found, merge it in.
-	err = viper.MergeInConfig()
-	if err == nil {
+	if err := viper.MergeInConfig(); err == nil {
 		viper.WatchConfig() // Watch the users config if it exists
 	}
 
@@ -455,6 +444,36 @@ func init() {
 	_ = viper.BindPFlags(rootCmd.PersistentFlags())
 }
 
+// readConfig reads the first config file on v's config paths and reports
+// whether v has one to watch. When there is none, it creates an empty
+// config.yaml so the file can be watched for changes at runtime: in systemDir
+// when the process runs as root, else in userDir. A root process that sudo
+// started reads the invoking user's userDir too, but a root-owned file
+// created there would shadow systemDir's config for every later `sudo phenix`.
+func readConfig(v *viper.Viper, root bool, userDir, systemDir string) bool {
+	err := v.ReadInConfig()
+	if err == nil {
+		return true
+	}
+
+	if !errors.As(err, &viper.ConfigFileNotFoundError{}) {
+		return false
+	}
+
+	dir := userDir
+	if root {
+		dir = systemDir
+	}
+
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return false
+	}
+
+	_ = v.SafeWriteConfigAs(filepath.Join(dir, "config.yaml"))
+
+	return v.ReadInConfig() == nil
+}
+
 func getCurrentUserInfo() (string, string) {
 	u, err := user.Current()
 	if err != nil {
@@ -501,27 +520,38 @@ func getCurrentUserInfo() (string, string) {
 // shell via sudo (eg. `sudo su` or `sudo -i`) and then runs phenix from that
 // shell -- in that case `SUDO_USER` should not be used to determine the
 // config/store paths, since the command is truly being run as root.
+//
+// It looks through the commands in sudoWrappers, with their options and
+// `NAME=VALUE` arguments, so `sudo setsid nohup phenix ui` resolves the same
+// store as `sudo phenix ...`.
 func sudoRanPhenix() bool {
-	cmd := os.Getenv("SUDO_COMMAND")
-	if cmd == "" {
-		return false
+	var exeName string
+	if exe, err := os.Executable(); err == nil {
+		exeName = filepath.Base(exe)
 	}
 
-	// `SUDO_COMMAND` may include arguments, so only consider the command name.
-	fields := strings.Fields(cmd)
-	if len(fields) == 0 {
-		return false
+	// `SUDO_COMMAND` is the command and its arguments joined by spaces.
+	for field := range strings.FieldsSeq(os.Getenv("SUDO_COMMAND")) {
+		name := filepath.Base(field)
+
+		switch {
+		case strings.HasPrefix(field, "-"), strings.Contains(field, "="):
+			continue
+		case name == appName, name == exeName:
+			return true
+		case !sudoWrappers[name]:
+			return false
+		}
 	}
 
-	name := filepath.Base(fields[0])
-
-	exe, err := os.Executable()
-	if err == nil && name == filepath.Base(exe) {
-		return true
-	}
-
-	return name == appName
+	return false
 }
+
+// sudoWrappers are the commands that only detach phenix or set its
+// environment, which sudoRanPhenix looks through.
+//
+//nolint:gochecknoglobals // read-only lookup table
+var sudoWrappers = map[string]bool{"env": true, "nohup": true, "setsid": true}
 
 // getEffectiveString returns the configuration value with the following precedence:
 // 1. Command Line Flag (if changed)

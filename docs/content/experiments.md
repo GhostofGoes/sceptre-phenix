@@ -61,7 +61,17 @@ phenix exp stop --keep-injection-snapshots <experiment name>
 ```
 
 Only `phenix exp stop` accepts this option. Stopping an experiment from the
-Web-UI, or with `phenix exp restart`, always deletes the snapshots.
+Web-UI, or with `phenix exp restart`, always deletes the snapshots. A start that
+fails in minimega, unless `--treat-mm-errors-as-warnings` is given, runs the
+cleanup apps, clears the experiment's minimega namespace and deletes the
+snapshots it created too.
+
+A stop first ends what still uses the experiment, such as its SCORCH runs,
+which can take minutes. If another process stops the experiment, or stops and
+starts it again, meanwhile, the stop leaves the stored run alone and fails
+with `experiment <name>: experiment was stopped or started again while it was
+stopping: stored start time "<time>", read "<time>"`, which gives the start
+time stored now and the one the stop read; an empty one means stopped.
 
 The `phenix exp --help` command will output:
 
@@ -158,6 +168,12 @@ Create an experiment
   configuration files (YAML or JSON). (Optional are the arguments for
   scenario or base directory.)
 
+  --vlan-min and --vlan-max set the experiment's VLAN range: minimega
+  assigns its VLAN IDs from min up to, but not including, max. Set both, or
+  neither to use minimega's default pool. While the experiment runs, minimega
+  reserves the range and refuses to start another experiment whose range
+  overlaps it.
+
 Usage:
   phenix experiment create <experiment name> [flags]
 
@@ -175,9 +191,31 @@ Flags:
   -h, --help                    help for create
   -s, --scenario string         Name of an existing scenario to use (optional)
   -t, --topology string         Name of an existing topology to use
-      --vlan-max int            VLAN pool maximum
-      --vlan-min int            VLAN pool minimum
+      --vlan-max int            VLAN range max; minimega assigns VLAN IDs below it (2-4096); needs --vlan-min
+      --vlan-min int            VLAN range min, the first VLAN ID minimega assigns (1-4095); needs --vlan-max
 ```
+
+### VLAN Ranges
+
+`--vlan-min` and `--vlan-max` give an experiment a VLAN range of its own.
+minimega assigns the experiment's VLAN IDs from the min up to, but not
+including, the max, so `--vlan-min 300 --vlan-max 310` gives VLAN IDs 300 to
+309. Set both ends, or neither to take VLAN IDs from minimega's default pool
+(its `-vlanrange` flag, VLAN IDs 101 to 4095 by default). The min is 1-4095,
+and the max is 2-4096 and above the min; create refuses any other range, and
+a range with only one end set. `phenix experiment start` takes the same flags
+to replace an end of the stored range, and `phenix vlan range <experiment
+name> <min> <max>` sets the range of an existing experiment; it needs
+`--force` to replace a range the experiment already has. `phenix vlan
+alias` refuses to pin a VLAN ID outside the range, such as the max itself, and
+`phenix vlan range` refuses a range that leaves out a pinned VLAN ID.
+
+While the experiment runs, minimega reserves its range for it: the default
+pool skips the range, and minimega refuses to start another experiment whose
+range overlaps it. minimega's overlap check counts the max of the experiment
+being started, so ranges that share an end, such as 300-310 and 310-320,
+collide when the experiment with the higher range starts first. Leave a gap
+between them, such as 300-310 and 311-320.
 
 ## Deleting Experiments
 
@@ -205,6 +243,18 @@ phenix exp delete -f <experiment name>
 Using `all` instead of a specific experiment name will delete all stopped
 experiments (or, when combined with `--force`, all experiments regardless of
 whether they are running).
+
+Deleting an experiment removes its base directory (`spec.baseDir`) with
+everything in it. phēnix makes a relative base directory absolute when it
+creates or updates an experiment, against the working directory of the
+`phenix` command, or of `phenix ui` for a change made through the API or the
+Web-UI. It then refuses a base directory that holds a `.` or `..` element, or
+that is the root, one of the directories phēnix and minimega keep their data
+in, or a parent of one, and delete does not remove such a directory, or a
+relative one, of an older experiment. Those directories are phēnix's base
+directory (`base-dir.phenix`), its `experiments`, `images` and `configs`
+directories, the `base-dir.injects`, `base-dir.topologies` and `mount-dir`
+directories, and minimega's base directory (`base-dir.minimega`).
 
 The `phenix exp delete --help` command will output:
 
@@ -308,7 +358,6 @@ interchangeable:
 | Targets specific apps | Yes, via `[<app name> ...]` | No, always applies to every app |
 | Validates the experiment config | No | Yes |
 | Runs registered config hooks | No | Yes |
-| Resets the minimega bridge | No | Yes (deletes it so it's recreated with current settings, unless using the GRE mesh) |
 | Guards against running experiments | No | Yes (refuses to run if the experiment is running) |
 
 Use `phenix experiment reconfigure` after changing an experiment's stored
@@ -400,4 +449,7 @@ phenix exp reconfigure my-experiment
 ```bash
 # Test experiment startup logic without deploying minimega VMs
 phenix exp start my-experiment --dry-run
+
+# Then deploy it for real; a dry-run experiment launched no VMs
+phenix exp start my-experiment
 ```

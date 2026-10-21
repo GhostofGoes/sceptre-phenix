@@ -15,6 +15,10 @@ import (
 var (
 	ErrCaptureExists = errors.New("capture already exists")
 	ErrNoCaptures    = errors.New("no captures exist")
+
+	// ErrInvalidCaptureInterface is returned for a capture on an interface
+	// index the VM does not have, or on a disconnected one.
+	ErrInvalidCaptureInterface = errors.New("invalid interface provided for capture")
 )
 
 // ResolveInterface resolves the given interface identifier - either a
@@ -48,6 +52,10 @@ func ResolveInterface(v *mm.VM, iface string) (int, error) {
 	return 0, fmt.Errorf("no interface named %q found for VM %s", iface, v.Name)
 }
 
+// errDisconnectedInterface is returned by StartCapture for an interface
+// that is not connected to a VLAN. CaptureSubnet skips such interfaces.
+var errDisconnectedInterface = fmt.Errorf("cannot capture on a disconnected interface: %w", ErrInvalidCaptureInterface)
+
 // StartCapture starts a packet capture on the given interface for the given VM
 // in the given experiment. The captured packets are written to the experiment's
 // files directory using the base name of the provided output file in PCAP
@@ -63,6 +71,10 @@ func StartCapture(expName, vmName string, iface int, out string) error {
 
 	if out == "" {
 		return errors.New("no output file provided")
+	}
+
+	if _, err := captureFileName(vmName, out); err != nil {
+		return err
 	}
 
 	v, err := Get(expName, vmName)
@@ -95,23 +107,24 @@ func StartCaptureForVM(v *mm.VM, expName, vmName string, iface int, out string) 
 		return errors.New("no output file provided")
 	}
 
+	name, err := captureFileName(vmName, out)
+	if err != nil {
+		return err
+	}
+
 	if !v.Running {
-		return errors.New("vm is not running")
+		return fmt.Errorf("capturing on VM %s: %w", vmName, mm.ErrVMNotRunning)
 	}
 
 	if iface < 0 || iface >= len(v.Networks) {
-		return errors.New("invalid interface provided for capture")
+		return fmt.Errorf("interface %d of VM %s: %w", iface, vmName, ErrInvalidCaptureInterface)
 	}
 
 	if v.Networks[iface] == "disconnected" {
-		return errors.New("cannot capture on a disconnected interface")
+		return errDisconnectedInterface
 	}
 
-	if ext := filepath.Ext(out); ext != ".pcap" {
-		out += ".pcap"
-	}
-
-	out = fmt.Sprintf("%s/files/%s", expName, filepath.Base(out))
+	out = fmt.Sprintf("%s/files/%s", expName, name)
 
 	if err := mm.StartVMCapture(
 		mm.NS(expName),
@@ -129,6 +142,39 @@ func StartCaptureForVM(v *mm.VM, expName, vmName string, iface int, out string) 
 	}
 
 	return nil
+}
+
+// captureFileName returns the name of the capture file of vmName that out
+// asks for: its base name, with a .pcap extension. The name ends up in a
+// `shell` command and in a namespaced command minimega parses twice, so it
+// must pass mm.CheckFileName.
+func captureFileName(vmName, out string) (string, error) {
+	if ext := filepath.Ext(out); ext != ".pcap" {
+		out += ".pcap"
+	}
+
+	name := filepath.Base(out)
+	if err := mm.CheckFileName("capture file name", name); err != nil {
+		return "", fmt.Errorf("starting VM capture on VM %s: %w", vmName, err)
+	}
+
+	return name, nil
+}
+
+// Captures returns the packet captures minimega runs for the given VM. A VM of
+// a stopped or dry-run experiment has none, so minimega isn't asked: it would
+// create the experiment's cleared namespace again.
+func Captures(expName, vmName string) ([]mm.Capture, error) {
+	exp, err := experiment.Get(expName)
+	if err != nil {
+		return nil, fmt.Errorf("getting experiment %s: %w", expName, err)
+	}
+
+	if !exp.Running() || exp.DryRun() {
+		return nil, nil
+	}
+
+	return mm.GetVMCaptures(mm.NS(expName), mm.VMName(vmName)), nil
 }
 
 // StopCaptures stops all currently running packet captures for the given VM in
@@ -160,6 +206,10 @@ func stopCaptures(expName, vmName string, iface *int) error {
 
 	if vmName == "" {
 		return errors.New("no VM name provided")
+	}
+
+	if err := requireRunning(expName); err != nil {
+		return err
 	}
 
 	captures := mm.GetVMCaptures(mm.NS(expName), mm.VMName(vmName))

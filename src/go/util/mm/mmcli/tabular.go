@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/activeshadow/libminimega/minicli"
+	"github.com/hashicorp/go-multierror"
 
 	"phenix/util/plog"
 )
@@ -52,8 +53,40 @@ func tabularToMapCols(columns []string) tabularToMapper {
 
 // RunTabular is used to run the given command when the response is expected to
 // be in tabular form. A slice of maps is returned, with each map representing a
-// row in the tabular response and each map key representing the column.
+// row in the tabular response and each map key representing the column. Errors
+// are logged and otherwise dropped, so a failed command reads as an empty
+// table; use RunTabularErr when the caller must tell the two apart.
 func RunTabular(cmd *Command) []map[string]string {
+	return runTabular(cmd, func(msg string) {
+		plog.Error(
+			plog.TypeSystem,
+			"error running mm cmd",
+			"cmd",
+			cmd.Command,
+			"error",
+			msg,
+		)
+	})
+}
+
+// RunTabularErr is RunTabular for callers that must tell a failure apart from
+// an empty table. It returns the rows of every response that succeeded along
+// with a *multierror.Error holding every error minimega, or the connection to
+// it, reported. Both can be set at once: minimega answers a namespaced command
+// once per host, and some hosts may fail where others succeed.
+func RunTabularErr(cmd *Command) ([]map[string]string, error) {
+	var errs error
+
+	rows := runTabular(cmd, func(msg string) {
+		errs = multierror.Append(errs, reconstructErr(msg))
+	})
+
+	return rows, errs
+}
+
+// runTabular runs cmd and collects the rows of its tabular responses, handing
+// the text of each error response to onErr.
+func runTabular(cmd *Command, onErr func(string)) []map[string]string {
 	// copy all fields in header order
 	mapper := tabularToMap
 
@@ -67,14 +100,7 @@ func RunTabular(cmd *Command) []map[string]string {
 	for resps := range Run(cmd) {
 		for _, resp := range resps.Resp {
 			if resp.Error != "" {
-				plog.Error(
-					plog.TypeSystem,
-					"error running mm cmd",
-					"cmd",
-					cmd.Command,
-					"error",
-					resp.Error,
-				)
+				onErr(resp.Error)
 
 				continue
 			}

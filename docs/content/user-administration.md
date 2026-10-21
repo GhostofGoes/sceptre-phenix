@@ -155,7 +155,7 @@ Key: E - experiment resource, V - VM resource, U - user resource
 |      |      |
 |------|------|
 | Verb | get |
-| Desc | get a specific experiment |
+| Desc | get a specific experiment, watch its SCORCH terminals and read its SCORCH component output |
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 
@@ -212,7 +212,7 @@ Key: E - experiment resource, V - VM resource, U - user resource
 |      |      |
 |------|------|
 | Verb | create |
-| Desc | trigger the running stage of an experiment |
+| Desc | trigger the running stage of an experiment, start its SCORCH runs, and type into and exit its SCORCH terminals |
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 

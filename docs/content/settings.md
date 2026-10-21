@@ -11,10 +11,15 @@ phēnix looks for a configuration file (e.g. `config.yaml`, `config.json`, `conf
 
 * `/etc/phenix/config.yaml`
 
-**When run as a regular user:**
+**When run as a regular user, or through `sudo phenix ...` (see [Store Configuration](#store-configuration)):**
 
-* `$HOME/.config/phenix/config.yaml`
+* `$HOME/.config/phenix/config.yaml`, where `$HOME` is the home of the user who
+  ran `sudo`
 * `/etc/phenix/config.yaml`
+
+If none of them exists, phēnix creates an empty one so it can watch it for
+changes: `/etc/phenix/config.yaml` when it runs as root, including through
+`sudo`, and `$HOME/.config/phenix/config.yaml` otherwise.
 
 ### Example Configuration
 
@@ -54,6 +59,21 @@ The phenix tool uses a key-value data store. By default it uses bbolt but also s
 
 To use `etcd`, configure the store endpoint (e.g. `etcd://localhost:2379`) via the config file or `phenix settings set`.
 
+The default bbolt store is `/etc/phenix/store.bdb` when phēnix runs as root and
+`$HOME/.phenix.bdb` otherwise. `sudo phenix ...` runs as root but uses the
+`$HOME/.phenix.bdb`, `$HOME/.config/phenix` and `$HOME/phenix_logs/phenix.log`
+of the user who ran `sudo`, and so does phēnix started by sudo through
+`setsid`, `nohup` or `env`, such as `sudo setsid nohup phenix ui`, so the CLI
+and a UI started that way share a store. phēnix run from a root shell (`sudo -i`, `sudo su`) uses
+`/etc/phenix/store.bdb`. Pass the same `--store.endpoint` to processes started
+in different ways to share a store.
+
+!!! note "Upgrading"
+    Earlier releases gave phēnix started by sudo through `setsid`, `nohup` or
+    `env` root's paths, so such a UI kept its experiments in
+    `/etc/phenix/store.bdb`. To keep using that store, start it with
+    `--store.endpoint bolt:///etc/phenix/store.bdb`.
+
 ## Managing Settings
 
 ```bash
@@ -92,7 +112,7 @@ The following global flags are supported by all `phenix` subcommands:
 | `--bridge-mode` | `string` | `manual` | Bridge naming mode for experiments (`auto` uses experiment name for bridge; `manual` uses user-specified bridge name, or `phenix` if omitted). |
 | `--deploy-mode` | `string` | — | Deploy mode for minimega VMs (`all`, `no-headnode`, or `only-headnode`). |
 | `-h, --help` | — | — | Display help information for the command. |
-| `--hostname-suffixes` | `string` | `-minimega,-phenix` | Hostname suffixes to strip. |
+| `--hostname-suffixes` | `string` | `-minimega,-phenix` | Hostname suffixes to strip from the headnode name used in snapshot names and from the host names `GET /api/v1/hosts` displays, which also gives each host's minimega name as `minimega_name`. Schedules keep the host names minimega reports. |
 | `--log.console` | `string` | `stderr` | Destination output for console logs in text format (`stderr`, `stdout`, or a file path). |
 | `--log.level` | `string` | `info` | Level to log messages at (`debug`, `info`, `warn`, `error`). |
 | `--log.system.max-age` | `int` | `90` | Maximum number of days to retain old log files. |
@@ -149,6 +169,7 @@ phēnix sets these itself when it launches an app:
 | `PHENIX_LOG_FILE` | `stderr` | App logs stream back to phēnix rather than to a file. |
 | `PHENIX_DRYRUN` | `true` / `false` | Whether the run is a dry run. |
 | `PHENIX_STORE_ENDPOINT` | `store.endpoint` | Data store endpoint (user apps only). |
+| `PHENIX_HOSTNAME_SUFFIXES` | `hostname-suffixes` | Comma-separated suffixes phēnix trims from host names to tell the headnode. Set but empty when `hostname-suffixes` is empty: trim none, not the defaults. |
 | `PHENIX_SCORCH_STARTTIME` | run start time | Scorch components only. |
 
 The rest are inherited from the phēnix process:

@@ -1,20 +1,25 @@
 package mm
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/activeshadow/libminimega/miniclient"
 	"github.com/hashicorp/go-multierror"
 
 	"phenix/util/common"
@@ -27,13 +32,20 @@ var (
 	ErrNoCaptures         = errors.New("no captures exist")
 	ErrC2ClientNotActive  = errors.New("C2 client not active for VM")
 	ErrVMNotFound         = errors.New("VM not found")
+	ErrVMNotRunning       = errors.New("VM is not running")
 	ErrScreenshotNotFound = errors.New("screenshot not found")
+	ErrInvalidVMLabel     = errors.New("minimega cannot store this label of a running VM")
 )
 
 const vmInfoCmd = "vm info"
 
+// namespaceKey is minimega's bare `namespace` command, which lists the
+// namespaces, and the column of that table naming each one.
+const namespaceKey = "namespace"
+
 const (
 	hostColumn             = "host"
+	nameColumn             = "name"
 	stateColumn            = "state"
 	c2ActiveCheckInterval  = 2 * time.Second
 	responseWaitInterval   = 1 * time.Second
@@ -46,6 +58,12 @@ const (
 // instances of the Minimega struct.
 var ccMu sync.Mutex //nolint:gochecknoglobals // global lock
 
+// launchMu keeps ClearNamespace from running between GetLaunchProgress's check
+// that minimega lists a namespace and its commands in that namespace, which
+// would create the cleared namespace again. A failed REST start clears the
+// namespace while phenix ui still polls its progress.
+var launchMu sync.Mutex //nolint:gochecknoglobals // global lock
+
 // Cache of the last known good headnode name. The headnode does not change for
 // the life of the process.
 var headnode struct { //nolint:gochecknoglobals // process-lifetime cache
@@ -53,8 +71,11 @@ var headnode struct { //nolint:gochecknoglobals // process-lifetime cache
 	name string
 }
 
-// Regular express to use for matching C2 response headers.
-var responseRegex = regexp.MustCompile(`(\d*)\/(.*)\/(stdout|stderr):`)
+// Regular expression matching the header minimega prints before each block of
+// a `cc response`: `<command id>/<client uuid>/<stdout|stderr>:` on a line of
+// its own. It is anchored so guest output that merely contains such text is
+// not taken for a header.
+var responseRegex = regexp.MustCompile(`^(\d+)/([0-9A-Fa-f-]+)/(stdout|stderr):$`)
 
 type Minimega struct{}
 
@@ -74,6 +95,9 @@ func (Minimega) ReadScriptFromFile(ns, filename string) error {
 }
 
 func (Minimega) ClearNamespace(ns string) error {
+	launchMu.Lock()
+	defer launchMu.Unlock()
+
 	cmd := mmcli.NewCommand()
 	cmd.Command = "clear namespace " + ns
 
@@ -101,21 +125,52 @@ func (Minimega) LaunchVMs(ns string, start ...string) error {
 		if err != nil {
 			return fmt.Errorf("starting VMs: %w", err)
 		}
-	} else {
-		for _, name := range start {
-			cmd.Command = "vm start " + name
 
-			err := mmcli.ErrorResponse(mmcli.Run(cmd))
-			if err != nil {
-				return fmt.Errorf("starting VM %s: %w", name, err)
-			}
+		return nil
+	}
+
+	return startEach(start, func(name string) error {
+		cmd.Command = "vm start " + name
+
+		return mmcli.ErrorResponse(mmcli.Run(cmd))
+	})
+}
+
+// startEach calls start for each named VM and goes on after a failure, so one
+// VM that does not start leaves the VMs after it started: minimega relaunches
+// a VM named in `vm start` that is in the ERROR state, and returns the error
+// when the relaunch fails again. It returns every failure, each naming its VM.
+func startEach(names []string, start func(name string) error) error {
+	var errs error
+
+	for _, name := range names {
+		if err := start(name); err != nil {
+			errs = multierror.Append(errs, fmt.Errorf("starting VM %s: %w", name, err))
 		}
 	}
 
-	return nil
+	return errs
 }
 
+// GetLaunchProgress returns the share of the expected VMs of namespace ns that
+// minimega has yet to launch. phenix ui polls it from the moment a start
+// begins, so it asks about a namespace minimega does not list yet, before the
+// start reads its minimega script, or no longer lists, after a failed start
+// cleared it. It reports no progress for such a namespace instead of asking
+// about its queue, which would create it.
 func (Minimega) GetLaunchProgress(ns string, expected int) (float64, error) {
+	launchMu.Lock()
+	defer launchMu.Unlock()
+
+	listed, err := namespaceListed(ns)
+	if err != nil {
+		return 0, err
+	}
+
+	if !listed {
+		return 0, nil
+	}
+
 	var queued int
 
 	cmd := mmcli.NewNamespacedCommand(ns)
@@ -130,7 +185,7 @@ func (Minimega) GetLaunchProgress(ns string, expected int) (float64, error) {
 			}
 
 			for _, m := range re.FindAllStringSubmatch(resp.Response, -1) {
-				queued += len(strings.Split(m[1], ","))
+				queued += countRangedNames(m[1])
 			}
 		}
 	}
@@ -157,7 +212,42 @@ func (Minimega) GetLaunchProgress(ns string, expected int) (float64, error) {
 	return float64(queued) / float64(expected), nil
 }
 
-func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex logic
+// namespaceListed reports whether minimega lists namespace ns. It reads the
+// bare `namespace` table, which enters, and so creates, no namespace.
+func namespaceListed(ns string) (bool, error) {
+	cmd := mmcli.NewCommand()
+	cmd.Command = namespaceKey
+
+	rows, err := mmcli.RunTabularErr(cmd)
+	if err != nil {
+		return false, fmt.Errorf("listing minimega namespaces: %w", err)
+	}
+
+	for _, row := range rows {
+		if row[namespaceKey] == ns {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// GetVMInfo is GetVMInfoErr for callers that read a failure as fewer VMs: it
+// logs the error and returns the VMs that were listed.
+func (m Minimega) GetVMInfo(opts ...Option) VMs {
+	vms, err := m.GetVMInfoErr(opts...)
+	if err != nil {
+		plog.Error(plog.TypeSystem, "error running mm cmd", "cmd", vmInfoCmd, "error", err)
+	}
+
+	return vms
+}
+
+// GetVMInfoErr lists the VMs of the namespace, or only the VM when one is
+// given. minimega answers once per namespace host, so the VMs some hosts listed
+// are returned even when others, or the connection to minimega, reported an
+// error.
+func (m Minimega) GetVMInfoErr(opts ...Option) (VMs, error) { //nolint:funlen // complex logic
 	o := NewOptions(opts...)
 
 	// don't rely on `cc_active` column in `vm info` table
@@ -186,7 +276,7 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 		cmd.Filters = []string{"name=" + o.vm}
 	}
 
-	status := mmcli.RunTabular(cmd)
+	status, infoErr := mmcli.RunTabularErr(cmd)
 	vms := make(VMs, 0, len(status))
 
 	for _, row := range status {
@@ -243,12 +333,7 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 		vm.RAM, _ = strconv.Atoi(row["memory"])
 		vm.CPUs, _ = strconv.Atoi(row["vcpus"])
 
-		var disk string
-		// Multiple disks are space-separated (minimega DiskConfigs.String).
-		if fields := strings.Fields(row["disks"]); len(fields) > 0 {
-			// Each diskspec is comma-separated (path,interface,cache); path is first.
-			disk = strings.Split(fields[0], ",")[0]
-		}
+		disk := firstDiskPath(row["disks"])
 
 		snapshot, _ := strconv.ParseBool(row["snapshot"])
 
@@ -283,7 +368,11 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 		vms = append(vms, vm)
 	}
 
-	return vms
+	if infoErr != nil {
+		return vms, fmt.Errorf("running %s in namespace %s: %w", vmInfoCmd, o.ns, infoErr)
+	}
+
+	return vms, nil
 }
 
 func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
@@ -292,9 +381,18 @@ func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = fmt.Sprintf("vm screenshot %s file /dev/null %s", o.vm, o.screenshotSize)
 
+	// The VM name and size come from the REST request.
+	if err := CheckNamespacedCommand(cmd.Command); err != nil {
+		return nil, fmt.Errorf("screenshotting VM %s: %w", o.vm, err)
+	}
+
 	var (
 		screenshot []byte
-		err        error
+
+		// Only the host that has the VM reports it not running, without a
+		// screen, or failing to take its screenshot; the other hosts of the
+		// namespace report it not found, which must hide none of these.
+		notRunning, failed, noScreen, notFound error
 	)
 
 	// Drain the full response channel
@@ -305,8 +403,15 @@ func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
 			}
 
 			if resp.Error != "" {
-				if strings.HasPrefix(resp.Error, "vm not found:") || strings.HasPrefix(resp.Error, "vm not running:") {
-					err = ErrVMNotFound
+				switch known := screenshotError(resp.Error); {
+				case errors.Is(known, ErrVMNotRunning):
+					notRunning = known
+				case errors.Is(known, ErrScreenshotNotFound):
+					noScreen = known
+				case errors.Is(known, ErrVMNotFound):
+					notFound = known
+				default:
+					failed = fmt.Errorf("screenshotting VM %s: %s", o.vm, resp.Error)
 				}
 
 				continue
@@ -320,7 +425,8 @@ func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
 
 			decoded, decErr := base64.StdEncoding.DecodeString(data)
 			if decErr != nil {
-				err = fmt.Errorf("decoding screenshot: %w", decErr)
+				failed = fmt.Errorf("decoding screenshot: %w", decErr)
+
 				continue
 			}
 
@@ -333,11 +439,31 @@ func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
 		return screenshot, nil
 	}
 
-	if err != nil {
-		return nil, err
+	for _, err := range []error{notRunning, failed, noScreen, notFound} {
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return nil, ErrScreenshotNotFound
+}
+
+// screenshotError maps the error minimega gives for a `vm screenshot` of a VM
+// it does not know, of one that is not running, such as a paused one, or of a
+// container, which has no screen, to ErrVMNotFound, ErrVMNotRunning or
+// ErrScreenshotNotFound. It returns nil for any other error, such as a lost
+// connection or a failed QMP screendump.
+func screenshotError(msg string) error {
+	switch {
+	case strings.HasPrefix(msg, "cannot take screenshot of container"):
+		return ErrScreenshotNotFound
+	case strings.HasPrefix(msg, "vm not found:"):
+		return ErrVMNotFound
+	case strings.HasPrefix(msg, "vm not running:"):
+		return ErrVMNotRunning
+	default:
+		return nil
+	}
 }
 
 func (Minimega) GetVNCEndpoint(opts ...Option) (string, error) {
@@ -345,31 +471,32 @@ func (Minimega) GetVNCEndpoint(opts ...Option) (string, error) {
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = vmInfoCmd
-	cmd.Columns = []string{hostColumn, "vnc_port"}
+	cmd.Columns = []string{nameColumn, hostColumn, "vnc_port"}
 	cmd.Filters = []string{"type=kvm", "name=" + o.vm}
 
-	var endpoint string
-
-	for _, vm := range mmcli.RunTabular(cmd) {
-		endpoint = fmt.Sprintf("%s:%s", vm[hostColumn], vm["vnc_port"])
-	}
-
-	if endpoint == "" {
+	rows := mmcli.RunTabular(cmd)
+	if len(rows) == 0 {
 		return "", errors.New("not found")
 	}
 
-	return endpoint, nil
+	vm := pickRow(rows, o.vm)
+
+	return fmt.Sprintf("%s:%s", vm[hostColumn], vm["vnc_port"]), nil
 }
 
 func (Minimega) StartVM(opts ...Option) error {
 	o := NewOptions(opts...)
+
+	if err := CheckVMName(o.vm); err != nil {
+		return fmt.Errorf("starting VM %s in namespace %s: %w", o.vm, o.ns, err)
+	}
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = "vm start " + o.vm
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
-		return fmt.Errorf("starting VM %s in namespace %s: %w", o.vm, o.ns, err)
+		return fmt.Errorf("starting VM %s in namespace %s: %w", o.vm, o.ns, vmTargetError(err))
 	}
 
 	return nil
@@ -378,12 +505,16 @@ func (Minimega) StartVM(opts ...Option) error {
 func (Minimega) StopVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
+	if err := CheckVMName(o.vm); err != nil {
+		return fmt.Errorf("stopping VM %s in namespace %s: %w", o.vm, o.ns, err)
+	}
+
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = "vm stop " + o.vm
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
-		return fmt.Errorf("stopping VM %s in namespace %s: %w", o.vm, o.ns, err)
+		return fmt.Errorf("stopping VM %s in namespace %s: %w", o.vm, o.ns, vmTargetError(err))
 	}
 
 	return nil
@@ -403,6 +534,8 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		return fmt.Errorf("no info found for VM %s in namespace %s", o.vm, o.ns)
 	}
 
+	row := pickRow(info, o.vm)
+
 	cmd.Filters = nil
 
 	cmd.Command = "vm config clone " + o.vm
@@ -419,14 +552,16 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		return fmt.Errorf("clearing config for VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
-	cmd.Command = "vm kill " + o.vm
+	if killable(row[stateColumn]) {
+		cmd.Command = "vm kill " + o.vm
 
-	err = mmcli.ErrorResponse(mmcli.Run(cmd))
-	if err != nil {
-		return fmt.Errorf("killing VM %s in namespace %s: %w", o.vm, o.ns, err)
+		err = mmcli.ErrorResponse(mmcli.Run(cmd))
+		if err != nil {
+			return fmt.Errorf("killing VM %s in namespace %s: %w", o.vm, o.ns, err)
+		}
 	}
 
-	err = flush(o.ns)
+	err = flush(o.ns, o.vm)
 	if err != nil {
 		return err
 	}
@@ -452,15 +587,17 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 	if o.disk != "" {
 		var disk string
 
-		if len(o.injects) == 0 {
+		if !o.recreateSnapshot && len(o.injects) == 0 && len(o.deletions) == 0 {
 			disk = o.disk
 		} else {
-			// Should only be one row of data since we filtered by VM name.
-			disks := info[0]["disks"]
+			// The VM's disks are space-separated diskspecs.
+			specs := strings.Fields(row["disks"])
 
-			// Only do injects if this VM was originally deployed with a disk snapshot.
-			if strings.Contains(disks, "_snapshot") {
-				old := newDiskConfig(disks)
+			// Only do injects if this VM was originally deployed with a disk
+			// snapshot, which is its first disk. Any other disk, even one whose
+			// name holds "_snapshot", is an image the user gave the VM.
+			if len(specs) > 0 && isDiskSnapshot(newDiskConfig(specs[0]).base, o.ns, o.vm) {
+				old := newDiskConfig(specs[0])
 				newDisk := newDiskConfig(o.disk)
 
 				// Delete disk snapshot file across cluster
@@ -481,14 +618,14 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 					)
 				}
 
-				err = inject(old.base, o.injectPart, o.injects...)
+				err = inject(old.base, diskInjectCommands(old.base, o.injectPart, o.injects, o.deletions)...)
 				if err != nil {
 					return err
 				}
 
 				// Use disk cache mode if provided by user. Otherwise, use original disk
-				// cache mode.
-				disk = old.string(newDisk.cache)
+				// cache mode. The VM keeps its other disks.
+				disk = strings.Join(append([]string{old.string(newDisk.cache)}, specs[1:]...), " ")
 			} else {
 				disk = o.disk
 			}
@@ -502,7 +639,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		}
 	}
 
-	cmd.Command = "vm launch kvm " + o.vm
+	cmd.Command = redeployLaunchCommand(row["type"], o.vm)
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -529,15 +666,40 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 func (Minimega) KillVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
-	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "vm kill " + o.vm
-
-	err := mmcli.ErrorResponse(mmcli.Run(cmd))
-	if err != nil {
+	if err := CheckVMName(o.vm); err != nil {
 		return fmt.Errorf("killing VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
-	return flush(o.ns)
+	// A VM whose state cannot be read is killed, for minimega to report.
+	if state, err := (Minimega{}).GetVMState(opts...); err != nil || killable(state) {
+		cmd := mmcli.NewNamespacedCommand(o.ns)
+		cmd.Command = "vm kill " + o.vm
+
+		err := mmcli.ErrorResponse(mmcli.Run(cmd))
+		if err != nil {
+			return fmt.Errorf("killing VM %s in namespace %s: %w", o.vm, o.ns, vmTargetError(err))
+		}
+	}
+
+	return flush(o.ns, o.vm)
+}
+
+// vmTargetError wraps ErrVMNotFound around err, an error of a VM command,
+// when minimega answered that no VM of the namespace has the name.
+func vmTargetError(err error) error {
+	if strings.Contains(err.Error(), "vm not found: ") {
+		return fmt.Errorf("%w: %w", ErrVMNotFound, err)
+	}
+
+	return err
+}
+
+// killable reports whether minimega kills a VM in state, one of BUILDING,
+// RUNNING and PAUSED (VM_KILLABLE in minimega's cmd/minimega/vm.go). It
+// refuses to kill a QUIT or ERROR VM, whose QEMU is gone, with `VM state
+// error`; flushing removes such a VM.
+func killable(state string) bool {
+	return state != "QUIT" && state != "ERROR"
 }
 
 func (Minimega) GetVMHost(opts ...Option) (string, error) {
@@ -545,7 +707,7 @@ func (Minimega) GetVMHost(opts ...Option) (string, error) {
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = vmInfoCmd
-	cmd.Columns = []string{hostColumn}
+	cmd.Columns = []string{nameColumn, hostColumn}
 	cmd.Filters = []string{"name=" + o.vm}
 
 	status := mmcli.RunTabular(cmd)
@@ -554,7 +716,7 @@ func (Minimega) GetVMHost(opts ...Option) (string, error) {
 		return "", fmt.Errorf("vm %s not found", o.vm)
 	}
 
-	return status[0][hostColumn], nil
+	return pickRow(status, o.vm)[hostColumn], nil
 }
 
 func (Minimega) GetVMState(opts ...Option) (string, error) {
@@ -562,7 +724,7 @@ func (Minimega) GetVMState(opts ...Option) (string, error) {
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = "vm info summary"
-	cmd.Columns = []string{stateColumn}
+	cmd.Columns = []string{nameColumn, stateColumn}
 	cmd.Filters = []string{"name=" + o.vm}
 
 	status := mmcli.RunTabular(cmd)
@@ -571,14 +733,22 @@ func (Minimega) GetVMState(opts ...Option) (string, error) {
 		return "", fmt.Errorf("vm %s not found", o.vm)
 	}
 
-	return status[0][stateColumn], nil
+	return pickRow(status, o.vm)[stateColumn], nil
 }
 
 func (Minimega) SetVMTags(opts ...Option) error {
 	o := NewOptions(opts...)
 
+	// Check every label first: a refused label must leave the VM's tags as
+	// they were, and must never reach minimega.
+	if err := CheckVMTags(o.vm, o.tags); err != nil {
+		return err
+	}
+
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = fmt.Sprintf("clear vm tag %s ", o.vm)
+	// minimega would store a label holding $HOME, or file:x, rewritten.
+	cmd.NoPreprocess = true
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -586,7 +756,7 @@ func (Minimega) SetVMTags(opts ...Option) error {
 	}
 
 	for k, v := range o.tags {
-		cmd.Command = fmt.Sprintf("vm tag %s \"%s\" \"%s\"", o.vm, k, v)
+		cmd.Command = vmTagCommand(o.vm, k, v)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -597,11 +767,75 @@ func (Minimega) SetVMTags(opts ...Option) error {
 	return nil
 }
 
+// CheckVMTags returns an error wrapping ErrInvalidVMLabel and naming vm and
+// the label for the first label, in key order, that minimega cannot store as
+// a tag of the running VM.
+//
+// minimega runs `vm tag` on every host of the namespace from a copy of the
+// command that it rebuilds from the parsed arguments, quoting only those that
+// hold whitespace (pkg/minicli/input.go), and parses again with MustCompile,
+// which exits minimega on a parse error (cmd/minimega/cli.go,
+// namespaceCommands). An argument without whitespace is copied raw, so a
+// double quote, single quote or backslash in it makes minimega exit and a #
+// cuts it short; an argument with whitespace is quoted with [strconv.Quote],
+// whose escapes for non-printable characters minicli cannot parse; and an
+// empty argument is dropped, so `vm tag` only reads the tag.
+func CheckVMTags(vm string, tags map[string]string) error {
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		for _, part := range [...]struct{ name, s string }{{"key", key}, {"value", tags[key]}} {
+			if problem := vmTagProblem(part.s); problem != "" {
+				return fmt.Errorf(
+					"label %q of VM %s: its %s %q %s: %w",
+					key, vm, part.name, part.s, problem, ErrInvalidVMLabel,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+// vmTagProblem returns why minimega cannot carry s through the rebuild of a
+// namespaced command, or "" when it can.
+func vmTagProblem(s string) string {
+	if s == "" {
+		return "is empty"
+	}
+
+	if !utf8.ValidString(s) {
+		return "is not valid UTF-8"
+	}
+
+	for _, r := range s {
+		if !strconv.IsPrint(r) && r != '\t' && r != '\n' && r != '\r' {
+			return fmt.Sprintf("holds the non-printable character %q", r)
+		}
+	}
+
+	if !strings.ContainsFunc(s, unicode.IsSpace) && strings.ContainsAny(s, `"'\#`) {
+		return "holds a double quote, single quote, backslash or # but no whitespace"
+	}
+
+	return ""
+}
+
+// vmTagCommand returns the `vm tag` command that sets the tag key of vm to
+// value, escaped so quotes and backslashes in a label reach minimega intact.
+func vmTagCommand(vm, key, value string) string {
+	return fmt.Sprintf(`vm tag %s "%s" "%s"`, vm, mmcli.Escape(key), mmcli.Escape(value))
+}
+
 func (Minimega) ConnectVMInterface(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = connectVMInterfaceCommand(o)
+	// The VLAN comes from the REST request; minimega takes it as written.
+	cmd.NoPreprocess = true
+
+	if err := checkConnectVMInterface(o, cmd.Command); err != nil {
+		return fmt.Errorf("connecting interface %d on VM %s to VLAN %q: %w", o.connectIface, o.vm, o.connectVLAN, err)
+	}
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -616,6 +850,25 @@ func (Minimega) ConnectVMInterface(opts ...Option) error {
 	}
 
 	return nil
+}
+
+// checkConnectVMInterface returns an error wrapping ErrUnsafeArgument unless
+// the VLAN and bridge of o each reach minimega as one argument and every
+// argument of cmd, the `vm net connect` command built from o, survives
+// minimega's rebuild of the namespaced command, which exits minimega when it
+// fails.
+func checkConnectVMInterface(o options, cmd string) error {
+	if err := CheckArgument(o.connectVLAN); err != nil {
+		return fmt.Errorf("VLAN: %w", err)
+	}
+
+	if o.bridge != "" {
+		if err := CheckArgument(o.bridge); err != nil {
+			return fmt.Errorf("bridge: %w", err)
+		}
+	}
+
+	return CheckNamespacedCommand(cmd)
 }
 
 func connectVMInterfaceCommand(o options) string {
@@ -666,12 +919,17 @@ func (Minimega) CreateBridge(opts ...Option) error {
 }
 
 func (Minimega) CreateTunnel(opts ...Option) error {
+	o := NewOptions(opts...)
+
+	// The destination host comes from the REST request.
+	if err := checkTunnelHost(o.dstHost); err != nil {
+		return fmt.Errorf("creating tunnel to %s: %w", o.vm, err)
+	}
+
 	host, err := GetVMHost(opts...)
 	if err != nil {
 		return fmt.Errorf("unable to determine what host the VM is scheduled on: %w", err)
 	}
-
-	o := NewOptions(opts...)
 
 	var cmdPrefix string
 
@@ -689,6 +947,10 @@ func (Minimega) CreateTunnel(opts ...Option) error {
 		o.dstPort,
 	)
 
+	if err := CheckNamespacedCommand(cmd.Command); err != nil {
+		return fmt.Errorf("creating tunnel to %s: %w", o.vm, err)
+	}
+
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf(
 			"creating tunnel to %s (%d:%s:%d): %w",
@@ -703,15 +965,36 @@ func (Minimega) CreateTunnel(opts ...Option) error {
 	return nil
 }
 
-func (Minimega) GetTunnels(opts ...Option) []map[string]string {
+// tunnelHostPattern matches a host name: letters, digits, '.', '-' and '_',
+// starting and ending with a letter or digit.
+var tunnelHostPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+
+// checkTunnelHost returns an error wrapping ErrUnsafeArgument unless host, the
+// destination of a tunnel, is an IP address or a host name. Its error does not
+// quote host, so text in it cannot pass for a minimega answer.
+func checkTunnelHost(host string) error {
+	if net.ParseIP(host) == nil && !tunnelHostPattern.MatchString(host) {
+		return fmt.Errorf("destination host is not an IP address or host name: %w", ErrUnsafeArgument)
+	}
+
+	return nil
+}
+
+// GetTunnels lists the tunnels of the VM, or of every C2 client in the
+// namespace when no VM is given, keeping those to the destination host and port
+// when given. minimega answers once per namespace host, so the rows some hosts
+// listed are returned even when others reported an error.
+func (Minimega) GetTunnels(opts ...Option) ([]map[string]string, error) {
 	o := NewOptions(opts...)
 
-	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "cc tunnel list all"
+	target := "all"
 
 	if o.vm != "" {
-		cmd.Command = "cc tunnel list " + o.vm
+		target = o.vm
 	}
+
+	cmd := mmcli.NewNamespacedCommand(o.ns)
+	cmd.Command = "cc tunnel list " + target
 
 	if o.dstHost != "" {
 		cmd.Filters = append(cmd.Filters, "dst="+o.dstHost)
@@ -721,11 +1004,21 @@ func (Minimega) GetTunnels(opts ...Option) []map[string]string {
 		cmd.Filters = append(cmd.Filters, fmt.Sprintf("'dst port'=%d", o.dstPort))
 	}
 
-	return mmcli.RunTabular(cmd)
+	rows, err := mmcli.RunTabularErr(cmd)
+	if err != nil {
+		return rows, fmt.Errorf("listing tunnels of %s in namespace %s: %w", target, o.ns, err)
+	}
+
+	return rows, nil
 }
 
 func (Minimega) CloseTunnel(opts ...Option) error {
-	tunnels := GetTunnels(opts...)
+	// Namespace hosts that do not run the VM answer the list with an error, so
+	// close what was listed and fail only when nothing was.
+	tunnels, err := GetTunnels(opts...)
+	if err != nil && len(tunnels) == 0 {
+		return err
+	}
 
 	host, err := GetVMHost(opts...)
 	if err != nil {
@@ -921,28 +1214,44 @@ func (m Minimega) GetVMCaptures(opts ...Option) []Capture {
 	return keep
 }
 
+// GetClusterHosts returns the cluster's hosts under the names minimega gives
+// them, which are the names `vm config schedule` and `mesh send` accept. Trim
+// them with common.TrimHostnameSuffixes only to display them.
 func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 	// Get headnode details
-	hosts := processNamespaceHosts("minimega")
+	hosts, err := namespaceHosts("minimega")
+	if err != nil {
+		return []Host{}, fmt.Errorf("listing cluster hosts: %w", err)
+	}
 
 	if len(hosts) == 0 {
 		return []Host{}, errors.New("no cluster hosts found")
 	}
-
-	head := hosts[0]
-	head.Schedulable = false
-	head.Headnode = true
-
-	var cluster []Host
 
 	// Clear dummy namespace used for getting compute nodes in case a new compute
 	// node has been added since the last time the dummy namespace was created.
 	_ = m.ClearNamespace("__phenix__")
 
 	// Get compute nodes details
-	hosts = processNamespaceHosts("__phenix__")
+	cluster := clusterHosts(hosts[0], processNamespaceHosts("__phenix__"), schedOnly)
 
-	for _, host := range hosts {
+	for i := range cluster {
+		cluster[i].DiskUsage.Phenix = m.getDiskUsage(cluster[i].Name, common.PhenixBase)
+		cluster[i].DiskUsage.Minimega = m.getDiskUsage(cluster[i].Name, common.MinimegaBase)
+	}
+
+	return cluster, nil
+}
+
+// clusterHosts returns the compute hosts followed by the headnode, unless
+// schedOnly is set and the headnode does not also compute.
+func clusterHosts(head Host, compute Hosts, schedOnly bool) Hosts {
+	head.Schedulable = false
+	head.Headnode = true
+
+	cluster := make(Hosts, 0, len(compute)+1)
+
+	for _, host := range compute {
 		// This will happen if the headnode is included as a compute node
 		// (ie. when there's only one node in the cluster).
 		if host.Name == head.Name {
@@ -951,31 +1260,20 @@ func (m Minimega) GetClusterHosts(schedOnly bool) (Hosts, error) {
 			continue
 		}
 
-		host.Name = common.TrimHostnameSuffixes(host.Name)
 		host.Schedulable = true
-
-		// Add disk info
-		host.DiskUsage.Phenix = m.getDiskUsage(host.Name, common.PhenixBase)
-		host.DiskUsage.Minimega = m.getDiskUsage(host.Name, common.MinimegaBase)
 
 		cluster = append(cluster, host)
 	}
 
 	if schedOnly && !head.Schedulable {
-		return cluster, nil
+		return cluster
 	}
 
-	head.Name = common.TrimHostnameSuffixes(head.Name)
-
-	// Add disk info
-	head.DiskUsage.Phenix = m.getDiskUsage(head.Name, common.PhenixBase)
-	head.DiskUsage.Minimega = m.getDiskUsage(head.Name, common.MinimegaBase)
-
-	cluster = append(cluster, head)
-
-	return cluster, nil
+	return append(cluster, head)
 }
 
+// GetNamespaceHosts returns the hosts of namespace ns under the names minimega
+// gives them, like GetClusterHosts.
 func (m Minimega) GetNamespaceHosts(ns string) (Hosts, error) {
 	// Get namespace nodes details
 	processed := processNamespaceHosts(ns)
@@ -983,8 +1281,6 @@ func (m Minimega) GetNamespaceHosts(ns string) (Hosts, error) {
 	hosts := make([]Host, 0, len(processed))
 
 	for _, host := range processed {
-		host.Name = common.TrimHostnameSuffixes(host.Name)
-
 		// Add disk info
 		host.DiskUsage.Phenix = m.getDiskUsage(host.Name, common.PhenixBase)
 		host.DiskUsage.Minimega = m.getDiskUsage(host.Name, common.MinimegaBase)
@@ -1092,6 +1388,18 @@ func pickVM(vms VMs, name string) VM {
 	return vms[0]
 }
 
+// pickRow is pickVM for the rows of a `vm info` table filtered by name=name,
+// which hold the name column.
+func pickRow(rows []map[string]string, name string) map[string]string {
+	for _, row := range rows {
+		if row[nameColumn] == name {
+			return row
+		}
+	}
+
+	return rows[0]
+}
+
 // c2Client waits for a VM's miniccc client to register and returns the name
 // minimega launched the VM under along with its UUID. Callers must address the
 // VM by one of those: this lookup folds case (minicli's `.filter` lowercases
@@ -1163,8 +1471,27 @@ func (m Minimega) ExecC2Command(opts ...C2Option) (string, error) { //nolint:fun
 	}
 
 	exec := func(ns, vm, cmd string) (string, error) {
+		// Commands come from SOH checks and their configuration.
+		if err := CheckNamespacedCommand(cmd); err != nil {
+			return "", err
+		}
+
 		ccMu.Lock()
 		defer ccMu.Unlock()
+
+		// The filter is namespace state in minimega and outlives this
+		// command, so clear it again; otherwise every later `cc` command in the
+		// namespace, from phenix or anyone else, goes only to this VM. Clear
+		// it also when setting it fails: minimega sends `cc filter` to every
+		// namespace host, and the hosts that answered may have applied it.
+		defer func() {
+			reset := mmcli.NewNamespacedCommand(ns)
+			reset.Command = "clear cc filter"
+
+			if err := mmcli.ErrorResponse(mmcli.Run(reset)); err != nil {
+				plog.Warn(plog.TypeSystem, "clearing cc filter", "ns", ns, "vm", vm, "err", err)
+			}
+		}()
 
 		c := mmcli.NewNamespacedCommand(ns)
 
@@ -1181,7 +1508,10 @@ func (m Minimega) ExecC2Command(opts ...C2Option) (string, error) { //nolint:fun
 			return "", fmt.Errorf("setting host filter to %s: %w", vm, err)
 		}
 
+		// The guest's shell, not minimega, is to expand $ in a command, and a
+		// file: or http: argument is a guest path or URL.
 		c.Command = cmd
+		c.NoPreprocess = true
 		c.Timeout = o.timeout
 
 		data, err := mmcli.SingleDataResponse(mmcli.Run(c))
@@ -1257,10 +1587,12 @@ func (m Minimega) ExecC2Command(opts ...C2Option) (string, error) { //nolint:fun
 
 	if o.mount != nil {
 		if *o.mount {
-			var (
+			path := o.mountPath
+			if path == "" {
 				path = GetLocalMountPath(o.ns, o.vm)
-				cmd  = fmt.Sprintf("cc mount %s %s", vmName, path)
-			)
+			}
+
+			cmd := fmt.Sprintf("cc mount %s %s", vmName, path)
 
 			if err := os.MkdirAll(path, 0o750); err != nil {
 				return "", fmt.Errorf("creating mount directory: %w", err)
@@ -1311,38 +1643,40 @@ func (Minimega) GetC2Response(opts ...C2Option) (string, error) {
 		return "", fmt.Errorf("vm %s does not exist", o.vm)
 	}
 
+	return parseC2Response(resp, pickVM(vms, o.vm).UUID, o.responseType), nil
+}
+
+// parseC2Response returns the lines of the block of a `cc response` that holds
+// the given output type of the client with the given UUID, or "" when there is
+// no such block. A line of any length is kept whole, and the \r of a \r\n line
+// end is dropped. It does not use a [bufio.Scanner], which stops at a line over
+// its 64 KiB token limit and would cut long guest output short without an
+// error.
+func parseC2Response(resp, uuid string, responseType C2ResponseType) string {
 	var (
-		scanner = bufio.NewScanner(strings.NewReader(resp))
-		uuid    = vms[0].UUID
+		output  []string
+		inBlock bool
 	)
 
-	var output []string
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	for line := range strings.SplitSeq(strings.TrimSuffix(resp, "\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 
 		if match := responseRegex.FindStringSubmatch(line); match != nil {
-			if len(output) > 0 {
-				return strings.Join(output, "\n"), nil
+			if inBlock {
+				break
 			}
 
-			if match[responseRegexGroupType] == string(o.responseType) && match[responseRegexGroupUUID] == uuid {
-				output = []string{}
-			}
+			inBlock = match[responseRegexGroupType] == string(responseType) && match[responseRegexGroupUUID] == uuid
 
 			continue
 		}
 
-		if output != nil {
+		if inBlock {
 			output = append(output, line)
 		}
 	}
 
-	if len(output) > 0 {
-		return strings.Join(output, "\n"), nil
-	}
-
-	return "", nil
+	return strings.Join(output, "\n")
 }
 
 func (Minimega) WaitForC2Response(opts ...C2Option) (string, error) {
@@ -1669,30 +2003,105 @@ func getResponse(ns, id string) (string, error) {
 	return resp, nil
 }
 
-func flush(ns string) error {
-	cmd := mmcli.NewNamespacedCommand(ns)
-	cmd.Command = "vm flush"
+// flush discards minimega's record of vm once it has quit, so its name can be
+// used again. It names the VM, since a bare `vm flush` deletes every QUIT or
+// ERROR VM in the namespace.
+func flush(ns, vm string) error {
+	if vm == "" {
+		return fmt.Errorf("flushing a VM in namespace %s: no VM name given", ns)
+	}
 
-	err := mmcli.ErrorResponse(mmcli.Run(cmd))
+	cmd := mmcli.NewNamespacedCommand(ns)
+	cmd.Command = "vm flush " + vm
+
+	err := flushErrors(mmcli.Run(cmd))
 	if err != nil {
-		return fmt.Errorf("flushing VMs in namespace %s: %w", ns, err)
+		return fmt.Errorf("flushing VM %s in namespace %s: %w", vm, ns, err)
 	}
 
 	return nil
 }
 
-func inject(disk string, part int, injects ...string) error {
-	files := strings.Join(injects, " ")
+// flushErrors returns the errors of a `vm flush <vm>`. minimega sends the
+// command to every host of the namespace, and each host that does not run the
+// VM answers "vm not found", so that answer is an error only when no host
+// flushed the VM.
+func flushErrors(responses chan *miniclient.Response) error {
+	var (
+		errs     error
+		flushed  bool
+		notFound string
+	)
 
+	for response := range responses {
+		for _, resp := range response.Resp {
+			switch {
+			case resp.Error == "":
+				flushed = true
+			case strings.HasPrefix(resp.Error, "vm not found: "):
+				notFound = resp.Error
+			default:
+				errs = multierror.Append(errs, errors.New(resp.Error))
+			}
+		}
+	}
+
+	if errs == nil && !flushed && notFound != "" {
+		return errors.New(notFound)
+	}
+
+	return errs
+}
+
+// inject runs the `disk inject` commands of diskInjectCommands for disk.
+func inject(disk string, commands ...string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk inject %s:%d files %s", disk, part, files)
 
-	err := mmcli.ErrorResponse(mmcli.Run(cmd))
-	if err != nil {
-		return fmt.Errorf("injecting files into disk %s: %w", disk, err)
+	for _, command := range commands {
+		cmd.Command = command
+
+		err := mmcli.ErrorResponse(mmcli.Run(cmd))
+		if err != nil {
+			return fmt.Errorf("injecting files into disk %s: %w", disk, err)
+		}
 	}
 
 	return nil
+}
+
+// diskInjectCommands returns the `disk inject` commands that inject a node's
+// files into partition part of disk and then delete its deletions from it,
+// as the start-time script does. Partition 0 means the node's files are not
+// injected into its disk (the start-time template skips them too), so there
+// are none.
+func diskInjectCommands(disk string, part int, injects, deletions []string) []string {
+	if part == 0 {
+		return nil
+	}
+
+	var commands []string
+
+	if len(injects) > 0 {
+		commands = append(
+			commands,
+			fmt.Sprintf("disk inject %s:%d files %s", disk, part, strings.Join(injects, " ")),
+		)
+	}
+
+	if len(deletions) > 0 {
+		paths := make([]string, len(deletions))
+
+		for i, path := range deletions {
+			paths[i] = `"` + mmcli.Escape(path) + `"`
+		}
+
+		commands = append(
+			commands,
+			fmt.Sprintf("disk inject %s:%d delete files %s", disk, part, strings.Join(paths, ",")),
+		)
+	}
+
+	return commands
 }
 
 // Ugh... replicating `file.DeleteFile` here to avoid cyclical dependency
@@ -1715,11 +2124,25 @@ func deleteFile(path string) error {
 	return nil
 }
 
+// processNamespaceHosts is namespaceHosts for callers that read a failure as
+// fewer hosts: it logs the error and returns the hosts that were listed.
 func processNamespaceHosts(namespace string) Hosts {
+	hosts, err := namespaceHosts(namespace)
+	if err != nil {
+		plog.Error(plog.TypeSystem, "error running mm cmd", "cmd", hostColumn, "error", err)
+	}
+
+	return hosts
+}
+
+// namespaceHosts lists the hosts of namespace. minimega answers once per
+// namespace host, so the hosts that answered are returned even when others, or
+// the connection to minimega, reported an error.
+func namespaceHosts(namespace string) (Hosts, error) {
 	cmd := mmcli.NewNamespacedCommand(namespace)
 	cmd.Command = hostColumn
 
-	status := mmcli.RunTabular(cmd)
+	status, err := mmcli.RunTabularErr(cmd)
 	hosts := make(Hosts, 0, len(status))
 
 	for _, row := range status {
@@ -1743,7 +2166,11 @@ func processNamespaceHosts(namespace string) Hosts {
 		hosts = append(hosts, host)
 	}
 
-	return hosts
+	if err != nil {
+		return hosts, fmt.Errorf("running %s in namespace %s: %w", hostColumn, namespace, err)
+	}
+
+	return hosts, nil
 }
 
 // Run shell command to get disk usage for `path` on `host`.
@@ -1760,4 +2187,99 @@ func (m Minimega) getDiskUsage(host, path string) float64 {
 	diskUsage, _ = strconv.ParseFloat(strings.TrimSuffix(resp, "%"), 64)
 
 	return diskUsage
+}
+
+// notApplicable is what minimega reports in `vm info` for a column that does
+// not apply to the VM's type, such as the disks of a container.
+const notApplicable = "N/A"
+
+// firstDiskPath returns the path of the first disk in a `vm info` disks
+// column, or "" when the VM has no disk. Multiple disks are space-separated
+// (minimega DiskConfigs.String) and each diskspec is comma-separated with the
+// path first (path[,interface][,cache]).
+func firstDiskPath(column string) string {
+	fields := strings.Fields(column)
+	if len(fields) == 0 || fields[0] == notApplicable {
+		return ""
+	}
+
+	return strings.Split(fields[0], ",")[0]
+}
+
+// isDiskSnapshot reports whether base is the name of the disk snapshot phenix
+// makes at start for vm of experiment ns: <headnode>_<ns>_<vm>_snapshot
+// (v1.ExperimentSpec.SnapshotName).
+func isDiskSnapshot(base, ns, vm string) bool {
+	return strings.HasSuffix(base, fmt.Sprintf("_%s_%s_snapshot", ns, vm))
+}
+
+// redeployLaunchCommand returns the `vm launch` command that relaunches a VM
+// as the type minimega reported for it, defaulting to kvm when the type is
+// unknown.
+func redeployLaunchCommand(vmType, name string) string {
+	if vmType == "" || vmType == notApplicable {
+		vmType = "kvm"
+	}
+
+	return fmt.Sprintf("vm launch %s %s", vmType, name)
+}
+
+// rangeGroupRegex matches one bracketed range group, such as [1-3,7].
+var rangeGroupRegex = regexp.MustCompile(`\[([^\]]*)\]`)
+
+// countRangedNames counts the names in a list that minimega compressed with
+// its ranges package (`ns queue` prints names this way), such as
+// "vm[1-3,7],foo[0-1].bar[1-2],web": 4 + 4 + 1 = 9 names.
+func countRangedNames(list string) int {
+	var (
+		total int
+		depth int
+		start int
+	)
+
+	count := func(name string) int {
+		if name == "" {
+			return 0
+		}
+
+		n := 1
+
+		for _, group := range rangeGroupRegex.FindAllStringSubmatch(name, -1) {
+			size := 0
+
+			for item := range strings.SplitSeq(group[1], ",") {
+				lo, hi, isRange := strings.Cut(item, "-")
+
+				a, errA := strconv.Atoi(lo)
+				b, errB := strconv.Atoi(hi)
+
+				if isRange && errA == nil && errB == nil && b >= a {
+					size += b - a + 1
+				} else {
+					size++
+				}
+			}
+
+			n *= size
+		}
+
+		return n
+	}
+
+	// Split on the commas that separate names, not those inside a group.
+	for i, r := range list {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				total += count(strings.TrimSpace(list[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	return total + count(strings.TrimSpace(list[start:]))
 }

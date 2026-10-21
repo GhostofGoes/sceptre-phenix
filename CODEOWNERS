@@ -31,9 +31,10 @@
 /podman/                @activeshadow @GhostofGoes @glattercj @jacdavi
 
 # Go code; the narrower lines must follow /src/go/ to take precedence.
-/src/go/                @activeshadow @glattercj @GhostofGoes @nblair2 @jacdavi @cmulk
+/src/go/                @activeshadow @GhostofGoes @glattercj @nblair2 @jacdavi @cmulk
 /src/go/api/scorch/     @nblair2 @activeshadow @GhostofGoes
 /src/go/api/workflow/   @glattercj @cmulk
+/src/go/e2e/            @GhostofGoes
 # Vendored noVNC, xterm.js, and mxGraph, owned by whoever updates them.
 /src/go/web/public/     @GhostofGoes @nblair2 @jacdavi @activeshadow
 

@@ -1,7 +1,11 @@
 package tap
 
 import (
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/hashicorp/go-multierror"
 	"inet.af/netaddr"
@@ -19,7 +23,74 @@ func (t *Tap) Init(bridge string, opts ...Option) {
 	}
 }
 
+// Validate checks the tap's configuration without creating anything, so a
+// caller can refuse a set of taps before creating any of them.
+func (t *Tap) Validate() error {
+	if t.VLAN == "" {
+		return errors.New("a tap needs a VLAN")
+	}
+
+	// The VLAN and the bridge are words of minimega's tap create command.
+	if !isWord(t.VLAN) {
+		return fmt.Errorf("the VLAN of a tap must be one word without quotes, '#' or '$', got %q", t.VLAN)
+	}
+
+	if t.Bridge != "" && !isWord(t.Bridge) {
+		return fmt.Errorf("the bridge of the tap on VLAN %s must be one word without quotes, '#' or '$', got %q",
+			t.VLAN, t.Bridge)
+	}
+
+	// The address goes to `ip addr add`, as one argument.
+	if t.IP != "" {
+		if _, err := netaddr.ParseIPPrefix(t.IP); err != nil {
+			if _, err := netaddr.ParseIP(t.IP); err != nil {
+				return fmt.Errorf(
+					"the tap on VLAN %s needs an IP address, optionally with a prefix length such as 10.10.0.254/24, got %q",
+					t.VLAN, t.IP,
+				)
+			}
+		}
+	}
+
+	if t.External.Enabled {
+		if _, err := t.externalPrefix(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// isWord reports whether s reaches minimega as one unchanged word: it has no
+// blank or control character, no quote, and neither the '#' that starts a
+// minimega comment nor the '$' minimega expands.
+func isWord(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune(`"'\#$`, r)
+	})
+}
+
 func (t *Tap) Create(host string) (netaddr.IPPrefix, error) {
+	var pair netaddr.IPPrefix
+
+	// Choose the external access pair before anything is created on the host,
+	// so a refused address or an exhausted pair subnet leaves nothing behind.
+	if t.External.Enabled {
+		prefix, err := t.externalPrefix()
+		if err != nil {
+			return netaddr.IPPrefix{}, err
+		}
+
+		pair, err = util.UnusedSubnet(t.o.subnet, append(slices.Clone(t.o.used), prefix))
+		if err != nil {
+			return netaddr.IPPrefix{}, fmt.Errorf(
+				"getting unused pair of IPs for VLAN %s host tap external connectivity: %w",
+				t.VLAN,
+				err,
+			)
+		}
+	}
+
 	err := t.create(host)
 	if err != nil {
 		// attempt to clean up any progress already made
@@ -29,18 +100,6 @@ func (t *Tap) Create(host string) (netaddr.IPPrefix, error) {
 	}
 
 	if t.External.Enabled {
-		used := t.o.used
-		used = append(used, netaddr.MustParseIPPrefix(t.IP))
-
-		pair, err := util.UnusedSubnet(t.o.subnet, used)
-		if err != nil {
-			return netaddr.IPPrefix{}, fmt.Errorf(
-				"getting unused pair of IPs for VLAN %s host tap external connectivity: %w",
-				t.VLAN,
-				err,
-			)
-		}
-
 		if err := t.connect(host, pair); err != nil {
 			// attempt to clean up progress we already made
 			_ = t.disconnect(host)
@@ -78,6 +137,21 @@ func (t *Tap) Delete(host string) error {
 	}
 
 	return errs
+}
+
+// externalPrefix returns the tap's address with its prefix length, from which
+// external access keeps the veth pair's subnet apart.
+func (t *Tap) externalPrefix() (netaddr.IPPrefix, error) {
+	prefix, err := netaddr.ParseIPPrefix(t.IP)
+	if err != nil {
+		return netaddr.IPPrefix{}, fmt.Errorf(
+			"external access for the tap on VLAN %s needs an IP address with a prefix length, such as 10.10.0.254/24, got %q",
+			t.VLAN,
+			t.IP,
+		)
+	}
+
+	return prefix, nil
 }
 
 func (t *Tap) create(host string) error {

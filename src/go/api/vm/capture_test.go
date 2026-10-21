@@ -32,6 +32,10 @@ func (m *captureTestMM) GetVMInfo(...mm.Option) mm.VMs {
 	return m.vmInfo
 }
 
+func (m *captureTestMM) GetVMInfoErr(...mm.Option) (mm.VMs, error) {
+	return m.vmInfo, nil
+}
+
 func (m *captureTestMM) GetVMCaptures(...mm.Option) []mm.Capture {
 	return m.captures
 }
@@ -127,6 +131,9 @@ func getCaptureTestExperiment(t *testing.T, networks []string, baseDir string) {
 		return nil
 	}).AnyTimes()
 
+	original := store.DefaultStore
+	t.Cleanup(func() { store.DefaultStore = original }) //nolint:reassign // restore test double
+
 	store.DefaultStore = m //nolint:reassign // monkey patching for test
 }
 
@@ -161,8 +168,8 @@ func TestStartCaptureVMNotRunning(t *testing.T) {
 	installCaptureTestMM(t, fake)
 
 	err := vm.StartCapture("test-experiment", "test-vm", 0, "out.pcap")
-	if err == nil {
-		t.Fatal("expected error when VM is not running")
+	if !errors.Is(err, mm.ErrVMNotRunning) {
+		t.Fatalf("expected mm.ErrVMNotRunning when VM is not running, got %v", err)
 	}
 
 	if fake.startCalls != 0 {
@@ -178,8 +185,8 @@ func TestStartCaptureInvalidInterfaceIndex(t *testing.T) {
 
 	for _, iface := range []int{-1, 1, 5} {
 		err := vm.StartCapture("test-experiment", "test-vm", iface, "out.pcap")
-		if err == nil {
-			t.Fatalf("expected error for out-of-range interface index %d", iface)
+		if !errors.Is(err, vm.ErrInvalidCaptureInterface) {
+			t.Fatalf("expected vm.ErrInvalidCaptureInterface for out-of-range interface index %d, got %v", iface, err)
 		}
 	}
 
@@ -223,6 +230,35 @@ func TestStartCaptureSuccess(t *testing.T) {
 	}
 }
 
+// TestStartCaptureRefusesUnsafeFileName checks that a capture file name that
+// minimega would split, expand or fail to parse again is refused before
+// minimega is asked: `a\"b.pcap` made minimega exit on the second parse of
+// the namespaced `capture pcap vm` command.
+func TestStartCaptureRefusesUnsafeFileName(t *testing.T) {
+	getCaptureTestExperiment(t, []string{"EXP_1"}, t.TempDir())
+
+	fake := &captureTestMM{
+		vmInfo: mm.VMs{{Name: "test-vm", Running: true, Networks: []string{"EXP_1"}}},
+	}
+	installCaptureTestMM(t, fake)
+
+	for _, name := range []string{`a\"b.pcap`, "a b.pcap", "a;reboot.pcap", "$HOME.pcap", "-rf.pcap"} {
+		err := vm.StartCapture("test-experiment", "test-vm", 0, name)
+		if !errors.Is(err, mm.ErrInvalidFileName) {
+			t.Errorf("StartCapture(%q) = %v, want mm.ErrInvalidFileName", name, err)
+		}
+	}
+
+	if fake.startCalls != 0 {
+		t.Fatalf("StartVMCapture was called %d times for refused names", fake.startCalls)
+	}
+
+	// Only the base name is used, so a directory part is dropped, not refused.
+	if err := vm.StartCapture("test-experiment", "test-vm", 0, "../../out"); err != nil {
+		t.Fatalf("StartCapture(../../out) = %v, want the capture out.pcap", err)
+	}
+}
+
 func TestStartCapturePropagatesMinimegaError(t *testing.T) {
 	getCaptureTestExperiment(t, []string{"EXP_1"}, t.TempDir())
 
@@ -261,6 +297,8 @@ func TestStopCapturesMissingVMName(t *testing.T) {
 }
 
 func TestStopCapturesNoCapturesRunning(t *testing.T) {
+	getCaptureTestExperiment(t, []string{"EXP_1"}, t.TempDir())
+
 	fake := new(captureTestMM)
 	installCaptureTestMM(t, fake)
 
@@ -334,6 +372,8 @@ func TestStopCaptureNegativeInterface(t *testing.T) {
 }
 
 func TestStopCaptureNoCapturesRunning(t *testing.T) {
+	getCaptureTestExperiment(t, []string{"EXP_1"}, t.TempDir())
+
 	fake := new(captureTestMM)
 	installCaptureTestMM(t, fake)
 
@@ -488,6 +528,9 @@ func getNamedCaptureTestExperiment(t *testing.T, ifaceNames, vlans []string, bas
 
 		return nil
 	}).AnyTimes()
+
+	original := store.DefaultStore
+	t.Cleanup(func() { store.DefaultStore = original }) //nolint:reassign // restore test double
 
 	store.DefaultStore = m //nolint:reassign // monkey patching for test
 }

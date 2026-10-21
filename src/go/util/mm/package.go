@@ -20,6 +20,10 @@ func GetVMInfo(opts ...Option) VMs {
 	return DefaultMM.GetVMInfo(opts...)
 }
 
+func GetVMInfoErr(opts ...Option) (VMs, error) {
+	return DefaultMM.GetVMInfoErr(opts...)
+}
+
 func GetVMScreenshot(opts ...Option) ([]byte, error) {
 	return DefaultMM.GetVMScreenshot(opts...)
 }
@@ -72,7 +76,7 @@ func CreateTunnel(opts ...Option) error {
 	return DefaultMM.CreateTunnel(opts...)
 }
 
-func GetTunnels(opts ...Option) []map[string]string {
+func GetTunnels(opts ...Option) ([]map[string]string, error) {
 	return DefaultMM.GetTunnels(opts...)
 }
 

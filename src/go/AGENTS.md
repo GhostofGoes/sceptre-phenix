@@ -58,5 +58,7 @@ the root target does.
 
 `.github/workflows/ci.yml` generates artifacts, runs `make check`, and executes
 race-enabled tests. Go changes can also trigger `.github/workflows/frontend.yml`
-because browser smoke tests build and run the backend. Keep workflow paths,
-Go/tool versions, and local commands aligned.
+because browser smoke tests build and run the backend, and
+`.github/workflows/e2e.yml`, which runs the `e2e` build-tagged tests in `e2e/`
+against a real minimega; `go test ./...` does not build them. Keep workflow
+paths, Go/tool versions, and local commands aligned.

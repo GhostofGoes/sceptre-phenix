@@ -5,12 +5,29 @@ import (
 	"time"
 )
 
-const lockTimeout = 5 * time.Minute
+const (
+	lockTimeout = 5 * time.Minute
+
+	// stopLockTimeout outlasts an experiment stop: the SCORCH stopping hook
+	// alone waits up to 5 minutes for canceled runs (web/scorch stopWait), and
+	// the cleanup apps run after it. A shorter lock would let a second stop
+	// request run experiment.Stop again while the first one is still running.
+	stopLockTimeout = 15 * time.Minute
+)
 
 func IsExperimentLocked(name string) Status {
 	key := "experiment|" + name
 
 	return Locked(key)
+}
+
+// IsExperimentStopping reports whether a stop of the experiment by this
+// process is in progress. Until the stop clears the experiment's start time
+// in the store, experiment.RequireRunning still passes, although the stop may
+// have cleared the minimega namespace, which a namespaced command creates
+// again.
+func IsExperimentStopping(name string) bool {
+	return IsExperimentLocked(name) == StatusStopping
 }
 
 func UnlockExperiment(name string) {
@@ -89,7 +106,7 @@ func LockExperimentForStarting(name string) error {
 func LockExperimentForStopping(name string) error {
 	key := "experiment|" + name
 
-	if status := Lock(key, StatusStopping, 1*time.Minute); status != "" {
+	if status := Lock(key, StatusStopping, stopLockTimeout); status != "" {
 		return fmt.Errorf("experiment %s is locked with status %s", name, status)
 	}
 
