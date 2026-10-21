@@ -1,3 +1,7 @@
+# Kibana 8 refuses to start on a setting it does not know, including
+# kibana.index, kibana.defaultAppId and elasticsearch.startupTimeout, which 8.0
+# removed.
+
 # Kibana is served by a back end server. This setting specifies the port to use.
 server.port: 5601
 
@@ -13,13 +17,6 @@ server.name: {{ . }}
 elasticsearch.hosts:
 - http://localhost:9200
 
-# Kibana uses an index in Elasticsearch to store saved searches, visualizations and
-# dashboards. Kibana creates a new index if the index doesn't already exist.
-kibana.index: ".kibana"
-
-# The default application to load.
-kibana.defaultAppId: home
-
 # Time in milliseconds to wait for Elasticsearch to respond to pings. Defaults to the value of
 # the elasticsearch.requestTimeout setting.
 elasticsearch.pingTimeout: 5000
@@ -27,6 +24,3 @@ elasticsearch.pingTimeout: 5000
 # Time in milliseconds to wait for responses from the back end or Elasticsearch. This value
 # must be a positive integer.
 elasticsearch.requestTimeout: 30000
-
-# Time in milliseconds to wait for Elasticsearch at Kibana startup before retrying.
-elasticsearch.startupTimeout: 5000

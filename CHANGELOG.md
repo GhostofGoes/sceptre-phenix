@@ -95,6 +95,9 @@ All notable changes to this project will be documented in this file.
 - **SoH App**: Skip minimega in dry-run cleanup and running stages.
 - **Refused Starts**: Skip minimega in SoH and user app cleanups.
 - **SoH App**: End startup delay and checks on stops elsewhere.
+- **SoH Packet Capture**: Inject configs that Elastic 8.19 accepts.
+- **SoH Packet Capture**: Stop re-counting flow bytes in every report.
+- **SoH Packet Capture**: Refuse non-IPv4-CIDR `ipAddress`; bound the flow query.
 - **Start Progress**: Never create or re-create the minimega namespace.
 - **VM Operations**: Refuse VM commands on stopped or dry-run experiments.
 - **VM Routes**: Answer refused requests 400, not 500.
