@@ -50,6 +50,200 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Netflow**: Refuse netflow capture on dry-run experiments with 409.
+- **Triggered User Apps**: Skip minimega VM lookup for stopped experiments.
+- **Triggered Stages**: Pass `PHENIX_DRYRUN=true` to user apps of dry runs.
+- **SoH App**: Skip minimega in dry-run cleanup and running stages.
+- **Refused Starts**: Skip minimega in SoH and user app cleanups.
+- **SoH App**: End startup delay and checks on stops elsewhere.
+- **SoH Packet Capture**: Inject configs that Elastic 8.19 accepts.
+- **SoH Packet Capture**: Stop re-counting flow bytes in every report.
+- **SoH Packet Capture**: Refuse non-IPv4-CIDR `ipAddress`; bound the flow query.
+- **Start Progress**: Never create or re-create the minimega namespace.
+- **VM Operations**: Refuse VM commands on stopped or dry-run experiments.
+- **VM Routes**: Answer refused requests 400, not 500.
+- **Snapshot, Capture Refusals**: Answer 409 or 400, not 500.
+- **Failed Delayed Start**: Run cleanup apps, then clear namespace once.
+- **Delayed VMs**: Abandon waits when another process stops the experiment.
+- **Stop During Start**: Await the canceled UI start before cleanup.
+- **Stop During Start**: Skip remaining default post-start apps too.
+- **System Log**: Append instead of overwriting; skip non-JSON lines quietly.
+- **Running Trigger**: Keep the status the app's running stage prints.
+- **App Triggers**: Drop each finished trigger's canceler.
+- **VLAN Range Errors**: Name the max VLAN ID correctly.
+- **Workflow VLAN Range**: Refuse an invalid `vlanRange` with 400 upfront.
+- **Workflow VLANs**: Refuse pinned IDs outside `vlanRange` with 400.
+- **VLAN Range Docs**: Say minimega never assigns a range's max.
+- **REST Redeploy**: Keep disk, CPUs and memory for empty bodies.
+- **REST Redeploy**: Answer 400, not 500, for unknown VMs.
+- **Redeploy Deletions**: Apply node deletions when replicating injections on redeploy.
+- **Redeploy Injections**: Resolve paths and apply permissions as start does.
+- **Redeploy Snapshots**: Recreate the disk snapshot of nodes without injections.
+- **UI Redeploy Disk**: Default to keeping the VM's current disk.
+- **Experiment Rename**: Rename only the base directory's last element.
+- **Forced Config Edits**: Keep running experiments' status; never rename them.
+- **Experiment Stop**: Leave runs another process started meanwhile untouched.
+- **UI Redeploy Injections**: Honor `No` for replicating original injections.
+- **Running VM Labels**: Escape label quotes and backslashes for minimega.
+- **VM Flush**: Keep other powered-off VMs on kill and redeploy.
+- **VM Kill, Redeploy and Restore**: Handle powered-off and errored VMs.
+- **Per-VM Start**: Start every VM despite failures; name failed VMs.
+- **C2 Startup**: Queue scripts with `cc exec` so they run.
+- **C2 Startup**: Read a stored `phenix/startup-via-cc: 0` as false.
+- **Linux Startup Scripts**: Make hostname, DNS and domain join idempotent.
+- **VLAN IDs**: Treat 0 as unpinned.
+- **VLAN Aliases**: Refuse IDs outside 1-4095; check REST assignments too.
+- **Linux Hostname Script**: Rename adjacent `phenix` and `phenix.<domain>` aliases.
+- **User Commands**: Stop leaking stream readers on failed starts.
+- **User Commands**: Signal the whole process group on cancel.
+- **User Commands**: Pass signals that end phenix to their groups.
+- **VM Commits**: Stop quick base image copies crashing `phenix ui`.
+- **Config Validation**: Refuse Topology, Scenario and Experiment configs at unreadable versions.
+- **sudo Config File**: Create missing `config.yaml` in `/etc/phenix`, not home.
+- **Port Forward Reaper**: Drop stopped experiments' forwards without querying minimega.
+- **Dry-Run Restart**: Let `phenix experiment start <name>` restart dry-run experiments.
+- **Experiment Delete**: Remove staged C2 startup scripts from cluster nodes.
+- **Experiment Reconfigure**: Stop sending `ns del-bridge`, which recreated the namespace.
+- **Auto Bridge Mode**: Move unbridged interfaces to the experiment's bridge.
+- **Failed Starts**: Delete leftover disk snapshots and report cleanup errors.
+- **Stopping Hooks**: Drop port forwards before clearing the minimega namespace.
+- **Capture Listing**: Skip minimega for stopped experiments; reject unknown ones.
+- **Subnet Captures**: Never overwrite an earlier capture's file.
+- **Subnet Captures**: Fail when a cluster node cannot list files.
+- **User Apps**: Query VMs only from post-start, outside dry runs.
+- **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
+- **Startup Autotunnels**: End C2 waits at stop; skip dry runs.
+- **Port Forwards**: Refuse forwards to an experiment being stopped.
+- **Linux Interface MTU**: Apply topology interface MTUs on Linux guests.
+- **Default App Order**: Run default apps in their documented order.
+- **Serial Device Default**: Suggest `/dev/ttyphenix0` instead of the guest's `/dev/ttyS0`.
+- **Port Forwards**: Keep forwards when `cc tunnel list` fails.
+- **minimega Restarts**: Retry unsent commands once on a fresh connection.
+- **C2 Commands**: Pass `$` to guests instead of minimega's environment.
+- **VM Listing**: Report minimega errors instead of empty VM lists.
+- **Cluster Hosts**: Report the failed minimega `host` command's error.
+- **CLI Start**: Mark running during delays; run cleanup on failure.
+- **Scheduling**: Keep minimega's host names; trim suffixes only for display.
+- **UI Host Assignment**: Map displayed host names back to minimega's.
+- **UI Host Select**: Show the hosts of scheduled VMs.
+- **Tap External Access**: Refuse prefixless or empty `ip` without panicking.
+- **Tap Failures**: Delete created taps when a later one fails.
+- **Tap Validation**: Check every tap's VLAN, bridge and address upfront.
+- **Tap Hosts**: Fail instead of panicking when minimega lists none.
+- **Tap Triggers**: Delete previously recorded taps before creating new ones.
+- **Tap Status**: Record only the taps a delete left behind.
+- **Tap App**: Create no taps or namespaces on dry runs.
+- **Startup Disk Images**: Refuse unusable paths; warn on denied access.
+- **SCORCH Cancel**: Bound the whole teardown, even when canceled mid-stage.
+- **SCORCH Cancel**: End pause and break at once on cancel.
+- **CLI Signals**: End commands on a second Ctrl-C or SIGTERM.
+- **SCORCH Runs**: Keep a stale run from canceling its successor.
+- **SCORCH Pipelines**: Refuse starts with 409 or 400, not 204.
+- **SCORCH Web UI**: Show refused run starts and cancels.
+- **SCORCH SOH**: Stop data races on the run's shared status.
+- **SCORCH Taps**: Stop tap and break reverting stored SOH results.
+- **SCORCH Background**: Track backgrounded stages per loop and count.
+- **SCORCH Background**: End every instance of a component listed twice.
+- **SCORCH Filebeat**: Ship canceled runs' teardown output; reap Filebeat.
+- **SCORCH Web Terminals**: Stop races and double closes crashing phenix.
+- **SCORCH Web Terminals**: Idle connects no longer revoke write access.
+- **SCORCH Web Terminals**: Drop terminal output history when terminals end.
+- **SCORCH Web Terminals**: End terminals without waiting on stalled observers.
+- **SCORCH Output Streams**: Stop concurrent map access crashing phenix.
+- **Role-less Requests**: Answer 403 instead of dropping the connection.
+- **Periodic Apps**: Resume after skipped ticks; stop without hanging.
+- **App Stages**: Keep others' status; never write into newer runs.
+- **Stage Triggers**: Keep running flags that refuse second SCORCH runs.
+- **Periodic Apps**: Refuse to schedule apps of stopped experiments.
+- **SCORCH SOH**: Honor `failOnError` when SOH is already running.
+- **SCORCH Runs**: Refuse runs that name undefined components.
+- **SCORCH Runs**: Refuse a second run started from another process.
+- **SCORCH Triggers**: Record status for triggered and periodic runs.
+- **SCORCH Background**: Stop leftover backgrounded components when runs end.
+- **SCORCH Background**: Fail runs whose backgrounded components fail.
+- **SCORCH Background**: Wait for backgrounded components to exit on stop.
+- **SCORCH Background**: Prevent `concurrent map writes` crashes in `phenix ui`.
+- **SCORCH Concurrent Runs**: Stop runs using another experiment's component metadata.
+- **SCORCH Cancel**: Fail canceled runs when stop or cleanup fails.
+- **SCORCH Runs**: Accept runs again after a stop that panicked.
+- **SCORCH Filebeat**: Start Filebeat when the run-level setting enables it.
+- **Netflow**: Drop captures of experiments stopped from the CLI.
+- **Subnet Captures**: Stamp capture file names to the second.
+- **Subnet Captures**: Report why listing VMs or starting captures failed.
+- **REST Starts**: Leak no goroutine when an experiment start fails.
+- **VM Commits**: Leak no goroutine per commit or memory snapshot.
+- **REST Starts**: Keep periodic apps cancelable after a failed retry.
+- **REST Stops**: Answer 500 instead of panicking when rereading fails.
+- **REST Stops**: Hold the stop lock until slow stops finish.
+- **REST Stops**: Refuse VM routes until the stop finishes.
+- **Experiments UI**: Reload the list after failed starts and stops.
+- **VM Mounts**: Serve files of VMs mounted from the CLI.
+- **VM Mount Uploads**: Replace existing files whole; report failed writes.
+- **VM Mounts**: Stop UI unmounts from removing CLI-made mounts.
+- **VM Mounts**: Remount after stops; keep counts when unmounts fail.
+- **SCORCH CLI**: Report missing experiments instead of panicking.
+- **SCORCH Cancel**: Run stop and cleanup stages after a cancel.
+- **App Termination**: Send canceled apps SIGTERM, SIGKILL after 10 seconds.
+- **Subprocess Output**: Read lines up to 64 MiB without hanging.
+- **Dry Runs**: List VMs without creating a minimega namespace.
+- **Disk Images**: Check `-filepath`; boot skipped nodes once images appear.
+- **Files Directory**: Ask minimega after `--base-dir.*` apply; retry until answered.
+- **File Downloads**: Honor `{filename}` when the `path` query is absent.
+- **VM Mount Path**: Honor given paths; fail if mounted elsewhere.
+- **Start Progress**: Expand minimega's `vm[1-3]` name ranges when counting.
+- **Start Script Labels**: Escape quotes and backslashes for minimega.
+- **minimega Passthrough**: Exit 0 from `phenix mm quit`, which minimega never answers.
+- **CLI Redeploy**: Keep the VM's CPUs and memory unless given.
+- **Port Forwards**: Send minimega the default `127.0.0.1` destination host.
+- **C2 Commands**: Clear minimega's `cc filter` after every attempt.
+- **C2 Responses**: Stop truncating guest output at header-like lines.
+- **C2 Responses**: Keep guest output lines over 1 MiB whole.
+- **VM Details**: Show external nodes as `EXTERNAL` instead of panicking.
+- **Experiment Stop**: Leave no empty minimega namespace after mount cleanup.
+- **VM Redeploy**: Keep the VM type instead of forcing KVM.
+- **VM Memory Snapshots**: Stop panicking or hanging on save status.
+- **Failed VM Snapshots**: Cancel the save and resume the VM.
+- **Snapshot Files**: Remove files a failed VM snapshot wrote.
+- **VM Snapshots**: Refuse VMs without disk snapshots before saving anything.
+- **Reset Disk**: Create snapshots in instance directories so VMs restart.
+- **VM Screenshots**: Cache each size separately.
+- **Paused VM Screenshots**: Answer 409 `VM is not running`.
+- **VM Screenshots**: Report minimega failures instead of `screenshot not found`.
+- **Screenshot Updates**: Stop logging errors for stopped experiments' VMs.
+- **Screenshot Updates**: Keep each websocket client's screenshot size its own.
+- **VM Websocket Events**: Name VMs `<experiment>/<vm>` in start/stop events.
+- **VM Info**: Skip `disk info` for VMs without a disk.
+- **VM Lookups**: Pick the exact name among case-folded matches.
+- **BoltDB Store**: Create missing directories of absolute `bolt://` paths.
+- **BoltDB Store**: Stop hiding delete and update failures.
+- **Etcd Store**: Report missing, existing and unreadable configs like BoltDB.
+- **Experiment Start**: Fail when minimega leaves VMs in `ERROR` state.
+- **User App Discovery**: Tolerate missing `PATH` directories and follow symlinks.
+- **vrouter NAT**: Prefer app `snat` rules over topology masquerade rules.
+- **minirouter Hostnames**: Set minirouter hostnames in the startup app.
+- **vrouter Dry Runs**: Send no `router` commands to minimega.
+- **vrouter Re-Triggers**: Clear staged minirouter config before re-running post-start.
+- **vrouter IPsec**: Give each VyOS site its own key; fix IKE proposals.
+- **External VMs**: Refuse redeploys and disk changes instead of panicking.
+- **VM Snapshots**: Succeed while other VMs are powered off.
+- **Snapshot Resumes**: Keep completed snapshots; resume despite other hosts' errors.
+- **Failed Memory Snapshots**: Remove partial dumps; fail on statusless answers.
+- **Reset Disk**: Reset paused VMs; restart VMs whose reset failed.
+- **VM Listing**: Show healthy hosts' VMs when other hosts fail.
+- **VM Details**: Report minimega errors instead of a stopped VM.
+- **Snapshot and Dump Names**: Stop dropping the last dotted part.
+- **Optical Discs**: Resolve relative ISO paths in minimega's files directory.
+- **VM Disk Lists**: Offer only disks a VM may use.
+- **BoltDB Store**: Stop hanging after one failed database open.
+- **Experiment Runs**: Never write a stopped or restarted run back.
+- **Failed Starts**: Stop only the start's own run, never twice.
+- **Experiment Stop**: End SCORCH runs first; keep their final status.
+- **Experiment Stop**: Cancel and await triggered runs; refuse new triggers.
+- **Periodic Apps**: End promptly when runs end; honor dry runs.
+- **CLI Periodic Apps**: Keep the new run's start time.
+- **App Termination**: Stop racing on output errors after kill delay.
+- **SoH Startup Delay**: Stop waiting once the start is canceled.
+- **Failed Starts**: Run cleanup apps for every failure after pre-start.
 - **Topology Builder**:
   - **Annotation Loss**: Saving a topology replaced the config's entire metadata annotation map, discarding every annotation other than `builder-xml`.
   - **Crash on Invalid Input**: A schema-invalid topology crashed the handlers with a nil-pointer dereference instead of returning a validation error.

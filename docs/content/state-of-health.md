@@ -267,14 +267,19 @@ details. (In this screenshot, the mouse is hovering over the traffic for IP
   See [Packet Capture](#packet-capture) for more details. The default is `nil`.
 
     * `elasticImage`: path to the disk image to use for the Elastic/Kibana VM
-      for packet capture. An `image/PHENIX-elasticsearch` config comes bundled with
-      phenix and can be used to build an image to use here. There is no default
-      for this setting; if packet capture is to be deployed it must be provided.
+      for packet capture. Use the `elasticsearch` image (Elasticsearch and
+      Kibana 8.19) that the `elasticsearch` recipe of
+      [sceptre-phenix-images](https://github.com/sandialabs/sceptre-phenix-images)
+      builds. See [Packet Capture Images](#packet-capture-images). There is no
+      default for this setting; if packet capture is to be deployed it must be
+      provided.
 
     * `packetBeatImage`: path to the disk image to use for the Packetbeat VM for
-      packet capture. An `image/PHENIX-packetbeat` config comes bundled with phenix and
-      can be used to build an image to use here. There is no default for this
-      setting; if packet capture is to be deployed it must be provided.
+      packet capture. Use the `packetbeat` image (Packetbeat 8.19) that the
+      `packetbeat` recipe of
+      [sceptre-phenix-images](https://github.com/sandialabs/sceptre-phenix-images)
+      builds. There is no default for this setting; if packet capture is to be
+      deployed it must be provided.
 
     * `elasticServer`:
 
@@ -289,18 +294,18 @@ details. (In this screenshot, the mouse is hovering over the traffic for IP
           VM. The default is 4096.
 
         * `ipAddress`: the IP address to use for the Elastic/Kibana server added
-          to the experiment topology. The network interface this IP address is
-          used for will be added to the experiment VLAN specified by `vlan`. The
-          IP address should be specified in CIDR notation. There should also be
-          sufficient IP addresses after the one specified here to be assigned to
-          each of the Packetbeat monitor VMs that will be deployed, as the IP
-          addresses assigned to them on the VLAN specified by `vlan` will
-          increment up from this IP. There is no default for this setting; if
-          packet capture is to be deployed it must be provided.
+          to the experiment topology, on the `MGMT` VLAN. The IP address must be
+          an IPv4 address in CIDR notation, such as `172.16.200.1/16`; the app
+          refuses any other value. There should also be sufficient IP addresses
+          after the one specified here to be assigned to each of the Packetbeat
+          monitor VMs that will be deployed, as the IP addresses assigned to
+          them on the `MGMT` VLAN will increment up from this IP. There is no
+          default for this setting; if packet capture is to be deployed it must
+          be provided.
 
-        * `vlan`: the experiment VLAN to add the Elastic/Kibana and Packetbeat
-          VMs to. There is no default for this setting; if packet capture is to
-          be deployed it must be provided.
+        * `vlan`: not used. The Elastic/Kibana server and the Packetbeat VMs
+          are always added to the `MGMT` VLAN, and the app logs a warning when
+          this is set to another VLAN.
 
     * `captureHosts`: a map of VMs, each specifying a list of network interface
       names to monitor. One Packetbeat VM will be deployed for each VM interface
@@ -402,6 +407,38 @@ chord graph in an effort to depict how much traffic is flowing between VMs.
 Users/Analysts can also access Kibana using VNC via the phenix UI to do
 additional analysis on the network flow data that's being captured.
 
+#### Packet Capture Images
+
+Build the images for `elasticImage` and `packetBeatImage` with the
+`elasticsearch` and `packetbeat` recipes of
+[sceptre-phenix-images](https://github.com/sandialabs/sceptre-phenix-images)
+(`make elasticsearch packetbeat`, which writes `elasticsearch.qc2` and
+`packetbeat.qc2`). Both install Elastic 8.19 and work with the configuration
+files the SoH app injects. The `image/PHENIX-elasticsearch` and
+`image/PHENIX-packetbeat` configs bundled with phenix install whatever Elastic
+8.x release is current when the image is built.
+
+An image of your own must work with what the SoH app does:
+
+* On the Elastic/Kibana server, the app replaces
+  `/etc/elasticsearch/elasticsearch.yml` and `/etc/kibana/kibana.yml`.
+  Elasticsearch listens on port 9200 over plain HTTP, with security and TLS
+  turned off, and Kibana listens on port 5601. Keep both files in the image, so
+  the injected files keep their owner and mode.
+* The app runs `query-flows.sh` on the server over C2, so the server needs
+  miniccc. The script must print one Elasticsearch search response with the
+  flow events of the `packetbeat-*` indices on its standard output, and nothing
+  on its standard error. The app waits up to 5 minutes for the script to
+  finish.
+* On each Packetbeat VM, the app replaces `/etc/packetbeat/packetbeat.yml`.
+  Packetbeat captures on `eth1`, the VM's second interface, which receives the
+  mirrored traffic, and sends a report of each flow's new bytes every 10 seconds
+  to Elasticsearch. The image must start Packetbeat at boot.
+* The Packetbeat VMs do not load Packetbeat's Kibana dashboards: when
+  Packetbeat 8 loads them, it exits at start if Kibana does not answer yet.
+  Load them once with `packetbeat setup --dashboards` from a VM that reaches
+  Kibana. The `elasticsearch` image does this at boot.
+
 ## Sample SoH Scenario Config
 
 ```yaml
@@ -465,7 +502,6 @@ spec:
           vcpus: 4
           memory: 4096
           ipAddress: 172.16.200.1/16
-          vlan: MGMT
         captureHosts:
           client:
           - IF0  # interface to monitor on "client" node in topology
