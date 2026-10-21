@@ -43,9 +43,10 @@ var (
 	componentUpdates chan ComponentUpdate //nolint:gochecknoglobals // global state
 	outputRequests   chan outputRequest   //nolint:gochecknoglobals // global state
 
-	cmpType map[string]string //nolint:gochecknoglobals // global state
-	running map[string]bool   //nolint:gochecknoglobals // global state
-	output  map[string][]byte //nolint:gochecknoglobals // global state
+	cmpType   map[string]string //nolint:gochecknoglobals // global state
+	running   map[string]bool   //nolint:gochecknoglobals // global state
+	output    map[string][]byte //nolint:gochecknoglobals // global state
+	outputGen map[string]int    //nolint:gochecknoglobals // global state; bumped when output restarts
 )
 
 func UpdateComponent(update ComponentUpdate) {
@@ -63,23 +64,29 @@ func UpdateComponent(update ComponentUpdate) {
 func startComponents() {
 	componentUpdates = make(chan ComponentUpdate)
 	outputRequests = make(chan outputRequest)
-	wsRequests = make(chan wsRequest)
+	wsRequests = make(chan *streamClient)
+	wsLeaves = make(chan *streamClient)
 
 	cmpType = make(map[string]string)
 	running = make(map[string]bool)
 	output = make(map[string][]byte)
-	ws = make(map[string]map[string]wsRequest)
+	outputGen = make(map[string]int)
+	ws = make(map[string]map[string]*streamClient)
 
 	go processComponents()
 }
 
 // processComponents is the only user of the component maps: a concurrent
-// map read and write ends the process.
+// map read and write ends the process. Every SCORCH run's component updates
+// go through it, so it never writes to a websocket; it offers each stream
+// its output, which the stream's own goroutine writes.
 func processComponents() {
 	for {
 		select {
-		case req := <-wsRequests:
-			addOutputStream(req)
+		case cli := <-wsRequests:
+			addOutputStream(cli)
+		case cli := <-wsLeaves:
+			removeOutputStream(cli)
 		case update := <-componentUpdates:
 			// track updates by exp/run/loop/stage/component
 			key := fmt.Sprintf(
@@ -94,38 +101,28 @@ func processComponents() {
 			switch update.Status {
 			case statusStart:
 				output[key] = nil
+				outputGen[key]++
 				cmpType[key] = update.CmpType
 			case statusRunning, statusBackground:
 				running[key] = true
 
 				if len(update.Output) != 0 {
 					output[key] = append(output[key], update.Output...)
-				}
 
-				// stream to any websockets listening for this key
-				for id, cli := range ws[key] {
-					nw, err := cli.ws.Write(update.Output)
-					if err != nil {
-						close(cli.done)
-						delete(ws[key], id)
-
-						continue
-					}
-
-					if nw != len(update.Output) {
-						close(cli.done)
-						delete(ws[key], id)
+					// stream to any websockets listening for this key
+					for _, cli := range ws[key] {
+						cli.offer(outputUpdate(key, false))
 					}
 				}
 			case statusSuccess, statusFailure:
 				delete(running, key)
 
 				// notify any websockets for this key that component is done
-				for id, cli := range ws[key] {
-					_, _ = cli.ws.Write([]byte("***** COMPONENT FINISHED *****"))
-					close(cli.done)
-					delete(ws[key], id)
+				for _, cli := range ws[key] {
+					cli.offer(outputUpdate(key, true))
 				}
+
+				delete(ws, key)
 			}
 
 			close(update.done)
