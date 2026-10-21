@@ -649,14 +649,14 @@ func StreamComponentOutput(w http.ResponseWriter, r *http.Request) {
 }
 
 func scorchComponentWsHandler(key string) func(*websocket.Conn) {
-	return func(ws *websocket.Conn) {
-		id := uuid.Must(uuid.NewV4()).String()
-		req := wsRequest{key: key, id: id, ws: ws, done: make(chan struct{})}
+	return func(conn *websocket.Conn) {
+		cli := &streamClient{
+			key:     key,
+			id:      uuid.Must(uuid.NewV4()).String(),
+			updates: make(chan streamUpdate, 1),
+		}
 
-		// add client to list for component
-		wsRequests <- req
-		// wait for done channel to be closed
-		<-req.done
+		streamOutput(conn, cli)
 	}
 }
 
