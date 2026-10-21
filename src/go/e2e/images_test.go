@@ -257,6 +257,7 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 				script: "readlink /etc/ntpsec/ntp.conf",
 				want:   "/etc/ntp.conf",
 			},
+			firefoxSkipsTermsOfUse,
 		},
 	},
 	"bennu": {
