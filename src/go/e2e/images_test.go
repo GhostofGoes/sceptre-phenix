@@ -41,6 +41,11 @@ type imageProfile struct {
 	// images phenix's builder does not produce.
 	notGeneric bool
 
+	// macs, when set, gives the guest one NIC per MAC, in this order: eth0 on
+	// the IMG VLAN, then each other NIC on a VLAN and a subnet of its own. The
+	// guest must name the NIC with the i-th MAC eth<i>.
+	macs []string
+
 	checks []imageCheck
 }
 
@@ -162,6 +167,22 @@ func sandcatAgent(platform, magic string) imageCheck {
 			platform,
 		),
 		want: fmt.Sprintf("sandcat.go-%s %s", platform, magic),
+	}
+}
+
+// nicsInSlotOrder checks that the guest names the NIC with the i-th of macs
+// eth<i>. minimega attaches a VM's NICs to PCI slots in topology order, and
+// phenix's router configs address eth<i> as the i-th topology interface.
+func nicsInSlotOrder(macs []string) imageCheck {
+	files := make([]string, len(macs))
+	for i := range macs {
+		files[i] = fmt.Sprintf("/sys/class/net/eth%d/address", i)
+	}
+
+	return imageCheck{
+		name:   "NICs named in slot order",
+		script: "cat " + strings.Join(files, " ") + " | tr '\\n' ' '",
+		want:   strings.Join(macs, " "),
 	}
 }
 
@@ -861,12 +882,19 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 		},
 	},
 	// VyOS is built by its own script rather than the phenix builder, boots as
-	// a router, and roots on its third partition.
+	// a router, and roots on its third partition. Its NICs have no hw-id in
+	// config.boot at first boot, so VyOS names them itself; the MACs descend,
+	// so an image that names them in MAC order fails the NIC check. The checks
+	// run once C2 reports the hostname, which the vrouter config sets after
+	// VyOS named the NICs.
 	"vyos": {
 		vcpus: 2, memory: 2048,
 		nodeType: "Router", osType: "vyos", partition: 3,
 		boot:       10 * time.Minute,
 		notGeneric: true,
+		// RFC 7042's documentation MACs, universally administered like the
+		// vendor MACs minimega picks.
+		macs: []string{"00:00:5e:00:53:03", "00:00:5e:00:53:02", "00:00:5e:00:53:01"},
 		checks: []imageCheck{
 			{name: "miniccc service", script: "systemctl is-active miniccc.service", want: "active"},
 		},
@@ -943,13 +971,31 @@ func smokeNode(g smokeImage) string {
       drives:
       - image: %s.qc2%s
     network:
-      interfaces:
-      - name: eth0
-        type: ethernet
-        proto: static
-        vlan: IMG
-        address: %s
-        mask: 24`, nodeType, g.hostname, g.profile.vcpus, g.profile.memory, osType, g.image, inject, g.address)
+      interfaces:%s`, nodeType, g.hostname, g.profile.vcpus, g.profile.memory, osType, g.image, inject, smokeInterfaces(g))
+}
+
+// smokeInterfaces renders a smoke-tested guest's interfaces: eth0 on the IMG
+// VLAN and, for a profile with macs, one interface per MAC, eth<i> after eth0
+// on VLAN IMG-<i> with eth0's host number in 10.30.<i>.0/24.
+func smokeInterfaces(g smokeImage) string {
+	if len(g.profile.macs) == 0 {
+		return staticIface("eth0", "IMG", g.address)
+	}
+
+	host := g.address[strings.LastIndex(g.address, ".")+1:]
+
+	var ifaces strings.Builder
+
+	for i, mac := range g.profile.macs {
+		vlan, address := "IMG", g.address
+		if i > 0 {
+			vlan, address = fmt.Sprintf("IMG-%d", i), fmt.Sprintf("10.30.%d.%s", i, host)
+		}
+
+		ifaces.WriteString(staticIface(fmt.Sprintf("eth%d", i), vlan, address) + "\n        mac: " + mac)
+	}
+
+	return ifaces.String()
 }
 
 func smokeImageBatch(t *testing.T, name string, images []string) {
@@ -1001,6 +1047,10 @@ func smokeImageBatch(t *testing.T, name string, images []string) {
 			}
 
 			checks = append(checks, g.profile.checks...)
+
+			if len(g.profile.macs) > 0 {
+				checks = append(checks, nicsInSlotOrder(g.profile.macs))
+			}
 
 			wait := g.profile.checksWait
 			if wait == 0 {
