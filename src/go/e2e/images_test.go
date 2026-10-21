@@ -84,6 +84,20 @@ var desktopChecks = []imageCheck{ //nolint:gochecknoglobals // test table
 	{name: "display manager", script: "systemctl is-active lightdm.service", want: "active"},
 }
 
+// firefoxSkipsTermsOfUse holds for the images whose Firefox opens a page in
+// root's desktop session. Firefox 138 and later cover the page with a Terms of
+// Use dialog at first launch unless the SkipTermsOfUse policy is true, and
+// Firefox reads /etc/firefox/policies/policies.json in place of the policies in
+// its distribution directory. Firefox ignores a file that is not JSON and keeps
+// the last of duplicate keys, as json.load does, so the check prints true only
+// for a file that Firefox applies.
+var firefoxSkipsTermsOfUse = imageCheck{ //nolint:gochecknoglobals // test table
+	name: "Firefox policy skips the Terms of Use dialog",
+	script: `python3 -c 'import json; print(json.dumps(` +
+		`json.load(open("/etc/firefox/policies/policies.json"))["policies"]["SkipTermsOfUse"]))'`,
+	want: "true",
+}
+
 // plainUbuntuChecks hold for the images the images repository's
 // scripts/ubuntu.sh builds (ubuntu and miniccc): the build upgraded them from
 // the noble-updates and noble-security pockets, left only the upgraded kernel
@@ -353,14 +367,9 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 					want:   "/usr/lib/firefox/firefox",
 				},
 				{name: "Firefox runs", script: "firefox --version | grep -o '^Mozilla Firefox'", want: "Mozilla Firefox"},
-				{
-					// Firefox 138 and later cover the page with a Terms of Use
-					// dialog at first launch unless a policy skips it. The
-					// caldera app replaces this file with one that sets it too.
-					name:   "Firefox policy skips the Terms of Use dialog",
-					script: `grep -o '"SkipTermsOfUse": *true' /etc/firefox/policies/policies.json | tr -d '" '`,
-					want:   "SkipTermsOfUse:true",
-				},
+				// The caldera app replaces the image's policies file with one
+				// that sets SkipTermsOfUse too.
+				firefoxSkipsTermsOfUse,
 				{
 					// lightdm logs root in as the desktop comes up, around the
 					// time miniccc registers.
@@ -795,13 +804,7 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 					script: `readlink -f "$(command -v firefox)"`,
 					want:   "/usr/lib/firefox/firefox",
 				},
-				{
-					// Firefox 138 and later cover Kibana with a Terms of Use
-					// dialog at first launch unless a policy skips it.
-					name:   "Firefox policy skips the Terms of Use dialog",
-					script: `grep -o '"SkipTermsOfUse": *true' /etc/firefox/policies/policies.json | tr -d '" '`,
-					want:   "SkipTermsOfUse:true",
-				},
+				firefoxSkipsTermsOfUse,
 				{
 					name: "root desktop session for the Kibana autostart entry",
 					script: "for try in $(seq 10); do " +
