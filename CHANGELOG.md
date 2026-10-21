@@ -194,6 +194,7 @@ All notable changes to this project will be documented in this file.
 - **SCORCH Web Terminals**: Drop terminal output history when terminals end.
 - **SCORCH Web Terminals**: End terminals without waiting on stalled observers.
 - **SCORCH Output Streams**: Stop concurrent map access crashing phenix.
+- **SCORCH Output Streams**: Stop stalled clients holding up every run.
 - **Role-less Requests**: Answer 403 instead of dropping the connection.
 - **Periodic Apps**: Resume after skipped ticks; stop without hanging.
 - **App Stages**: Keep others' status; never write into newer runs.
