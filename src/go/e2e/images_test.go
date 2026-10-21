@@ -84,13 +84,13 @@ var desktopChecks = []imageCheck{ //nolint:gochecknoglobals // test table
 	{name: "display manager", script: "systemctl is-active lightdm.service", want: "active"},
 }
 
-// firefoxSkipsTermsOfUse holds for the images whose Firefox opens a page in
-// root's desktop session. Firefox 138 and later cover the page with a Terms of
-// Use dialog at first launch unless the SkipTermsOfUse policy is true, and
-// Firefox reads /etc/firefox/policies/policies.json in place of the policies in
-// its distribution directory. Firefox ignores a file that is not JSON and keeps
-// the last of duplicate keys, as json.load does, so the check prints true only
-// for a file that Firefox applies.
+// firefoxSkipsTermsOfUse holds for the images with Firefox in root's desktop
+// session. Firefox 138 and later cover the page with a Terms of Use dialog at
+// first launch unless the SkipTermsOfUse policy is true, and Firefox reads
+// /etc/firefox/policies/policies.json in place of the policies in its
+// distribution directory. Firefox ignores a file that is not JSON and keeps the
+// last of duplicate keys, as json.load does, so the check prints true only for
+// a file that Firefox applies.
 var firefoxSkipsTermsOfUse = imageCheck{ //nolint:gochecknoglobals // test table
 	name: "Firefox policy skips the Terms of Use dialog",
 	script: `python3 -c 'import json; print(json.dumps(` +
