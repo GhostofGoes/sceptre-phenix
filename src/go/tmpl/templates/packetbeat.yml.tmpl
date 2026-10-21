@@ -18,6 +18,11 @@ packetbeat.flows:
   # Configure reporting period. If set to -1, only killed flows will be reported
   period: 10s
 
+  # Report the bytes and packets of each period instead of the flow's running
+  # totals. The soh app adds up every report of a flow, so running totals would
+  # count a long flow's bytes many times over.
+  enable_delta_flow_reports: true
+
 #================================ General =====================================
 
 # The name of the shipper that publishes the network data. It can be used to group
@@ -29,7 +34,12 @@ name: {{ .Hostname }}
 # These settings control loading the sample dashboards to the Kibana index. Loading
 # the dashboards is disabled by default and can be enabled either by setting the
 # options here or by using the `setup` command.
-setup.dashboards.enabled: true
+#
+# The monitors do not load them: to load them, Packetbeat 8 asks Kibana for its
+# version before it captures, and exits when Kibana does not answer yet, for
+# example while the Elastic server is still starting. Load them once with
+# `packetbeat setup --dashboards`, which uses the settings below.
+setup.dashboards.enabled: false
 
 # The URL from where to download the dashboards archive. By default this URL
 # has a value which is computed based on the Beat name and version. For released

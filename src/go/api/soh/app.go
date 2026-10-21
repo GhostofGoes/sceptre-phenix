@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -94,10 +93,15 @@ func (s *SOH) Configure(ctx context.Context, exp *types.Experiment) error {
 			FindNodesWithLabels("soh-elastic-server"); len(
 			servers,
 		) == 0 {
-			ip, mask, _ := net.ParseCIDR(s.md.PacketCapture.ElasticServer.IPAddress)
-			cidr, _ := mask.Mask.Size()
+			if vlan := s.md.PacketCapture.ElasticServer.VLAN; vlan != "" && !strings.EqualFold(vlan, "MGMT") {
+				plog.LoggerFromContext(ctx, plog.TypeSoh).Warn(
+					"ignoring packetCapture.elasticServer.vlan: the Elastic server and monitors always use the MGMT VLAN",
+					"vlan", vlan,
+				)
+			}
 
-			if _, err = s.buildElasticServerNode(exp, ip.String(), cidr); err != nil {
+			_, err = s.buildElasticServerNode(exp, s.md.elasticIP.String(), s.md.elasticMask)
+			if err != nil {
 				return fmt.Errorf("building Elastic server node: %w", err)
 			}
 
@@ -599,40 +603,40 @@ func (s *SOH) getFlows(ctx context.Context, exp *types.Experiment) { //nolint:fu
 
 	hostname := node[0].General().Hostname()
 
-	var id string
-
-	for {
-		var err error
-
-		opts := []mm.C2Option{
-			mm.C2NS(exp.Metadata.Name),
-			mm.C2VM(hostname),
-			mm.C2Command("query-flows.sh"),
-		}
-
-		if s.md.useUUIDForC2Active(hostname) {
-			opts = append(opts, mm.C2IDClientsByUUID())
-		}
-
-		id, err = mm.ExecC2Command(opts...)
-		if err != nil {
-			if errors.Is(err, mm.ErrC2ClientNotActive) {
-				time.Sleep(c2RetryDelay)
-
-				continue
-			}
-
-			plog.Error(plog.TypeSoh, "error executing command 'query-flows.sh'", "err", err)
-
-			return
-		}
-
-		if id != "" {
-			break
-		}
+	// Wait for the server's C2 as long as the other checks wait for a host's,
+	// and stop when the checks are canceled. A later run of the checks asks
+	// again.
+	opts := []mm.C2Option{
+		mm.C2NS(exp.Metadata.Name),
+		mm.C2VM(hostname),
+		mm.C2Command("query-flows.sh"),
+		mm.C2Context(ctx),
+		mm.C2Timeout(s.md.c2Timeout),
 	}
 
-	opts := []mm.C2Option{mm.C2NS(exp.Metadata.Name), mm.C2Context(ctx), mm.C2CommandID(id)}
+	if s.md.useUUIDForC2Active(hostname) {
+		opts = append(opts, mm.C2IDClientsByUUID())
+	}
+
+	id, err := mm.ExecC2Command(opts...)
+	if err == nil && id == "" {
+		err = errors.New("minimega returned no command ID")
+	}
+
+	if err != nil {
+		plog.Error(plog.TypeSoh, "error executing command 'query-flows.sh'", "host", hostname, "err", err)
+
+		return
+	}
+
+	// query-flows.sh can wait minutes for Elasticsearch to start answering, so
+	// its answer gets minimega's default wait, not c2Timeout, which is how long
+	// a host's C2 has to become active.
+	opts = []mm.C2Option{
+		mm.C2NS(exp.Metadata.Name),
+		mm.C2Context(ctx),
+		mm.C2CommandID(id),
+	}
 
 	resp, err := mm.WaitForC2Response(opts...)
 	if err != nil {
