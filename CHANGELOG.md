@@ -259,6 +259,7 @@ All notable changes to this project will be documented in this file.
 - **minirouter Hostnames**: Set minirouter hostnames in the startup app.
 - **vrouter Dry Runs**: Send no `router` commands to minimega.
 - **vrouter Re-Triggers**: Clear staged minirouter config before re-running post-start.
+- **vrouter IPsec**: Give each VyOS site its own key; fix IKE proposals.
 - **External VMs**: Refuse redeploys and disk changes instead of panicking.
 - **VM Snapshots**: Succeed while other VMs are powered off.
 - **Snapshot Resumes**: Keep completed snapshots; resume despite other hosts' errors.
