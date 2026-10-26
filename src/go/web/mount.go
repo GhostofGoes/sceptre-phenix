@@ -214,22 +214,18 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
-	if !exists {
-		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
-
+	root, release, ok := openActiveMount(w, basePath)
+	if !ok {
 		return
 	}
 
-	mountInfo.lock.RLock()
-	defer mountInfo.lock.RUnlock()
+	defer release()
 
-	combinedPath := filepath.Join(basePath, vars["path"])
+	var (
+		relPath      = mountRelPath(vars["path"])
+		combinedPath = filepath.Join(basePath, relPath)
+	)
+
 	user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
 	plog.Info(
 		plog.TypeAction,
@@ -247,7 +243,7 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 	)
 
 	go func() {
-		info, err = os.Stat(combinedPath)
+		info, err = root.Stat(relPath)
 
 		close(done)
 	}()
@@ -277,31 +273,22 @@ func GetMountFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !strings.HasPrefix(combinedPath, basePath) {
-		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
-		plog.Error(
-			plog.TypeSecurity,
-			"user attempted getting path outside of mount",
-			"path",
-			combinedPath,
-			"user",
-			user,
-		)
-		http.Error(
-			w,
-			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
-			http.StatusBadRequest,
-		)
-
-		return
-	}
-
 	var dirEntries []fs.DirEntry
 
 	done = make(chan struct{})
 
 	go func() {
-		dirEntries, err = os.ReadDir(combinedPath)
+		var dir *os.File
+
+		dir, err = root.Open(relPath)
+		if err != nil {
+			close(done)
+
+			return
+		}
+
+		dirEntries, err = dir.ReadDir(-1)
+		_ = dir.Close()
 
 		close(done)
 	}()
@@ -365,49 +352,40 @@ func DownloadMountFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
-	if !exists {
-		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
-
+	root, release, ok := openActiveMount(w, basePath)
+	if !ok {
 		return
 	}
 
-	mountInfo.lock.RLock()
-	defer mountInfo.lock.RUnlock()
+	defer release()
 
-	combinedPath := filepath.Join(basePath, vars["path"])
+	var (
+		relPath      = mountRelPath(vars["path"])
+		combinedPath = filepath.Join(basePath, relPath)
+	)
 
-	fileInfo, err := os.Stat(combinedPath)
+	// Opening through the root refuses ".." and symlinks that leave the mount,
+	// such as a link the guest file system points at the host's /.
+	f, err := root.Open(relPath)
 	if err != nil {
 		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
 		http.Error(
 			w,
 			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
-			http.StatusInternalServerError,
+			http.StatusBadRequest,
 		)
 
 		return
 	}
 
-	if !strings.HasPrefix(combinedPath, basePath) {
-		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
-		plog.Error(
-			plog.TypeSecurity,
-			"user attempted downloading file outside of mount",
-			"path",
-			combinedPath,
-			"user",
-			user,
-		)
+	defer func() { _ = f.Close() }()
+
+	fileInfo, err := f.Stat()
+	if err != nil {
 		http.Error(
 			w,
-			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
-			http.StatusBadRequest,
+			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
+			http.StatusInternalServerError,
 		)
 
 		return
@@ -431,7 +409,7 @@ func DownloadMountFile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(fileInfo.Name()))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeFile(w, r, combinedPath)
+	http.ServeContent(w, r, fileInfo.Name(), fileInfo.ModTime(), f)
 }
 
 // UploadMountFile - PUT /experiments/{exp}/vms/{name}/files/download?path=.
@@ -455,49 +433,32 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-
-	mountInfo, exists := activeMounts[basePath]
-
-	activeMountsMu.RUnlock()
-
-	if !exists {
-		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
-
+	root, release, ok := openActiveMount(w, basePath)
+	if !ok {
 		return
 	}
 
-	mountInfo.lock.RLock()
-	defer mountInfo.lock.RUnlock()
+	defer release()
 
-	combinedPath := filepath.Join(basePath, vars["path"])
-	//nolint:gosec // Path traversal via taint analysis
-	if _, err := os.Stat(combinedPath); err != nil {
+	var (
+		relPath      = mountRelPath(vars["path"])
+		combinedPath = filepath.Join(basePath, relPath)
+	)
+
+	info, err := root.Stat(relPath)
+	if err != nil {
 		plog.Error(plog.TypeSystem, "error getting path", "err", err.Error(), "path", combinedPath)
 		http.Error(
 			w,
 			fmt.Sprintf("Error getting path %s: %s", combinedPath, err.Error()),
-			http.StatusInternalServerError,
+			http.StatusBadRequest,
 		)
 
 		return
 	}
 
-	if !strings.HasPrefix(combinedPath, basePath) {
-		user, _ := r.Context().Value(middleware.ContextKeyUser).(string)
-		plog.Error(
-			plog.TypeSecurity,
-			"user attempted uploading file outside of mount",
-			"path",
-			combinedPath,
-			"user",
-			user,
-		)
-		http.Error(
-			w,
-			fmt.Sprintf("Error getting path %s: Path is not within mount", combinedPath),
-			http.StatusBadRequest,
-		)
+	if !info.IsDir() {
+		http.Error(w, "Expected directory not file: "+combinedPath, http.StatusBadRequest)
 
 		return
 	}
@@ -512,15 +473,24 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 			"dest_path",
 			combinedPath,
 		)
-		http.Error(w, "Error uploading: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error uploading: "+err.Error(), http.StatusBadRequest)
+
+		return
 	}
 
 	defer func() { _ = clientFile.Close() }()
 
-	localFile, err := os.OpenFile( //nolint:gosec // Path traversal via taint analysis
-		filepath.Join(combinedPath, handler.Filename),
-		os.O_WRONLY|os.O_CREATE,
-		0o600,
+	name := filepath.Base(handler.Filename)
+	if name == "." || name == ".." || name == string(filepath.Separator) {
+		http.Error(w, "Error uploading: invalid file name", http.StatusBadRequest)
+
+		return
+	}
+
+	localFile, err := root.OpenFile(
+		filepath.Join(relPath, name),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		mountFileMode,
 	)
 	if err != nil {
 		plog.Error(
@@ -531,7 +501,9 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 			"dest_path",
 			combinedPath,
 		)
-		http.Error(w, "Error uploading: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error uploading: "+err.Error(), http.StatusBadRequest)
+
+		return
 	}
 
 	defer func() { _ = localFile.Close() }()
@@ -540,8 +512,6 @@ func UploadMountFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // CopyExperimentFileToMount copies a same-experiment file into a mounted VM directory.
-//
-//nolint:funlen // complex logic
 func CopyExperimentFileToMount(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	basePath := mm.GetLocalMountPath(vars["exp"], vars["name"])
@@ -559,30 +529,22 @@ func CopyExperimentFileToMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeMountsMu.RLock()
-	mountInfo, exists := activeMounts[basePath]
-	activeMountsMu.RUnlock()
-
-	if !exists {
-		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
-
+	root, release, ok := openActiveMount(w, basePath)
+	if !ok {
 		return
 	}
 
-	mountInfo.lock.RLock()
-	defer mountInfo.lock.RUnlock()
+	defer release()
 
-	query := r.URL.Query()
-	destDir := filepath.Join(basePath, query.Get("path"))
-	if err := validatePathWithin(destDir, basePath); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	var (
+		query   = r.URL.Query()
+		relDir  = mountRelPath(query.Get("path"))
+		destDir = filepath.Join(basePath, relDir)
+	)
 
-		return
-	}
-
-	info, err := os.Stat(destDir)
+	info, err := root.Stat(relDir)
 	if err != nil {
-		http.Error(w, "Error getting path "+destDir+": "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error getting path "+destDir+": "+err.Error(), http.StatusBadRequest)
 
 		return
 	}
@@ -615,19 +577,11 @@ func CopyExperimentFileToMount(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = sourceFile.Close() }()
 
-	destName := filepath.Base(source)
-	destPath := filepath.Join(destDir, destName)
-	if err := validatePathWithin(destPath, destDir); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-
-		return
-	}
-
-	destFile, err := os.OpenFile(
-		destPath,
+	destFile, err := root.OpenFile(
+		filepath.Join(relDir, filepath.Base(source)),
 		os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
-		0o600,
-	) //nolint:gosec // destination validated against mount path
+		mountFileMode,
+	)
 	if err != nil {
 		http.Error(w, "Error creating destination file: "+err.Error(), http.StatusInternalServerError)
 
@@ -677,16 +631,52 @@ func getExperimentFilePath(expName, source, filesDir string) (string, error) {
 	return "", errors.New("file not found")
 }
 
-// validatePathWithin returns an error when path escapes base.
-func validatePathWithin(path, base string) error {
-	rel, err := filepath.Rel(base, path)
+// mountRelPath turns a client-supplied path inside a mount, such as "/" or
+// "/etc/hosts", into a path relative to the mount root for use with [os.Root].
+// [os.Root], not this function, is what keeps the result inside the mount: it
+// refuses ".." elements and symlinks that resolve outside the root, which a
+// guest file system is free to contain.
+func mountRelPath(path string) string {
+	rel := strings.TrimPrefix(filepath.Clean("/"+path), "/")
+	if rel == "" {
+		return "."
+	}
+
+	return rel
+}
+
+// mountFileMode is the mode of files uploaded or copied into a VM mount.
+const mountFileMode = 0o600
+
+// openActiveMount opens the active mount at basePath as an [os.Root] and holds
+// the mount's read lock so it is not unmounted while in use. It answers the
+// request itself on failure. The caller must call release when done.
+func openActiveMount(w http.ResponseWriter, basePath string) (*os.Root, func(), bool) {
+	activeMountsMu.RLock()
+
+	mountInfo, exists := activeMounts[basePath]
+
+	activeMountsMu.RUnlock()
+
+	if !exists {
+		http.Error(w, "No existing mount for "+basePath, http.StatusBadRequest)
+
+		return nil, nil, false
+	}
+
+	mountInfo.lock.RLock()
+
+	root, err := os.OpenRoot(basePath)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		mountInfo.lock.RUnlock()
+		http.Error(w, "Error opening mount "+basePath+": "+err.Error(), http.StatusInternalServerError)
+
+		return nil, nil, false
 	}
 
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return errors.New("path is not within base")
-	}
+	return root, func() {
+		_ = root.Close()
 
-	return nil
+		mountInfo.lock.RUnlock()
+	}, true
 }

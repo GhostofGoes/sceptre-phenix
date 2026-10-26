@@ -82,6 +82,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **VM File Mounts**: Listing, downloading, uploading, and copying files in a mounted VM now go through an `os.Root` for the mount, which refuses `..` and symlinks that resolve outside it. Before, a symlink in the guest file system let any role with `vms/mount` `get` read, and with `patch` write, files anywhere on the phēnix host as the phēnix user, and `../<other-vm>` paths reached other mounted VMs because the check was a string prefix match. Uploads also reject a missing file instead of crashing and truncate the file they replace.
 - **Workflow configs**: `POST /api/v1/workflow/configs/{branch}` no longer exposes server environment variables in its errors to callers who may not write that config, and checks the role's config names when creating one. ([#436](https://github.com/sandialabs/sceptre-phenix/pull/436))
 
 ## [1.0.0]
