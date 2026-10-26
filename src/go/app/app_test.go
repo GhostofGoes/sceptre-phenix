@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -19,6 +20,7 @@ type stubApp struct {
 	err          error
 	configureErr error
 	calls        *[]app.Action
+	running      func(*types.Experiment)
 }
 
 func (a *stubApp) Init(...app.Option) error { return nil }
@@ -46,8 +48,13 @@ func (a *stubApp) PostStart(context.Context, *types.Experiment) error {
 	return nil
 }
 
-func (a *stubApp) Running(context.Context, *types.Experiment) error {
+func (a *stubApp) Running(_ context.Context, exp *types.Experiment) error {
 	a.record(app.ActionRunning)
+
+	if a.running != nil {
+		a.running(exp)
+	}
+
 	return a.err
 }
 
@@ -142,6 +149,126 @@ func TestApplyAppsRunningStageSuccess(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("expected no error from successful running stage, got: %v", err)
+	}
+}
+
+// appStage returns the stage field of the status.apps entry of the named app.
+func appStage(t *testing.T, status map[string]any, name string) any {
+	t.Helper()
+
+	entry, ok := status[name].(map[string]any)
+	if !ok {
+		t.Fatalf("status.apps.%s = %#v, want a map", name, status[name])
+	}
+
+	return entry["stage"]
+}
+
+// TestApplyAppsRunningStageStatus checks which status.apps entry a running
+// stage leaves, in memory and in the store, after ApplyApps reloads the
+// experiment: the one the app set, or the one the store holds.
+func TestApplyAppsRunningStageStatus(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		running func(t *testing.T, name string, exp *types.Experiment)
+		want    string
+	}{
+		{
+			name: "a status the app set is kept",
+			running: func(_ *testing.T, name string, exp *types.Experiment) {
+				exp.Status.SetAppStatus(name, map[string]any{"stage": "running"})
+			},
+			want: "running",
+		},
+		{
+			name: "a status the app changed in place is kept",
+			running: func(_ *testing.T, name string, exp *types.Experiment) {
+				exp.Status.AppStatus()[name].(map[string]any)["stage"] = "running" //nolint:forcetypeassert // the stored entry is a map
+			},
+			want: "running",
+		},
+		{
+			name: "a status the app wrote to the store is not overwritten",
+			running: func(t *testing.T, name string, exp *types.Experiment) {
+				t.Helper()
+
+				exp.Status.SetAppStatus(name, map[string]any{"stage": "stored"})
+
+				if err := exp.WriteToStore(true); err != nil {
+					t.Fatalf("writing the app's status to the store: %v", err)
+				}
+
+				// The app printed no status, so its entry is the one from before.
+				exp.Status.SetAppStatus(name, map[string]any{"stage": "post-start"})
+			},
+			want: "stored",
+		},
+		{
+			name: "a failed stage keeps the stored status",
+			err:  errors.New("checks failed"),
+			running: func(_ *testing.T, name string, exp *types.Experiment) {
+				exp.Status.SetAppStatus(name, map[string]any{"stage": "running"})
+			},
+			want: "post-start",
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := fmt.Sprintf("test-running-status-%d", i)
+
+			if err := app.RegisterUserApp(name, func() app.App {
+				return &stubApp{
+					name:    name,
+					err:     tc.err,
+					running: func(exp *types.Experiment) { tc.running(t, name, exp) },
+				}
+			}); err != nil {
+				t.Fatalf("registering user app: %v", err)
+			}
+
+			useBoltStore(t, store.Config{
+				Version:  "phenix.sandia.gov/v1",
+				Kind:     "Experiment",
+				Metadata: store.ConfigMetadata{Name: "running-status-test"},
+				Spec: map[string]any{
+					"experimentName": "running-status-test",
+					"scenario": map[string]any{
+						"apps": []map[string]any{{"name": name}},
+					},
+				},
+				Status: map[string]any{
+					"apps": map[string]any{name: map[string]any{"stage": "post-start"}},
+				},
+			})
+
+			exp := readExperiment(t, "running-status-test")
+
+			err := app.ApplyApps(
+				context.Background(),
+				exp,
+				app.Stage(app.ActionRunning),
+				app.FilterApp(name),
+			)
+			if (err != nil) != (tc.err != nil) {
+				t.Fatalf("ApplyApps returned %v, want an error: %t", err, tc.err != nil)
+			}
+
+			if got := appStage(t, exp.Status.AppStatus(), name); got != tc.want {
+				t.Errorf("status.apps.%s.stage = %v in memory, want %s", name, got, tc.want)
+			}
+
+			stored := readExperiment(t, "running-status-test")
+
+			if got := appStage(t, stored.Status.AppStatus(), name); got != tc.want {
+				t.Errorf("status.apps.%s.stage = %v in the store, want %s", name, got, tc.want)
+			}
+
+			if stored.Status.AppRunning()[name] {
+				t.Errorf("the store still records app %s as running", name)
+			}
+		})
 	}
 }
 

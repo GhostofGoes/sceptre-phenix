@@ -53,8 +53,7 @@ func (s *SOH) deployCapture(exp *types.Experiment, dryrun bool) error {
 		return nil
 	}
 
-	currentIP, mask, _ := net.ParseCIDR(s.md.PacketCapture.ElasticServer.IPAddress)
-	cidr, _ := mask.Mask.Size()
+	currentIP, cidr := s.md.elasticIP, s.md.elasticMask
 	svrAddr := currentIP.String()
 
 	var (

@@ -10,13 +10,13 @@ has a matching config-file key and `PHENIX_*` env var):
 
 | Flag | Config key / Env var | Default | Description |
 |---|---|---|---|
-| `--store.endpoint` | `store.endpoint` / `PHENIX_STORE_ENDPOINT` | `bolt:///etc/phenix/store.bdb` (root) or `bolt://~/.phenix.bdb` (non-root) | Data store endpoint (`bolt://...` or `etcd://host:port`) |
+| `--store.endpoint` | `store.endpoint` / `PHENIX_STORE_ENDPOINT` | `bolt:///etc/phenix/store.bdb` (root) or `bolt://$HOME/.phenix.bdb` (non-root; under `sudo phenix ...`, also through `setsid`, `nohup` or `env`, the invoking user's) | Data store endpoint (`bolt://...` or `etcd://host:port`) |
 | `--base-dir.phenix` | `base-dir.phenix` / `PHENIX_BASE_DIR_PHENIX` | `/phenix` | Base phēnix data directory |
 | `--base-dir.minimega` | `base-dir.minimega` / `PHENIX_BASE_DIR_MINIMEGA` | `/tmp/minimega` | Base minimega directory |
 | `--base-dir.injects` | `base-dir.injects` / `PHENIX_BASE_DIR_INJECTS` | `<base-dir.phenix>/injects` | Where `phenix workflow apply` stages `phenix-injects/` (as `<base-dir.injects>/<name>`). The server's value wins over the CLI's own unless the flag is given; see the `injects` step in [`workflow.md`](workflow.md). Use an absolute path |
 | `--base-dir.topologies` | `base-dir.topologies` / `PHENIX_BASE_DIR_TOPOLOGIES` | `<base-dir.phenix>/topologies` | Where `phenix workflow apply NAME` looks up a bare topology directory name. Use an absolute path |
 | `--mount-dir` | `mount-dir` / `PHENIX_MOUNT_DIR` | `<base-dir.phenix>/mounts` | Base directory for VM filesystem mounts (`phenix vm mount`, UI `vm-mount` feature) |
-| `--hostname-suffixes` | `hostname-suffixes` / `PHENIX_HOSTNAME_SUFFIXES` | `-minimega,-phenix` | Hostname suffixes to strip |
+| `--hostname-suffixes` | `hostname-suffixes` / `PHENIX_HOSTNAME_SUFFIXES` | `-minimega,-phenix` | Hostname suffixes stripped from the headnode name (snapshot names) and the names `GET /hosts` displays; schedulers, apps and `spec.schedules` use minimega's own host names |
 | `--log.level` | `log.level` / `PHENIX_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` — use `--log.level=debug` for verbose troubleshooting output |
 | `--log.console` | `log.console` / `PHENIX_LOG_CONSOLE` | `stderr` | Console log destination: `stderr`, `stdout`, or a file path |
 | `--log.system.path` | `log.system.path` / `PHENIX_LOG_SYSTEM_PATH` | `/var/log/phenix/phenix.log` | Persistent JSON system log path (used by UI) |
@@ -34,6 +34,13 @@ variable** (`PHENIX_*`) → **4. built-in default**. See
 [Settings & Configuration](https://phenix.sceptre.dev/latest/settings/) for the
 full settings reference, including UI-only settings (`ui.logs.level`,
 `ui.features`, `ui.file-server-endpoint`) not exposed as root-level CLI flags.
+
+phenix reads the first `config.*` it finds in the current directory, then
+`~/.config/phenix/` (a regular user, or the user who ran `sudo phenix ...`,
+also through `setsid`, `nohup` or `env`, as in `sudo setsid nohup phenix ui`),
+then `/etc/phenix/`. When there is none, it creates an empty `config.yaml` to
+watch: in `/etc/phenix/` when it runs as root, `sudo` included, and in
+`~/.config/phenix/` otherwise.
 
 `phenix ui --features vm-mount` (equivalently `ui.features: vm-mount` in
 `config.yaml`, or `PHENIX_UI_FEATURES=vm-mount`) enables the optional
@@ -80,18 +87,40 @@ YAML/JSON file (in which case it's auto-created as a config first).
 
 `start all` starts every stopped experiment. `--dry-run` (also on `restart`)
 does everything except call out to minimega, which isolates config and
-scheduling problems from minimega problems. `--honor-run-periodically` keeps
+scheduling problems from minimega problems. A dry-run experiment counts as
+running for `stop`, `delete` and `reconfigure`, but `start <name>` starts it
+again, with or without `--dry-run`, as `POST /api/v1/experiments/{name}/start`
+does; `start all` leaves it alone. `--honor-run-periodically` keeps
 the process in the foreground re-running `running` stages on their
 `runPeriodically` interval.
+
+`start` returns once every `timer` and `c2` delayed VM has started and the
+post-start apps have run. The experiment is reported running while it waits,
+so `phenix experiment stop` works; if a delayed VM fails to start, a
+post-start app fails, or the command is interrupted with Ctrl-C, `start` stops
+the experiment (cleanup apps included) and exits nonzero. A stop from another
+process ends the waits of `start`, and of a start through `phenix ui`, at
+their next check without starting the delayed VMs, and skips the post-start
+apps not yet run; the start never stores the experiment running again or tears
+down a run started since, and `start` exits nonzero with
+`experiment <name> was stopped while it was starting`. Likewise, a `stop` that
+finds, once its SCORCH runs have ended, that another process stopped the
+experiment or started it again leaves that run alone and exits nonzero with
+`experiment <name>: experiment was stopped or started again while it was
+stopping: stored start time "<time>", read "<time>"` (the start time stored
+now and the one the stop read; an empty one means stopped).
 
 `trigger` takes the lifecycle stage as its first argument; each stage has a
 shorthand: `configure` (`config`), `pre-start` (`pre`), `post-start` (`post`),
 `running` (`run`), `cleanup` (`clean`). Passing `all` instead of an experiment
 name triggers the stage in every experiment, and passing no app names triggers
 every app. The `running` stage is skipped for stopped experiments. Triggering
+the `running` stage of the `scorch` app executes SCORCH run 0, as
+`phenix experiment scorch <exp>` does, and is skipped while a SCORCH run
+executes. Triggering
 `configure` is not equivalent to `phenix experiment reconfigure`: it does not
-validate the experiment config, run config hooks, reset the minimega bridge, or
-guard against running experiments.
+validate the experiment config, run config hooks, or guard against running
+experiments.
 
 ```bash
 phenix experiment trigger running my-exp             # every app's running stage
@@ -121,7 +150,9 @@ phenix vm info <exp> [vm]                            # table of VM(s)
 phenix vm pause|resume|restart|shutdown|kill <exp> [vm]
 phenix vm reset-disk <exp> [vm]
 phenix vm redeploy <exp> [vm] [-c <cpus>] [-m <MB>] [-d <disk image>] [-p <partition>] \
-  [-r|--replicate-injects]                           # -r recreates the disk snapshot and injections
+  [-r|--replicate-injects]                           # -r recreates the disk snapshot, injections and deletions
+                                                     # (snapshot: true nodes only; refused for others);
+                                                     # -c/-m default to the VM's current size
 phenix vm set <exp> [vm] [-c|--cpu <n>] [-m|--mem <MB>] [-d|--disk <image>] [-p|--partition <n>] \
   [--do-not-boot] [--snapshot] [-L key=value ...] [--append-labels]
 phenix vm net connect <exp> <vm> <iface index> <vlan id>
@@ -131,15 +162,56 @@ phenix vm capture start-subnet <exp> <subnet>
 phenix vm capture stop <exp> <vm>
 phenix vm capture stop-subnet <exp> <subnet>
 phenix vm capture stop-all <exp>
-phenix vm memory-snapshot <exp> <vm> <path>
+phenix vm memory-snapshot <exp> <vm> <name>          # writes <name>.elf to the experiment files
 phenix vm mount <exp> <vm> [host path]               # mount a running VM's filesystem on the headnode
 phenix vm unmount <exp> <vm>
 ```
 
+A `vm set` disk (`-d`, or `disk` in the REST PATCH body) must be an image a
+redeploy accepts, without the `,<interface>` and `,<cache mode>` options
+(REST: 400). A redeploy disk (`-d`, or `disk` in the REST body) is
+`<image>[,<interface>][,<cache mode>]` and must name a disk of a node in the
+topology, or an image directly in minimega's files directory (no
+subdirectory, no `*_snapshot` disk snapshot), written with letters, digits,
+`.`, `_`, `+`, `-` and `/` only and without `..`; any other disk is refused
+(REST: 400). A VM with `snapshot: false` writes its disk, so it may run only
+on a disk the topology gave a node: `vm set` refuses a disk change or
+`--snapshot=false` that would leave it on any other image, and a redeploy of
+such a VM refuses any other disk (REST: 400). The topology's disk of a VM
+whose disk `vm set` replaced is kept in the node annotation
+`phenix/topology-disk`.
+
+Snapshot, capture and memory snapshot names may hold only letters, digits,
+`.`, `_` and `-`, start with a letter or digit, hold no `..`, and are at most
+128 characters long: they reach
+minimega `shell` commands and QEMU's `exec:` migration URI. Other names are
+refused (REST: 400); a capture uses only the base name of its output file.
+
 `phenix vm mount` mounts to `<mount-dir>/<experiment>/<vm>` unless an explicit
-host path is given, and prints the resulting mount path; `<mount-dir>` comes
+host path is given, and prints the resulting mount path. It fails for a VM
+already mounted at another path, and for a path holding characters other than
+letters, digits, `.`, `_`, `+`, `-` and `/`; `<mount-dir>` comes
 from the `--mount-dir` root flag (`PHENIX_MOUNT_DIR`), defaulting to
-`<base-dir.phenix>/mounts`.
+`<base-dir.phenix>/mounts`. The UI's `/files` routes (`vm-mount` feature) serve
+any VM with a 9p mount at that default path, whichever process mounted it;
+`DELETE .../unmount` unmounts only a VM that `POST .../mount` was called for in
+the same UI process.
+
+The commands that act on VMs in minimega refuse a stopped or dry-run
+experiment before they reach minimega, which would otherwise create the
+experiment's namespace again. `pause`, `resume`, `restart`, `shutdown`, `kill`,
+`reset-disk`, `redeploy`, `net`, `capture stop`, `memory-snapshot` and `unmount`
+fail with `experiment not running: <exp>` (`... <exp> is a dry run`). The
+REST VM start, stop and redeploy routes, `POST` and `DELETE .../captures`,
+`POST .../snapshots`, the restore route (`POST .../snapshots/{snapshot}`),
+the subnet capture routes (`POST .../captureSubnet` and
+`POST .../stopCaptureSubnet`) and the VNC websocket (`.../vnc/ws`) answer
+400 with that message, and 404 for an experiment that does not exist.
+`GET .../captures` and `GET .../snapshots` answer 200 for a stopped or
+dry-run experiment, the captures list empty. `DELETE .../vms/{name}` answers
+400 with a bare `experiment not running`, and 400 for a missing experiment
+too. The VNC page (`GET .../vnc`) is served whether or not the experiment
+runs; only its websocket refuses.
 
 ### Targeting VMs by label
 
@@ -159,7 +231,11 @@ phenix vm restart my-exp --label all
 Labels are written with `phenix vm set --label-changes/-L key=value` (repeatable);
 `--append-labels` merges them into the VM's existing labels rather than
 replacing the set. Labels are the only VM setting that can be changed while an
-experiment is running.
+experiment is running. On a running VM, a label whose key or value is empty,
+holds a non-printable character other than a tab or line break, or holds `"`,
+`'`, `\` or `#` without whitespace (such as `a"b` or `it's`) is refused with
+`label "<key>" of VM <vm>: ...: minimega cannot store this label of a running VM`
+(400 over REST), because minimega would exit or change it.
 
 ```bash
 phenix vm set my-exp node1 -L role=web -L site=east --append-labels
@@ -195,14 +271,35 @@ build troubleshooting, read the sibling
 ```bash
 phenix vlan alias [exp]                          # list VLAN aliases (all experiments, or one)
 phenix vlan alias <exp> <alias name>             # print the alias's VLAN ID (e.g. `105`)
-phenix vlan alias <exp> <alias name> <vlan id>   # set an alias (-f to overwrite)
-phenix vlan range <exp> <range min> <range max>  # view or set the VLAN pool range
+phenix vlan alias <exp> <alias name> <vlan id>   # set an alias (-f to re-pin a pinned alias)
+phenix vlan range <exp> <range min> <range max>  # view or set the experiment's VLAN range; -f replaces a set range
 ```
+
+minimega assigns an experiment's VLAN IDs from its range's min up to, but not
+including, its max, so 300-310 gives VLAN IDs 300 to 309. Set both ends, or
+neither (`0`) to use minimega's default pool (its `-vlanrange`, VLAN IDs 101
+to 4095 by default). `phenix experiment create` and `start` (`--vlan-min`,
+`--vlan-max`), `phenix config create` and `edit` (`spec.vlans.min`,
+`spec.vlans.max`), `phenix vlan range` and `phenix workflow apply`
+(`vlanRange`) refuse a min outside 1-4095, a max outside 2-4096, a min that
+is not below the max, and a range with only one end set, such as `max VLAN ID
+is unset while min VLAN ID is 300; set both ends of the VLAN range, or
+neither`. `phenix vlan alias`, and `PATCH /api/v1/experiments/{name}`, the
+Web-UI's VLAN assignment, refuse to pin a VLAN ID outside 1-4095 or outside
+the range, such as the max itself, and `phenix vlan range` refuses a range
+that leaves out a pinned VLAN ID.
+
+While the experiment runs, minimega reserves its range: the default pool skips
+it, and a start of another experiment whose range overlaps it fails with
+`range overlaps with another namespace: <experiment>`. minimega counts the max
+of the range being set as part of it, so ranges that share an end, such as
+300-310 and 310-320, collide when the higher one starts first; leave a gap,
+such as 300-310 and 311-320.
 
 ## Other subcommands
 
 ```bash
-phenix mm <minimega args>...     # pass raw commands to (or attach to) minimega
+phenix mm <minimega args>...     # pass raw commands to (or attach to) minimega; exits nonzero on minimega errors
 phenix settings list|get|set|unset [key] [value]
 phenix settings db ...            # legacy BoltDB-backed settings
 phenix ui                         # run the phenix web UI/API server
@@ -220,4 +317,5 @@ argument; everything after it is passed to minimega unchanged, so
 for minimega as needed; a single argument is sent as-is, so
 `phenix mm -n my-exp "vm info"` passes a whole minimega command line. The
 command exits non-zero, and logs the error, when minimega reports an error or
-the connection to minimega is lost, so scripts can check its exit status.
+the connection to minimega is lost, so scripts can check its exit status;
+`phenix mm quit` exits 0, although minimega shuts down without answering.

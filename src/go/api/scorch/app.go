@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/activeshadow/structs"
@@ -26,6 +28,7 @@ import (
 	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
 	"phenix/util/shell"
+	"phenix/util/tap"
 	"phenix/version"
 	"phenix/web/scorch"
 )
@@ -41,6 +44,7 @@ const (
 	filebeatScanDelay    = 7 * time.Second
 	filebeatMaxHarvest   = 5 * time.Minute
 	filebeatHarvestTick  = 5 * time.Second
+	filebeatStopDelay    = 10 * time.Second
 )
 
 func init() { //nolint:gochecknoinits // app registration
@@ -83,6 +87,10 @@ func (Scorch) Configure(ctx context.Context, exp *types.Experiment) error {
 		return fmt.Errorf("decoding app metadata: %w", err)
 	}
 
+	if err := md.Validate(); err != nil {
+		return err
+	}
+
 	// Ensure type is set for each component.
 	for idx, c := range md.Components {
 		if c.Type == "" {
@@ -112,15 +120,65 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 		return err
 	}
 
-	var (
-		runID  = scorchexe.MustRunID(ctx)
-		runDir = filepath.Join(exp.FilesDir(), "scorch", fmt.Sprintf("run-%d", runID))
-		start  = time.Now().UTC()
-	)
+	runID := scorchexe.MustRunID(ctx)
 
 	if runID < 0 || runID >= len(s.md.Runs) {
 		return fmt.Errorf("invalid Scorch run ID for experiment %s", exp.Metadata.Name)
 	}
+
+	// Experiments created before Configure validated the runs can still name
+	// undefined components.
+	if err := s.md.ValidateRun(runID); err != nil {
+		return err
+	}
+
+	// status.apps.scorch records the run and the taps its tap and break
+	// components create. Running sets it for each caller: scorchexe.Execute,
+	// and the app framework's running stage (`phenix experiment trigger
+	// running` and runPeriodically), which has no run ID and runs run 0.
+	// Only the record is stored, so what others stored since exp was read is
+	// kept.
+	if err := exp.UpdateStatus(func(status ifaces.ExperimentStatus) error {
+		status.SetAppStatus("scorch", scorchmd.ScorchStatus{RunID: runID, Taps: make(map[string]*tap.Tap)})
+
+		return nil
+	}); err != nil {
+		return fmt.Errorf(
+			"recording Scorch run %d in the status of experiment %s: %w",
+			runID,
+			exp.Metadata.Name,
+			err,
+		)
+	}
+
+	errs := s.run(ctx, exp, runID)
+
+	// Components such as soh write the experiment's status as they run, so
+	// only the run's record is cleared.
+	if err := exp.UpdateStatus(func(status ifaces.ExperimentStatus) error {
+		status.SetAppStatus("scorch", nil)
+
+		return nil
+	}); err != nil {
+		errs = multierror.Append(
+			errs,
+			fmt.Errorf("clearing Scorch status of experiment %s: %w", exp.Metadata.Name, err),
+		)
+	}
+
+	return errs
+}
+
+// run executes the given run once status.apps.scorch records it.
+func (s *Scorch) run(ctx context.Context, exp *types.Experiment, runID int) error {
+	// One teardown budget covers every loop count of the run.
+	ctx, release := withTeardown(ctx)
+	defer release()
+
+	var (
+		runDir = filepath.Join(exp.FilesDir(), "scorch", fmt.Sprintf("run-%d", runID))
+		start  = time.Now().UTC()
+	)
 
 	if err := os.RemoveAll(runDir); err != nil {
 		return fmt.Errorf("removing existing contents of run directory at %s: %w", runDir, err)
@@ -137,8 +195,10 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 			return fmt.Errorf("creating Filebeat config: %w", err)
 		}
 
+		// Filebeat outlives a cancel to ship what the stop and cleanup stages
+		// write, until the run's teardown budget runs out.
 		if inputs > 0 {
-			cmd, port, err = s.startFilebeat(ctx, runDir)
+			cmd, port, err = s.startFilebeat(teardownContext(ctx), runID, runDir)
 			if err != nil {
 				return fmt.Errorf("starting Filebeat: %w", err)
 			}
@@ -177,7 +237,7 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 	_ = scorch.UpdatePipeline(update)
 
 	if cmd != nil {
-		s.stopFilebeat(ctx, cmd, port)
+		s.stopFilebeat(teardownContext(ctx), cmd, port)
 	}
 
 	if err := s.recordInfo(runID, runDir, exp.Metadata, start); err != nil {
@@ -205,17 +265,19 @@ func (s *Scorch) Running(ctx context.Context, exp *types.Experiment) error {
 	return errors
 }
 
+// Cleanup leaves the record of a SCORCH run, status.apps.scorch, alone: a
+// cleanup stage triggered on a running experiment runs it while a run may
+// execute. The hook dropRunRecord drops the record once a stop is done.
 func (Scorch) Cleanup(context.Context, *types.Experiment) error {
 	return nil
 }
 
 func (s Scorch) startFilebeat(
 	ctx context.Context,
+	runID int,
 	runDir string,
 ) (*exec.Cmd, int, error) {
 	var (
-		cmd    *exec.Cmd
-		port   int
 		stdOut bytes.Buffer
 		stdErr bytes.Buffer
 	)
@@ -226,52 +288,71 @@ func (s Scorch) startFilebeat(
 	// it's running. Instead, call `cmd.Wait` in a Goroutine and use a channel or
 	// atomic int to determine later on if the command has finished.
 
-	if s.md.Filebeat.Enabled && shell.CommandExists("filebeat") {
-		var (
-			data = filepath.Join(runDir, "filebeat", "data")
-			cfg  = filepath.Join(runDir, "filebeat", "filebeat.yml")
+	// FilebeatEnabled honors a run-level filebeat setting, which overrides the
+	// global one.
+	if !s.md.FilebeatEnabled(runID) {
+		return nil, 0, nil
+	}
+
+	if !shell.CommandExists("filebeat") {
+		plog.Warn(
+			plog.TypePhenixApp,
+			"Filebeat is enabled for this Scorch run but filebeat is not in PATH; not starting it",
+			"app",
+			"scorch",
+			"run",
+			runID,
 		)
 
-		var err error
+		return nil, 0, nil
+	}
 
-		port, err = util.GetFreePort("127.0.0.1")
+	var (
+		data = filepath.Join(runDir, "filebeat", "data")
+		cfg  = filepath.Join(runDir, "filebeat", "filebeat.yml")
+	)
+
+	port, err := util.GetFreePort("127.0.0.1")
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"unable to determine free port for Filebeat httpprof: %w",
+			err,
+		)
+	}
+
+	// We include the httpprof server so we can query for running harvesters
+	// when stopping Filebeat below.
+	httpprof := fmt.Sprintf("127.0.0.1:%d", port)
+	cmd := exec.CommandContext(
+		ctx,
+		"filebeat",
+		"-c",
+		cfg,
+		"--path.data",
+		data,
+		"--httpprof",
+		httpprof,
+	)
+
+	cmd.Stdin = nil
+	cmd.Stdout = &stdOut
+	cmd.Stderr = &stdErr
+
+	// When ctx ends, let Filebeat shut down as stopFilebeat asks it to.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = filebeatStopDelay
+
+	if err := cmd.Start(); err != nil {
+		return nil, 0, err
+	}
+
+	// Give Filebeat time to start up or die.
+	time.Sleep(filebeatStartupDelay)
+
+	if !shell.ProcessExists(cmd.Process.Pid) {
+		err := cmd.Wait()
 		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"unable to determine free port for Filebeat httpprof: %w",
-				err,
-			)
-		}
-
-		// We include the httpprof server so we can query for running harvesters
-		// when stopping Filebeat below.
-		httpprof := fmt.Sprintf("127.0.0.1:%d", port)
-		cmd = exec.CommandContext(
-			ctx,
-			"filebeat",
-			"-c",
-			cfg,
-			"--path.data",
-			data,
-			"--httpprof",
-			httpprof,
-		)
-
-		cmd.Stdin = nil
-		cmd.Stdout = &stdOut
-		cmd.Stderr = &stdErr
-
-		if err := cmd.Start(); err != nil {
 			return nil, 0, err
-		}
-
-		// Give Filebeat time to start up or die.
-		time.Sleep(filebeatStartupDelay)
-
-		if !shell.ProcessExists(cmd.Process.Pid) {
-			err := cmd.Wait()
-			if err != nil {
-				return nil, 0, err
-			}
 		}
 	}
 
@@ -300,9 +381,12 @@ func (s Scorch) stopFilebeat(ctx context.Context, cmd *exec.Cmd, port int) {
 		return
 	}
 
-	// Sleeping for 7s here since we have Filebeat configured with a scan
+	// Waiting for 7s here since we have Filebeat configured with a scan
 	// frequency of 5s for inputs in the config file.
-	time.Sleep(filebeatScanDelay)
+	select {
+	case <-time.After(filebeatScanDelay):
+	case <-ctx.Done():
+	}
 
 	var (
 		maxTimer = time.NewTimer(filebeatMaxHarvest)
@@ -317,7 +401,8 @@ func (s Scorch) stopFilebeat(ctx context.Context, cmd *exec.Cmd, port int) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Signal(os.Interrupt)
+			// The end of ctx interrupted Filebeat (startFilebeat).
+			_ = cmd.Wait()
 
 			return
 		case <-maxTimer.C:
@@ -500,8 +585,122 @@ func (s Scorch) recordInfo(
 	return nil
 }
 
-//nolint:funlen,maintidx // complex logic
+// teardownTimeout bounds the stop and cleanup stages of a canceled run, from
+// the cancel, at every loop level together.
+var teardownTimeout = scorchexe.TeardownTimeout //nolint:gochecknoglobals // tests shorten it
+
+// errTeardownExpired is the failure of the stop and cleanup stages that
+// teardownTimeout ended.
+var errTeardownExpired = errors.New("the stop and cleanup stages of the canceled run ran out of time")
+
+type (
+	teardownKey struct{}
+	pipelineKey struct{}
+)
+
+// withTeardown returns ctx carrying the context that the stop and cleanup
+// stages of the run run under, unless ctx carries one already, and a function
+// that releases it. That context is not canceled with ctx, so those stages
+// release what configure and start set up even after a cancel, but it ends
+// teardownTimeout after ctx is canceled, before or during those stages, so a
+// hung component cannot hold up the run.
+func withTeardown(ctx context.Context) (context.Context, func()) {
+	if _, ok := ctx.Value(teardownKey{}).(context.Context); ok {
+		return ctx, func() {}
+	}
+
+	tctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+
+	var (
+		mu       sync.Mutex
+		released bool
+		timer    *time.Timer
+	)
+
+	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if !released {
+			timer = time.AfterFunc(teardownTimeout, func() { cancel(errTeardownExpired) })
+		}
+	})
+
+	release := func() {
+		stop()
+
+		mu.Lock()
+		released = true
+
+		if timer != nil {
+			timer.Stop()
+		}
+		mu.Unlock()
+
+		cancel(nil)
+	}
+
+	tctx = context.WithValue(tctx, pipelineKey{}, ctx)
+
+	return context.WithValue(ctx, teardownKey{}, tctx), release
+}
+
+// teardownContext returns the context that the stop and cleanup stages of
+// the run ctx belongs to run under.
+func teardownContext(ctx context.Context) context.Context {
+	if tctx, ok := ctx.Value(teardownKey{}).(context.Context); ok {
+		return tctx
+	}
+
+	return context.WithoutCancel(ctx)
+}
+
+// pipelineContext returns the context of the run that the context of one of
+// its stop or cleanup stages belongs to, which a cancel ends at once, and any
+// other context as is. Components that release nothing, such as pause and
+// break, run under it in every stage.
+func pipelineContext(ctx context.Context) context.Context {
+	if pctx, ok := ctx.Value(pipelineKey{}).(context.Context); ok {
+		return pctx
+	}
+
+	return ctx
+}
+
+// markCanceled records the error of a component that ran under a canceled
+// context as the context's error, whatever the component reported, such as
+// the exit status of a process the cancel terminated.
+func markCanceled(ctx context.Context, err error) error {
+	if ctx.Err() == nil || errors.Is(err, ctx.Err()) {
+		return err
+	}
+
+	// Only the context's error is wrapped, so the result reads as a cancel.
+	return fmt.Errorf("%w: %v", ctx.Err(), err) //nolint:errorlint // see above
+}
+
+// executor runs the given loop, then ends the stages it backgrounded that its
+// stop and cleanup stages did not end.
 func executor(
+	ctx context.Context,
+	components scorchmd.ComponentSpecMap,
+	exe *scorchmd.Loop,
+	opts ...Option,
+) error {
+	ctx, release := withTeardown(ctx)
+	defer release()
+
+	err := runLoop(ctx, components, exe, opts...)
+
+	if endErr := endBackgrounded(teardownContext(ctx), NewOptions(opts...)); endErr != nil {
+		err = multierror.Append(err, endErr)
+	}
+
+	return err
+}
+
+//nolint:funlen,maintidx // complex logic
+func runLoop(
 	ctx context.Context,
 	components scorchmd.ComponentSpecMap,
 	exe *scorchmd.Loop,
@@ -556,7 +755,7 @@ func executor(
 
 	logger.Info("starting scorch", "run", loopPrefix)
 
-	runStage := func(stage Action, names []string, failFast bool) error {
+	runStage := func(ctx context.Context, stage Action, names []string, failFast bool) error {
 		update.Stage = string(stage)
 
 		if len(names) == 0 {
@@ -600,6 +799,8 @@ func executor(
 
 			err := ExecuteComponent(ctx, cmpOpts...)
 			if err != nil {
+				err = markCanceled(ctx, err)
+
 				update.Status = statusFailure
 				scorch.UpdateComponent(update)
 				_ = scorch.UpdatePipeline(update)
@@ -646,10 +847,26 @@ func executor(
 		return errors
 	}
 
-	configure := func() error { return runStage(ActionConfigure, exe.Configure, true) }
-	start := func() error { return runStage(ActionStart, exe.Start, true) }
-	stop := func() error { return runStage(ActionStop, exe.Stop, false) }
-	cleanup := func() error { return runStage(ActionCleanup, exe.Cleanup, false) }
+	// Stop and cleanup run even when the pipeline was canceled: they release
+	// what configure and start set up (captures, QoS rules, taps, processes in
+	// guests). They get the run's teardown context, which a cancel does not
+	// end but bounds (withTeardown).
+	teardown := func(stage Action, names []string) error {
+		tctx := teardownContext(ctx)
+
+		err := runStage(tctx, stage, names, false)
+		if err != nil && errors.Is(context.Cause(tctx), errTeardownExpired) {
+			// Not wrapped, so the failure does not read as the cancel.
+			return fmt.Errorf("%w after %v: %v", errTeardownExpired, teardownTimeout, err) //nolint:errorlint // see above
+		}
+
+		return err
+	}
+
+	configure := func() error { return runStage(ctx, ActionConfigure, exe.Configure, true) }
+	start := func() error { return runStage(ctx, ActionStart, exe.Start, true) }
+	stop := func() error { return teardown(ActionStop, exe.Stop) }
+	cleanup := func() error { return teardown(ActionCleanup, exe.Cleanup) }
 
 	if err := configure(); err != nil {
 		errors := multierror.Append(nil, err)
@@ -727,6 +944,11 @@ func executor(
 		update.Status = statusSuccess
 
 		_ = scorch.UpdatePipeline(update)
+	}
+
+	// A run canceled during its stop or cleanup stage was still canceled.
+	if errors == nil {
+		errors = ctx.Err()
 	}
 
 	return errors

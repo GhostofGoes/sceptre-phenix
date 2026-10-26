@@ -3,8 +3,10 @@ package v1
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
+	"slices"
 
 	"github.com/activeshadow/structs"
 	"github.com/mitchellh/mapstructure"
@@ -56,30 +58,6 @@ func (v *VLANSpec) SetMin(m int) {
 
 func (v *VLANSpec) SetMax(m int) {
 	v.MaxF = m
-}
-
-func (v VLANSpec) Validate() error {
-	for k, val := range v.AliasesF {
-		if v.MinF != 0 && val < v.MinF {
-			return fmt.Errorf(
-				"topology VLAN %s (VLAN ID %d) is less than experiment min VLAN ID of %d",
-				k,
-				val,
-				v.MinF,
-			)
-		}
-
-		if v.MaxF != 0 && val > v.MaxF {
-			return fmt.Errorf(
-				"topology VLAN %s (VLAN ID %d) is greater than experiment min VLAN ID of %d",
-				k,
-				val,
-				v.MaxF,
-			)
-		}
-	}
-
-	return nil
 }
 
 type ExperimentSpec struct {
@@ -138,6 +116,19 @@ func (e *ExperimentSpec) Init() error {
 					e.VLANsF.AliasesF[i.VLANF] = 0
 				}
 			}
+		}
+	}
+
+	// The minimega script writes VLAN aliases and schedule hosts unquoted.
+	for _, alias := range slices.Sorted(maps.Keys(e.VLANsF.AliasesF)) {
+		if err := CheckScriptWord("VLAN alias", alias); err != nil {
+			return err
+		}
+	}
+
+	for _, node := range slices.Sorted(maps.Keys(e.SchedulesF)) {
+		if err := CheckScriptWord("schedule host of node "+node, e.SchedulesF[node]); err != nil {
+			return err
 		}
 	}
 
@@ -212,23 +203,36 @@ func (e ExperimentSpec) UseGREMesh() bool {
 	return e.UseGREMeshF
 }
 
+// maxVLANID is the highest VLAN ID minimega takes.
+const maxVLANID = 4095
+
+// SetVLANAlias pins the VLAN alias a to the VLAN ID i, which must be one
+// minimega takes and, when the experiment has a VLAN range, one the range
+// holds. Unless f is set, it refuses an alias already pinned.
 func (e *ExperimentSpec) SetVLANAlias(a string, i int, f bool) error {
 	if e.VLANsF == nil {
 		e.VLANsF = &VLANSpec{AliasesF: make(map[string]int)} //nolint:exhaustruct // partial initialization
 	}
 
-	_, ok := e.VLANsF.AliasesF[a]
-	if ok && !f {
+	// Init adds every topology VLAN with ID 0, which leaves the choice to
+	// minimega, so only a nonzero ID is an alias that already exists.
+	if id := e.VLANsF.AliasesF[a]; id != 0 && !f {
 		return fmt.Errorf("vlan alias %s already exists for experiment %s", a, e.ExperimentNameF)
+	}
+
+	// minimega takes VLAN IDs 1-4095.
+	if i < 1 || i > maxVLANID {
+		return fmt.Errorf("vlan ID %d is outside 1-%d", i, maxVLANID)
 	}
 
 	if e.VLANsF.MinF != 0 && i < e.VLANsF.MinF {
 		return fmt.Errorf("vlan ID %d is less than experiment min VLAN ID of %d", i, e.VLANsF.MinF)
 	}
 
-	if e.VLANsF.MaxF != 0 && i > e.VLANsF.MaxF {
+	// minimega assigns a range's VLAN IDs below its max, never the max.
+	if e.VLANsF.MaxF != 0 && i >= e.VLANsF.MaxF {
 		return fmt.Errorf(
-			"vlan ID %d is greater than experiment max VLAN ID of %d",
+			"vlan ID %d is at or above experiment max VLAN ID of %d",
 			i,
 			e.VLANsF.MaxF,
 		)
@@ -254,6 +258,10 @@ func (e *ExperimentSpec) SetVLANRange(minVal, maxVal int, f bool) error {
 	}
 
 	for k, v := range e.VLANsF.AliasesF {
+		if v == 0 { // not pinned yet, so minimega picks it from the range
+			continue
+		}
+
 		if minVal != 0 && v < minVal {
 			return fmt.Errorf(
 				"topology VLAN %s (VLAN ID %d) is less than proposed experiment min VLAN ID of %d",
@@ -263,9 +271,10 @@ func (e *ExperimentSpec) SetVLANRange(minVal, maxVal int, f bool) error {
 			)
 		}
 
-		if maxVal != 0 && v > maxVal {
+		// minimega assigns a range's VLAN IDs below its max, never the max.
+		if maxVal != 0 && v >= maxVal {
 			return fmt.Errorf(
-				"topology VLAN %s (VLAN ID %d) is greater than proposed experiment min VLAN ID of %d",
+				"topology VLAN %s (VLAN ID %d) is at or above proposed experiment max VLAN ID of %d",
 				k,
 				v,
 				maxVal,

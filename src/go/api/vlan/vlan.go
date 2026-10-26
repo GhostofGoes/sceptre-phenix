@@ -181,7 +181,8 @@ func Ranges(opts ...Option) (map[string][2]int, error) {
 }
 
 // SetRange sets the VLAN range for the given experiment. It returns an error if
-// the given range is not in ascending order (ie. if min > max).
+// either end is missing or the range is one [experiment.CheckVLANRange]
+// refuses, such as one whose min is not less than its max (ie. if min >= max).
 func SetRange(opts ...Option) error {
 	o := newOptions(opts...)
 
@@ -197,8 +198,8 @@ func SetRange(opts ...Option) error {
 		return errors.New("no VLAN max ID provided")
 	}
 
-	if o.min > o.max {
-		return errors.New("min VLAN ID must not be greater than max VLAN ID")
+	if err := experiment.CheckVLANRange(o.min, o.max); err != nil {
+		return err
 	}
 
 	exp, err := experiment.Get(o.exp)

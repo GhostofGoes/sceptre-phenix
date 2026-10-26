@@ -382,6 +382,7 @@
   import { useTable } from '@/utils/useTable.js';
   import { roleAllowed } from '@/utils/rbac.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { reloadsExperiments } from '@/utils/experimentEvents.js';
 
   export default {
     mixins: [formattingMixin],
@@ -464,6 +465,12 @@
       handleWs(msg) {
         // We only care about publishes pertaining to an experiment resource.
         if (msg.resource.type != 'experiment') {
+          return;
+        }
+
+        if (reloadsExperiments(msg.resource.action)) {
+          this.updateExperiments();
+
           return;
         }
 

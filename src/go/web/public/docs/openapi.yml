@@ -16,7 +16,12 @@ tags:
   - name: Experiments
     description: Experiments details and controls
   - name: Virtual Machines
-    description: Experiment VM details and controls
+    description: >
+      Experiment VM details and controls. Every route of an experiment's VMs
+      answers 400 for a VM name that minimega cannot take as one command
+      argument, or would read as a list (a,b), a range (vm[1-3]), a VM ID (a
+      number) or its wildcard `all`, and 409 while phenix ui stops the
+      experiment.
   - name: Hosts
     description: Cluster host details
   - name: Applications
@@ -165,6 +170,9 @@ paths:
       description: >
         Can also be used to rename a config by changing the name in the metadata
         portion of the config header and using the old name in the request path.
+        A rename needs the configs create and update permissions on the new
+        name and the configs delete permission on the old one; the kind cannot
+        change.
       operationId: putConfigsKindName
       parameters:
         - name: kind
@@ -208,7 +216,8 @@ paths:
         "400":
           description: >
             unknown content type or file extension, a config that does not exist,
-            an unknown kind, a schema validation failure (explained lines in
+            an unknown kind, a body of another kind than the path, a schema
+            validation failure (explained lines in
             metadata.validation, original validator text in
             metadata.validation-raw), or a config hook or the store rejects the
             config; for an Experiment config, also a failure to reconfigure the
@@ -218,7 +227,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: updating the config is not allowed
+          description: updating the config, or renaming it to the body's name, is not allowed
           content:
             application/json:
               schema:
@@ -390,8 +399,15 @@ paths:
                     type: string
                 vlan_min:
                   type: integer
+                  description: >-
+                    The VLAN range's min, the first VLAN ID minimega may assign,
+                    1-4095; set it with vlan_max, or leave both 0 for minimega's
+                    default pool.
                 vlan_max:
                   type: integer
+                  description: >-
+                    The VLAN range's max, 2-4096 and above vlan_min; minimega
+                    assigns VLAN IDs below it, never the max itself.
       responses:
         "200":
           description: successful operation
@@ -399,6 +415,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Experiment"
+        "400":
+          description: >
+            the experiment cannot be created, for example for a refused VLAN
+            range, an unknown topology or an invalid name
+        "403":
+          description: creating the experiment is not allowed
+        "409":
+          description: an experiment of the name is being created
+        "500":
+          description: the request cannot be read or parsed
   "/experiments/{name}":
     get:
       tags:
@@ -442,6 +468,44 @@ paths:
       responses:
         "204":
           description: successful operation
+    patch:
+      tags:
+        - Experiments
+      summary: Set the VLAN IDs of the VLAN aliases of a stopped experiment
+      description: >-
+        The body maps VLAN aliases the experiment has to VLAN IDs; aliases it
+        does not have are ignored. An ID of 0 lets minimega choose the
+        alias's VLAN ID again. Any other ID must be 1-4095 and, when the
+        experiment has a VLAN range, from its min up to, but not including,
+        its max, as `phenix vlan set` requires.
+      operationId: patchExperimentsName
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment to update
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: integer
+              example:
+                EXP: 101
+      responses:
+        "200":
+          description: successful operation
+        "400":
+          description: the experiment is running, or a VLAN ID is refused
+        "403":
+          description: the user may not update the experiment
+        "500":
+          description: >-
+            the experiment cannot be read or stored, or the body is not a JSON
+            object of VLAN IDs
   "/experiments/{name}/start":
     post:
       tags:
@@ -597,6 +661,14 @@ paths:
           required: true
           schema:
             type: string
+        - name: path
+          in: query
+          description: >
+            path of the file in the experiment's files directory, which may
+            name a subdirectory; defaults to the filename
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: successful operation
@@ -605,6 +677,217 @@ paths:
               schema:
                 type: string
                 format: binary
+        "400":
+          description: the file is a packet capture still in progress
+        "500":
+          description: the file cannot be read
+  "/experiments/{exp_name}/netflow":
+    get:
+      tags:
+        - Experiments
+      summary: Check whether the experiment captures netflow
+      description: ""
+      operationId: getExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: the experiment captures netflow
+        "404":
+          description: the experiment captures no netflow
+    post:
+      tags:
+        - Experiments
+      summary: Start capturing the experiment's netflow
+      description: ""
+      operationId: postExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: successful operation
+        "400":
+          description: the experiment does not exist, or already captures netflow
+        "409":
+          description: >
+            the experiment is stopped or a dry run, or its default bridge is
+            phenix
+        "500":
+          description: the capture cannot start
+    delete:
+      tags:
+        - Experiments
+      summary: Stop capturing the experiment's netflow
+      description: ""
+      operationId: deleteExperimentsNameNetflow
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: successful operation
+        "404":
+          description: the experiment captures no netflow
+        "500":
+          description: the capture cannot stop
+  "/experiments/{exp_name}/netflow/ws":
+    get:
+      tags:
+        - Experiments
+      summary: Stream the experiment's netflow records over a WebSocket
+      description: ""
+      operationId: getExperimentsNameNetflowWs
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "101":
+          description: switching protocols
+        "404":
+          description: the experiment captures no netflow
+  "/experiments/{name}/scorch/pipelines":
+    get:
+      tags:
+        - Experiments
+      summary: Get the SCORCH pipelines of the experiment and the run executing
+      description: ""
+      operationId: getExperimentsNameScorchPipelines
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            the pipelines, one per run and loop, and the ID of the run
+            executing, or -1
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipelines:
+                    type: array
+                    items:
+                      type: object
+                  running:
+                    type: integer
+        "400":
+          description: the experiment does not exist
+        "500":
+          description: the experiment's SCORCH configuration cannot be read
+  "/experiments/{name}/scorch/pipelines/{run}/{loop}":
+    get:
+      tags:
+        - Experiments
+      summary: Get the SCORCH pipeline of a run and loop
+      description: ""
+      operationId: getExperimentsNameScorchPipelinesRunLoop
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run
+          required: true
+          schema:
+            type: integer
+        - name: loop
+          in: path
+          description: index of the loop of the run
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: the run or loop is not a number, or has no pipeline
+  "/experiments/{name}/scorch/pipelines/{run}":
+    post:
+      tags:
+        - Experiments
+      summary: Start a SCORCH run
+      description: ""
+      operationId: postExperimentsNameScorchPipelinesRun
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run to start
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: the run started
+        "400":
+          description: >
+            the run is not a number, the experiment does not exist, or the
+            run cannot start, for example because the experiment is not
+            running or has no such run
+        "409":
+          description: >
+            a run of the experiment already executes, or the experiment is
+            stopping
+    delete:
+      tags:
+        - Experiments
+      summary: Cancel a SCORCH run, which then runs its stop and cleanup stages
+      description: ""
+      operationId: deleteExperimentsNameScorchPipelinesRun
+      parameters:
+        - name: name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: run
+          in: path
+          description: index of the SCORCH run to cancel
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: successful operation, also when the run does not execute
+        "400":
+          description: the run is not a number
   "/experiments/{exp_name}/vms":
     get:
       tags:
@@ -632,6 +915,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VMs"
+        "400":
+          description: the experiment does not exist
+        "500":
+          description: the VMs of a running experiment cannot be read from minimega, for example while it is down
+          content:
+            text/plain:
+              schema:
+                type: string
   "/experiments/{exp_name}/vms/{vm_name}":
     get:
       tags:
@@ -694,21 +985,59 @@ paths:
               properties:
                 host:
                   type: string
+                  description: >
+                    the cluster host to schedule the VM on, by the name GET
+                    /hosts lists, which is mapped to the name minimega gives
+                    the host, or by minimega's name; a name of no cluster
+                    host is refused, and empty clears the schedule
                 cpus:
                   type: integer
                 ram:
                   type: integer
                 disk:
                   type: string
+                  description: >
+                    the image the VM boots from, of a stopped experiment: a
+                    disk of a node in the topology, or an image directly in
+                    minimega's files directory that is not a disk snapshot
+                    phenix made at start (a name ending in _snapshot); with
+                    snapshot false, only a disk the topology gave a node
                 dnb:
                   type: boolean
+                snapshot:
+                  type: boolean
+                  description: >
+                    whether the VM boots a throwaway snapshot of its disk; a VM
+                    with false writes its disk, so false needs a disk the
+                    topology gave a node, not one only a disk change picked
                 interface:
                   type: object
+                  description: >
+                    the interface to connect to another VLAN, only while the
+                    experiment runs; a stopped experiment ignores it
                   properties:
                     index:
                       type: integer
                     vlan:
-                      type: integer
+                      type: string
+                      description: >
+                        the VLAN alias or ID to connect the interface to, as
+                        minimega takes it; empty disconnects the interface
+                tags:
+                  type: object
+                  description: the VM's labels, which tag_update_mode applies
+                  additionalProperties:
+                    type: string
+                tag_update_mode:
+                  type: string
+                  description: >
+                    NONE leaves the labels as they are, SET replaces them with
+                    tags, and ADD adds tags to them, replacing labels of the
+                    same key
+                  enum:
+                    - NONE
+                    - SET
+                    - ADD
       responses:
         "200":
           description: successful operation
@@ -716,6 +1045,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VM"
+        "400":
+          description: >
+            invalid request body, a host that names no cluster host or
+            several, a label of a running VM that minimega cannot store as a
+            tag, an interface VLAN or the experiment's default bridge that
+            minimega cannot take as one argument, or a disk that is neither a
+            topology disk nor directly in minimega's files directory, is a
+            disk snapshot, is not a plain path, or is not a disk the topology
+            gave a node while the VM would have snapshot false
+        "500":
+          description: >
+            the host cannot be looked up in minimega, or the VM cannot be
+            updated, for example because it is no node of the topology or a
+            disk is given for a node without one
     delete:
       tags:
         - Virtual Machines
@@ -723,7 +1066,7 @@ paths:
       description: ""
       operationId: deleteExperimentsNameVmsName
       parameters:
-        - name: name
+        - name: exp_name
           in: path
           description: name of phenix experiment
           required: true
@@ -738,6 +1081,10 @@ paths:
       responses:
         "204":
           description: successful operation
+        "400":
+          description: >
+            the experiment does not exist, is stopped, or is a dry run, or
+            minimega runs no VM of the name
   "/experiments/{exp_name}/vms/{vm_name}/start":
     post:
       tags:
@@ -765,6 +1112,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VM"
+        "400":
+          description: the experiment is stopped or is a dry run, or minimega runs no VM of the name
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: the VM is locked by another operation
   "/experiments/{exp_name}/vms/{vm_name}/stop":
     post:
       tags:
@@ -792,6 +1145,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VM"
+        "400":
+          description: the experiment is stopped or is a dry run, or minimega runs no VM of the name
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: the VM is locked by another operation
   "/experiments/{exp_name}/vms/{vm_name}/redeploy":
     post:
       tags:
@@ -812,6 +1171,44 @@ paths:
           required: true
           schema:
             type: string
+        - name: replicate-injects
+          in: query
+          description: >
+            for a request without a body, any value recreates the VM's disk
+            snapshot and replays its injections and deletions; a request with
+            a body sets injects instead, and this parameter is ignored
+          required: false
+          schema:
+            type: string
+      requestBody:
+        description: >
+          the settings to change; an empty body keeps the VM's CPUs, memory
+          and disk
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cpus:
+                  type: integer
+                ram:
+                  type: integer
+                disk:
+                  type: string
+                  description: >
+                    <image>[,<interface>][,<cache mode>], where the image is
+                    a disk of a node in the topology, or is directly in
+                    minimega's files directory and is not a disk snapshot
+                    phenix made at start (a name ending in _snapshot); for a
+                    VM with snapshot false, only a disk the topology gave a
+                    node
+                injects:
+                  type: boolean
+                  description: >
+                    recreate the VM's disk snapshot and replay its injections
+                    and deletions; replicate-injects does this for a request
+                    without a body
       responses:
         "200":
           description: successful operation
@@ -819,6 +1216,97 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VM"
+        "400":
+          description: >
+            the body is not valid; the experiment is stopped or is a dry run;
+            the VM is not a node of the topology or is external, or, when
+            replicating injections, has no disk or runs with snapshot false; or the
+            disk is neither a topology disk nor directly in minimega's files
+            directory, is a disk snapshot, is not a plain path, or, for a VM
+            with snapshot false, is not a disk the topology gave a node
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: the VM is locked by another operation
+        "500":
+          description: the redeploy failed
+  "/experiments/{exp_name}/vms/{vm_name}/cdrom":
+    post:
+      tags:
+        - Virtual Machines
+      summary: insert an optical disc into a running VM
+      description: >
+        Needs the vms/cdrom update permission. QEMU, running as root, attaches
+        the file the path names, so phenix accepts only the images a redeploy
+        disk may name.
+      operationId: postExperimentsNameVMsNameCdrom
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: vm_name
+          in: path
+          description: name of phenix VM to insert the disc into
+          required: true
+          schema:
+            type: string
+        - name: isoPath
+          in: query
+          description: >
+            the image to insert: a disk of a node in the topology, or an
+            image directly in minimega's files directory that is not a disk
+            snapshot phenix made at start (a name ending in _snapshot); a
+            relative path is in minimega's files directory
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: the disc was inserted
+        "400":
+          description: >
+            the experiment is stopped or is a dry run, or the path is neither
+            a topology disk nor directly in minimega's files directory, is a
+            disk snapshot, or is not a plain path
+        "403":
+          description: the role may not change the VM's optical disc
+        "404":
+          description: the experiment does not exist
+        "500":
+          description: no isoPath was given, or minimega did not insert the disc
+    delete:
+      tags:
+        - Virtual Machines
+      summary: eject the optical disc of a running VM
+      description: Needs the vms/cdrom delete permission.
+      operationId: deleteExperimentsNameVMsNameCdrom
+      parameters:
+        - name: exp_name
+          in: path
+          description: name of phenix experiment
+          required: true
+          schema:
+            type: string
+        - name: vm_name
+          in: path
+          description: name of phenix VM to eject the disc of
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: the disc was ejected
+        "400":
+          description: the experiment is stopped or is a dry run
+        "403":
+          description: the role may not eject the VM's optical disc
+        "404":
+          description: the experiment does not exist
+        "500":
+          description: minimega did not eject the disc
   "/experiments/{exp_name}/vms/{vm_name}/screenshot.png":
     get:
       tags:
@@ -841,10 +1329,14 @@ paths:
             type: string
         - name: size
           in: query
-          description: size of screenshot to grab
+          description: >
+            the screenshot's maximum dimension in pixels, which minimega
+            scales it to; 215 when not given
           required: false
           schema:
-            type: string
+            type: integer
+            minimum: 0
+            maximum: 4096
         - name: base64
           in: query
           description: whether or not to base64 encode the screenshot image
@@ -859,6 +1351,15 @@ paths:
               schema:
                 type: string
                 format: base64
+        "400":
+          description: >
+            VM not found, the size is not a whole number from 0 to 4096, the
+            experiment is stopped or a dry run, or minimega returned no
+            screenshot
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: VM is not running, for example paused or powered off
   "/experiments/{exp_name}/vms/{vm_name}/vnc/ws":
     get:
       tags:
@@ -882,6 +1383,14 @@ paths:
       responses:
         "101":
           description: switching protocols
+        "400":
+          description: >
+            the experiment is stopped or is a dry run, or minimega has no VNC
+            endpoint for the VM
+        "403":
+          description: the role may not get vms/vnc for the VM
+        "404":
+          description: the experiment does not exist
   "/experiments/{exp_name}/vms/{vm_name}/captures":
     get:
       tags:
@@ -940,9 +1449,25 @@ paths:
                   type: integer
                 filename:
                   type: string
+                  description: >
+                    only its base name is used, with a .pcap extension; that
+                    name, extension included, may hold only letters, digits,
+                    '.', '_' and '-', must start with a letter or digit, may
+                    not contain "..", and is at most 128 characters long
       responses:
         "204":
           description: successful operation
+        "400":
+          description: >
+            the capture file name is not a plain file name, the VM has no
+            interface of the index or it is disconnected, the VM is not a node
+            of the topology, or the experiment is stopped or is a dry run
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: the VM is not running, for example paused or powered off
+        "500":
+          description: minimega failed to start the capture
     delete:
       tags:
         - Virtual Machines
@@ -1021,9 +1546,26 @@ paths:
               properties:
                 filename:
                   type: string
+                  pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  maxLength: 128
+                  description: the snapshot name, which may not contain ".."
       responses:
         "204":
           description: successful operation
+        "400":
+          description: >
+            the request body or the snapshot name is invalid, the experiment
+            is stopped or is a dry run, the VM is not a node of the topology,
+            or the VM has no disk snapshot to save because it runs with
+            snapshot: false or has no disk, or it has more than one disk
+        "404":
+          description: the experiment does not exist
+        "409":
+          description: >
+            the VM is locked by another operation, or is not running, for
+            example paused or powered off
+        "500":
+          description: minimega failed to save the VM
   "/experiments/{exp_name}/vms/{vm_name}/snapshots/{snapshot}":
     post:
       tags:
@@ -1053,6 +1595,16 @@ paths:
       responses:
         "204":
           description: successful operation
+        "400":
+          description: >
+            the snapshot name is not a plain file name, or its .hdd disk is not
+            a qcow2 image without a data file whose backing chain runs through
+            snapshot disks of the experiment and the VM's disk snapshot to an
+            image a VM may be given
+        "500":
+          description: >
+            the snapshot does not exist, qemu-img cannot inspect its disk, or
+            minimega failed to restore the VM
   "/vms":
     get:
       tags:
@@ -1260,8 +1812,33 @@ paths:
       tags:
         - Disks
       summary: Get all available disk images
-      description: ""
+      description: >
+        The images directly in minimega's files directory and in the topology
+        of expName, or of every experiment, with their backing images.
       operationId: getDisks
+      parameters:
+        - name: expName
+          in: query
+          description: the experiment whose topology images are listed
+          required: false
+          schema:
+            type: string
+        - name: diskType
+          in: query
+          description: comma-separated kinds of image to list (VM, CONTAINER, ISO, UNKNOWN)
+          required: false
+          schema:
+            type: string
+        - name: assignable
+          in: query
+          description: >
+            true lists only the images a VM of expName may be given as a disk
+            or optical disc: the disks of its topology and the images directly
+            in minimega's files directory that are not disk snapshots, not the
+            backing images of those; it needs expName
+          required: false
+          schema:
+            type: string
       responses:
         "200":
           description: successful operation
@@ -1269,6 +1846,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Disks"
+        "400":
+          description: assignable is true without expName
+        "403":
+          description: the role may not list disks
+        "404":
+          description: assignable is true and the experiment does not exist
+        "500":
+          description: the images cannot be listed
   "/hosts":
     get:
       tags:
@@ -1283,6 +1868,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Hosts"
+        "500":
+          description: the cluster hosts cannot be read from minimega, for example while it is down
+          content:
+            text/plain:
+              schema:
+                type: string
   "/users":
     get:
       tags:
@@ -1959,6 +2550,12 @@ components:
       properties:
         name:
           type: string
+          description: >
+            the host's name without the configured hostname suffixes, such as
+            -minimega
+        minimega_name:
+          type: string
+          description: the name minimega gives the host, which VM schedules hold
         cpus:
           type: integer
         load:
@@ -2191,19 +2788,29 @@ components:
             vlanRange:
               type: object
               title: VLAN Range
-              description: The range of VLAN IDs the experiment may allocate from; unset leaves both ends unset.
+              description: >-
+                The experiment's VLAN range: minimega assigns its VLAN IDs from
+                min up to, but not including, max, and reserves the range for
+                the experiment while it runs, refusing to start another
+                experiment whose range overlaps it. Set both ends, or neither
+                to use minimega's default pool.
               nullable: true
               additionalProperties: false
               properties:
                 min:
                   type: integer
                   title: Minimum
-                  description: The lowest VLAN ID the experiment may use; 0 leaves the minimum unset.
+                  description: >-
+                    The first VLAN ID minimega may assign, 1-4095; set it with
+                    max, or leave both unset or 0.
                   nullable: true
                 max:
                   type: integer
                   title: Maximum
-                  description: The highest VLAN ID the experiment may use; 0 leaves the maximum unset.
+                  description: >-
+                    The end of the range, 2-4096 and above min; minimega assigns
+                    VLAN IDs below it, never the max itself. Set it with min, or
+                    leave both unset or 0.
                   nullable: true
             defaultBridge:
               type: string

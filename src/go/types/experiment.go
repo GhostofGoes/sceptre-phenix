@@ -66,31 +66,116 @@ func (e *Experiment) Reload() error {
 	return nil
 }
 
+// ErrExperimentRunChanged reports that the stored experiment was stopped, or
+// started again, since the copy being written was read.
+var ErrExperimentRunChanged = errors.New("experiment was stopped or started again")
+
+// WriteToStore stores the experiment's annotations and status, and its spec
+// unless statusOnly is set. Only a start and a stop change an experiment's
+// start time, so a copy read before the experiment was stopped, or started
+// again, would write an ended run back: the write is then refused with an
+// error wrapping ErrExperimentRunChanged.
 func (e Experiment) WriteToStore(statusOnly bool) error {
+	return e.write(!statusOnly, true)
+}
+
+// WriteSpecToStore stores the experiment's annotations and spec, and leaves
+// its stored status alone: what apps stored since e was read, such as another
+// app's status or running flag, is kept. Like WriteToStore, it refuses a run
+// other than the one e was read for.
+func (e Experiment) WriteSpecToStore() error {
+	return e.write(true, false)
+}
+
+func (e Experiment) write(spec, status bool) error {
 	name := e.Metadata.Name
 
 	c, _ := store.NewConfig("experiment/" + name)
 
-	err := store.Get(c)
+	err := store.Modify(c, func(c *store.Config) error {
+		stored, _ := c.Status["startTime"].(string)
+
+		if read := e.StartTime(); stored != read {
+			return fmt.Errorf(
+				"%w since it was read: stored start time %q, read %q",
+				ErrExperimentRunChanged,
+				stored,
+				read,
+			)
+		}
+
+		// limit metadata updates to annotations so name doesn't accidentally get changed
+		c.Metadata.Annotations = e.Metadata.Annotations
+
+		if spec {
+			c.Spec = structs.MapDefaultCase(e.Spec, structs.CASESNAKE)
+		}
+
+		if status {
+			c.Status = structs.MapDefaultCase(e.Status, structs.CASESNAKE)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("getting experiment %s from store: %w", name, err)
-	}
-
-	// limit metadata updates to annotations so name doesn't accidentally get changed
-	c.Metadata.Annotations = e.Metadata.Annotations
-
-	if !statusOnly {
-		c.Spec = structs.MapDefaultCase(e.Spec, structs.CASESNAKE)
-	}
-
-	c.Status = structs.MapDefaultCase(e.Status, structs.CASESNAKE)
-
-	err = store.Update(c)
-	if err != nil {
-		return fmt.Errorf("saving experiment config: %w", err)
+		return fmt.Errorf("saving experiment %s: %w", name, err)
 	}
 
 	return nil
+}
+
+// UpdateStatus applies change to the experiment's stored status in one
+// atomic step (see store.Modify) and sets e's status to the result. Unlike
+// WriteToStore, it keeps what others stored since e was read, such as another
+// app's status or running flag. Like WriteToStore, it refuses, with an error
+// wrapping ErrExperimentRunChanged, a run other than the one e was read for.
+// When change returns an error, the stored status is left as it was.
+func (e *Experiment) UpdateStatus(change func(ifaces.ExperimentStatus) error) error {
+	name := e.Metadata.Name
+
+	c, _ := store.NewConfig("experiment/" + name)
+
+	var updated ifaces.ExperimentStatus
+
+	err := store.Modify(c, func(c *store.Config) error {
+		status, err := decodeStatus(*c)
+		if err != nil {
+			return err
+		}
+
+		if stored, read := status.StartTime(), e.StartTime(); stored != read {
+			return fmt.Errorf(
+				"%w since it was read: stored start time %q, read %q",
+				ErrExperimentRunChanged,
+				stored,
+				read,
+			)
+		}
+
+		if err := change(status); err != nil {
+			return err
+		}
+
+		c.Status = structs.MapDefaultCase(status, structs.CASESNAKE)
+		updated = status
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("updating status of experiment %s: %w", name, err)
+	}
+
+	e.Status = updated
+
+	return nil
+}
+
+func (e Experiment) StartTime() string {
+	if e.Status == nil {
+		return ""
+	}
+
+	return e.Status.StartTime()
 }
 
 func (e *Experiment) SetSpec(spec ifaces.ExperimentSpec) {
@@ -186,7 +271,24 @@ func DecodeExperimentFromConfig(c store.Config) (*Experiment, error) {
 		return nil, errors.New("invalid spec in config")
 	}
 
-	iface, err = version.GetVersionedStatusForKind(c.Kind, c.APIVersion())
+	status, err := decodeStatus(c)
+	if err != nil {
+		return nil, err
+	}
+
+	exp := &Experiment{ //nolint:exhaustruct // partial initialization
+		Metadata: c.Metadata,
+		Spec:     spec,
+		Status:   status,
+	}
+
+	return exp, nil
+}
+
+// decodeStatus decodes the experiment status of config c. Unlike its spec,
+// the status needs no other config, so it can be decoded within store.Modify.
+func decodeStatus(c store.Config) (ifaces.ExperimentStatus, error) { //nolint:ireturn // versioned status
+	iface, err := version.GetVersionedStatusForKind(c.Kind, c.APIVersion())
 	if err != nil {
 		return nil, fmt.Errorf("getting versioned status for config: %w", err)
 	}
@@ -200,11 +302,5 @@ func DecodeExperimentFromConfig(c store.Config) (*Experiment, error) {
 		return nil, errors.New("invalid status in config")
 	}
 
-	exp := &Experiment{ //nolint:exhaustruct // partial initialization
-		Metadata: c.Metadata,
-		Spec:     spec,
-		Status:   status,
-	}
-
-	return exp, nil
+	return status, nil
 }

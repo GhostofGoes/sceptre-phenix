@@ -187,3 +187,170 @@ func TestValidateConfigSpecRejectsWorkflowKind(t *testing.T) {
 
 	assertSchemaError(t, types.ValidateConfigSpec(cfg), []string{"kind"}, "enum")
 }
+
+// TestValidateConfigSpecRefusesOtherVersions proves a config of a kind phenix
+// decodes by version is validated only at the stored version of that kind,
+// the one experiment create decodes, since phenix has no config upgraders: a
+// v1 Scenario is refused whatever the shape of its apps, as is a v0 Topology,
+// and the error names the apiVersion the kind needs. A kind without a
+// versioned spec, such as Image, is validated against the latest schema
+// whatever its apiVersion.
+func TestValidateConfigSpecRefusesOtherVersions(t *testing.T) {
+	app := map[string]any{"name": "e2e-probe", "metadata": map[string]any{"k": "v"}}
+
+	node := map[string]any{
+		"type":    "VirtualMachine",
+		"general": map[string]any{"hostname": "host-a"},
+		"hardware": map[string]any{
+			"os_type": "linux",
+			"drives":  []any{map[string]any{"image": "ubuntu.qc2"}},
+		},
+	}
+
+	image := map[string]any{
+		"format": "qcow2", "mirror": "http://us.archive.ubuntu.com/ubuntu/",
+		"release": "noble", "size": "10G", "variant": "minbase",
+	}
+
+	cases := []struct {
+		name    string
+		version string
+		kind    string
+		spec    map[string]any
+		wantErr string // empty when the config is valid
+	}{
+		{
+			name:    "v2 scenario with a list of apps",
+			version: "v2",
+			kind:    "Scenario",
+			spec:    map[string]any{"apps": []any{app}},
+		},
+		{
+			name:    "v2 scenario with the v1 map of apps",
+			version: "v2",
+			kind:    "Scenario",
+			spec:    map[string]any{"apps": map[string]any{"experiment": []any{app}}},
+			wantErr: `Error at "/apps": value must be an array`,
+		},
+		{
+			name:    "v1 scenario with experiment and host apps",
+			version: "v1",
+			kind:    "Scenario",
+			spec: map[string]any{"apps": map[string]any{
+				"experiment": []any{app},
+				"host": []any{map[string]any{
+					"name":  "protonuke",
+					"hosts": []any{map[string]any{"hostname": "h1", "metadata": map[string]any{}}},
+				}},
+			}},
+			wantErr: "unknown scenario version v1: Scenario configs need apiVersion phenix.sandia.gov/v2",
+		},
+		{
+			name:    "v1 scenario with the v2 list of apps",
+			version: "v1",
+			kind:    "Scenario",
+			spec:    map[string]any{"apps": []any{app}},
+			wantErr: "unknown scenario version v1",
+		},
+		{
+			name:    "scenario in a later version",
+			version: "v3",
+			kind:    "Scenario",
+			spec:    map[string]any{"apps": []any{app}},
+			wantErr: "unknown scenario version v3",
+		},
+		{
+			name:    "v1 topology",
+			version: "v1",
+			kind:    "Topology",
+			spec:    map[string]any{"nodes": []any{node}},
+		},
+		{
+			name:    "v0 topology",
+			version: "v0",
+			kind:    "Topology",
+			spec:    map[string]any{"nodes": []any{node}},
+			wantErr: "unknown topology version v0: Topology configs need apiVersion phenix.sandia.gov/v1",
+		},
+		{
+			name:    "v2 experiment",
+			version: "v2",
+			kind:    "Experiment",
+			spec:    map[string]any{"topology": map[string]any{"nodes": []any{node}}},
+			wantErr: "unknown experiment version v2",
+		},
+		{
+			name:    "image in another version",
+			version: "v2",
+			kind:    "Image",
+			spec:    image,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := store.Config{
+				Version:  "phenix.sandia.gov/" + tc.version,
+				Kind:     tc.kind,
+				Metadata: store.ConfigMetadata{Name: "probe"},
+				Spec:     tc.spec,
+			}
+
+			err := types.ValidateConfigSpec(cfg)
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateConfigSpec() error = %v, want nil", err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, types.ErrValidationFailed) {
+				t.Fatalf("ValidateConfigSpec() error = %v, want ErrValidationFailed", err)
+			}
+
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("ValidateConfigSpec() error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestDecodeScenarioFromConfigV1 checks that experiment create refuses a v1
+// Scenario that validation refuses, whatever the shape of its apps, with the
+// same unknown version, and decodes the v2 Scenario that validation accepts.
+func TestDecodeScenarioFromConfigV1(t *testing.T) {
+	cfg := store.Config{
+		Version:  "phenix.sandia.gov/v1",
+		Kind:     "Scenario",
+		Metadata: store.ConfigMetadata{Name: "v1map"},
+	}
+
+	for _, apps := range []any{
+		map[string]any{"experiment": []any{map[string]any{"name": "e2e-probe"}}},
+		[]any{map[string]any{"name": "e2e-probe"}},
+	} {
+		cfg.Spec = map[string]any{"apps": apps}
+
+		_, err := types.DecodeScenarioFromConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "unknown scenario version v1") {
+			t.Errorf("DecodeScenarioFromConfig(v1, apps %v) error = %v, want an unknown scenario version", apps, err)
+		}
+	}
+
+	cfg.Version = "phenix.sandia.gov/v2"
+
+	if err := types.ValidateConfigSpec(cfg); err != nil {
+		t.Fatalf("ValidateConfigSpec(v2) error = %v", err)
+	}
+
+	spec, err := types.DecodeScenarioFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("DecodeScenarioFromConfig(v2) error = %v", err)
+	}
+
+	if apps := spec.Apps(); len(apps) != 1 || apps[0].Name() != "e2e-probe" {
+		t.Errorf("DecodeScenarioFromConfig(v2) apps = %v, want one app named e2e-probe", apps)
+	}
+}

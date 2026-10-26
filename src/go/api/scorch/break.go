@@ -45,15 +45,22 @@ func (b Break) Start(ctx context.Context) error {
 	return b.breakPoint(ctx, ActionStart)
 }
 
+// Stop and Cleanup break under the run's own context, so a cancel ends the
+// breakpoint, or skips it, in these stages too.
 func (b Break) Stop(ctx context.Context) error {
-	return b.breakPoint(ctx, ActionStop)
+	return b.breakPoint(pipelineContext(ctx), ActionStop)
 }
 
 func (b Break) Cleanup(ctx context.Context) error {
-	return b.breakPoint(ctx, ActionCleanup)
+	return b.breakPoint(pipelineContext(ctx), ActionCleanup)
 }
 
+//nolint:funlen // complex logic
 func (b Break) breakPoint(ctx context.Context, stage Action) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	exp := b.options.Exp.Spec.ExperimentName()
 
 	var md BreakMetadata
@@ -63,6 +70,15 @@ func (b Break) breakPoint(ctx context.Context, stage Action) error {
 	}
 
 	if md.Tap != nil {
+		// Read the status that records the tap before creating it, so a
+		// missing status cannot leave an unrecorded tap behind.
+		var status scorchmd.ScorchStatus
+
+		err := b.options.Exp.Status.ParseAppStatus("scorch", &status)
+		if err != nil {
+			return fmt.Errorf("getting experiment status for scorch app: %w", err)
+		}
+
 		pairs := discoverUsedPairs()
 		md.Tap.Init(b.options.Exp.Spec.DefaultBridge(), tap.Experiment(exp), tap.UsedPairs(pairs))
 
@@ -70,6 +86,11 @@ func (b Break) breakPoint(ctx context.Context, stage Action) error {
 		if v, ok := md.Tap.Other["internetAccess"]; ok {
 			enabled, _ := v.(bool)
 			md.Tap.External.Enabled = enabled
+		}
+
+		// The VLAN, the bridge and the address reach minimega and the host.
+		if err := md.Tap.Validate(); err != nil {
+			return fmt.Errorf("tap of break component %s: %w", b.options.Name, err)
 		}
 
 		// tap names cannot be longer than 15 characters
@@ -80,19 +101,19 @@ func (b Break) breakPoint(ctx context.Context, stage Action) error {
 			return fmt.Errorf("setting up tap for break: %w", err)
 		}
 
-		var status scorchmd.ScorchStatus
+		defer func() { _ = md.Tap.Delete(mm.Headnode()) }()
 
-		err := b.options.Exp.Status.ParseAppStatus("scorch", &status)
-		if err != nil {
-			return fmt.Errorf("getting experiment status for scorch app: %w", err)
+		if status.Taps == nil {
+			status.Taps = make(map[string]*tap.Tap)
 		}
 
 		status.Taps[b.options.Name] = md.Tap
 
 		b.options.Exp.Status.SetAppStatus("scorch", status)
-		_ = b.options.Exp.WriteToStore(true)
 
-		defer func() { _ = md.Tap.Delete(mm.Headnode()) }()
+		if err := storeRunRecord(b.options.Exp); err != nil {
+			return fmt.Errorf("recording tap %s in experiment status: %w", md.Tap.Name, err)
+		}
 	}
 
 	var (

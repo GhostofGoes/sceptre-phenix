@@ -575,10 +575,22 @@ func (n *Network) SetDefaults(bridge string) {
 	}
 }
 
-func (n Network) InterfaceConfig() string {
+// InterfaceConfig returns the interfaces as the argument of a minimega `vm
+// config net` command. It refuses an interface whose bridge, VLAN, MAC or
+// driver CheckScriptWord refuses, since the minimega scripts write the
+// argument unquoted.
+func (n Network) InterfaceConfig() (string, error) {
 	configs := make([]string, len(n.InterfacesF))
 
 	for i, iface := range n.InterfacesF {
+		if iface == nil {
+			return "", fmt.Errorf("interface %d is null", i+1)
+		}
+
+		if err := iface.checkScriptWords(); err != nil {
+			return "", err
+		}
+
 		config := []string{iface.BridgeF, iface.VLANF}
 
 		if iface.MACF != "" {
@@ -596,7 +608,28 @@ func (n Network) InterfaceConfig() string {
 		configs[i] = strings.Join(config, ",")
 	}
 
-	return strings.Join(configs, " ")
+	return strings.Join(configs, " "), nil
+}
+
+// checkScriptWords refuses the bridge, VLAN, MAC or driver of the interface
+// when CheckScriptWord refuses it.
+func (i *Interface) checkScriptWords() error {
+	if i == nil {
+		return nil
+	}
+
+	for _, word := range [][2]string{
+		{"bridge", i.BridgeF},
+		{"VLAN", i.VLANF},
+		{"MAC", i.MACF},
+		{"driver", i.DriverF},
+	} {
+		if err := CheckScriptWord(fmt.Sprintf("interface %s %s", i.NameF, word[0]), word[1]); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (i Interface) LinkAddress() string {

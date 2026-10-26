@@ -13,7 +13,15 @@ import (
 	ifaces "phenix/types/interfaces"
 )
 
-func Execute(ctx context.Context, exp *types.Experiment, run int) error {
+// ErrAlreadyRunning is the refusal of a run while a SCORCH run, or the scorch
+// app's running stage, executes for the experiment.
+var ErrAlreadyRunning = errors.New("the Scorch app is currently already running")
+
+// Check returns why Execute would refuse to start the given run of the
+// experiment now: the experiment has no scorch app or no such run, the run
+// names a component the app does not define, the experiment is not running,
+// or it already executes a SCORCH run (ErrAlreadyRunning).
+func Check(exp *types.Experiment, run int) error {
 	var config ifaces.ScenarioApp
 
 	for _, app := range exp.Apps() {
@@ -32,20 +40,44 @@ func Execute(ctx context.Context, exp *types.Experiment, run int) error {
 		return fmt.Errorf("experiment %s is not running", exp.Metadata.Name)
 	}
 
-	scorch := app.GetApp("scorch")
-	_ = scorch.Init()
-
 	if running := exp.Status.AppRunning()["scorch"]; running {
-		return errors.New("the Scorch app is currently already running")
+		return ErrAlreadyRunning
 	}
 
-	exp.Status.SetAppRunning("scorch", true)
-	exp.Status.SetAppStatus("scorch", scorchmd.ScorchStatus{RunID: run}) //nolint:exhaustruct // partial initialization
+	md, err := scorchmd.DecodeMetadata(exp)
+	if err != nil {
+		return fmt.Errorf("decoding Scorch configuration of experiment %s: %w", exp.Metadata.Name, err)
+	}
 
-	err := exp.WriteToStore(true)
+	if run < 0 || run >= len(md.Runs) {
+		return fmt.Errorf("invalid Scorch run ID for experiment %s", exp.Metadata.Name)
+	}
+
+	// Experiments created before Configure validated the runs can still name
+	// undefined components, which Running refuses.
+	return md.ValidateRun(run)
+}
+
+func Execute(ctx context.Context, exp *types.Experiment, run int) error {
+	if err := Check(exp, run); err != nil {
+		return err
+	}
+
+	// Check read exp's copy of the running flag; the flag is checked again,
+	// and set, in one store update, so a run started from another process
+	// since exp was read, or meanwhile, is refused. Running records the run
+	// in status.apps.scorch and clears it.
+	err := exp.UpdateStatus(app.MarkRunningStage("scorch"))
+	if errors.Is(err, app.ErrAppAlreadyRunning) {
+		return ErrAlreadyRunning
+	}
+
 	if err != nil {
 		return fmt.Errorf("error updating store with experiment %s: %w", exp.Metadata.Name, err)
 	}
+
+	scorch := app.GetApp("scorch")
+	_ = scorch.Init()
 
 	var errors error
 
@@ -59,12 +91,14 @@ func Execute(ctx context.Context, exp *types.Experiment, run int) error {
 		)
 	}
 
-	_ = exp.Reload() // reload experiment from store in case status was updated during run
+	// Only the flag is stored: components such as soh store the experiment's
+	// status during the run, and a run of an experiment that was stopped, or
+	// started again, meanwhile must not write to the new run.
+	err = exp.UpdateStatus(func(status ifaces.ExperimentStatus) error {
+		status.SetAppRunning("scorch", false)
 
-	exp.Status.SetAppRunning("scorch", false)
-	exp.Status.SetAppStatus("scorch", nil)
-
-	err = exp.WriteToStore(true)
+		return nil
+	})
 	if err != nil {
 		errors = multierror.Append(
 			errors,

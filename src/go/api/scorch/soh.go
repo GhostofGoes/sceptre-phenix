@@ -41,9 +41,9 @@ func (s SOH) Type() string {
 
 func (s SOH) Configure(ctx context.Context) error {
 	if s.options.Background {
-		ctx = background(ctx, ActionConfigure, s.options)
-
-		go func() { _ = s.check(ctx, ActionConfigure) }()
+		runInBackground(ctx, ActionConfigure, s.options, func(ctx context.Context) error {
+			return s.check(ctx, ActionConfigure)
+		})
 
 		return nil
 	}
@@ -53,9 +53,9 @@ func (s SOH) Configure(ctx context.Context) error {
 
 func (s SOH) Start(ctx context.Context) error {
 	if s.options.Background {
-		ctx = background(ctx, ActionStart, s.options)
-
-		go func() { _ = s.check(ctx, ActionStart) }()
+		runInBackground(ctx, ActionStart, s.options, func(ctx context.Context) error {
+			return s.check(ctx, ActionStart)
+		})
 
 		return nil
 	}
@@ -63,17 +63,21 @@ func (s SOH) Start(ctx context.Context) error {
 	return s.check(ctx, ActionStart)
 }
 
+// Stop ends the component's backgrounded start stage if there is one, and
+// runs the checks otherwise.
 func (s SOH) Stop(ctx context.Context) error {
-	if handleBackgrounded(ActionStop, s.options) {
-		return nil
+	if handled, err := handleBackgrounded(ctx, ActionStop, s.options); handled {
+		return err
 	}
 
 	return s.check(ctx, ActionStop)
 }
 
+// Cleanup ends the component's backgrounded configure stage if there is one,
+// and runs the checks otherwise.
 func (s SOH) Cleanup(ctx context.Context) error {
-	if handleBackgrounded(ActionCleanup, s.options) {
-		return nil
+	if handled, err := handleBackgrounded(ctx, ActionCleanup, s.options); handled {
+		return err
 	}
 
 	return s.check(ctx, ActionCleanup)
@@ -85,13 +89,10 @@ func (s SOH) check(ctx context.Context, stage Action) error {
 		return ctx.Err()
 	}
 
-	var (
-		exp = &s.options.Exp
-		md  SOHMetadata
-	)
+	var md SOHMetadata
 
 	update := scorch.ComponentUpdate{ //nolint:exhaustruct // partial update
-		Exp:     exp.Spec.ExperimentName(),
+		Exp:     s.options.Exp.Spec.ExperimentName(),
 		CmpName: s.options.Name,
 		CmpType: s.options.Type,
 		Run:     s.options.Run,
@@ -106,6 +107,23 @@ func (s SOH) check(ctx context.Context, stage Action) error {
 		scorch.UpdateComponent(update)
 	}
 
+	// The run's components share its copy of the experiment status, which the
+	// soh app below writes while other components read it, a backgrounded soh
+	// component alongside them. Work on the stored experiment instead, which
+	// is also current, so the status written back is too.
+	exp, err := experiment.Get(s.options.Exp.Metadata.Name)
+	if err != nil {
+		updateComponent("Unable to read the experiment.\n")
+
+		return fmt.Errorf("state of health checks: %w", err)
+	}
+
+	if !exp.Running() {
+		updateComponent("The experiment is not running.\n")
+
+		return errors.New("state of health checks: experiment not running")
+	}
+
 	if !soh.Configured(exp) {
 		updateComponent("State of health app is not configured for this experiment.\n")
 
@@ -118,6 +136,13 @@ func (s SOH) check(ctx context.Context, stage Action) error {
 		return errors.New("state of health checks: soh app not initialized")
 	}
 
+	err = mapstructure.Decode(s.options.Meta, &md)
+	if err != nil {
+		updateComponent("Unable to parse metadata for this component.\n")
+
+		return fmt.Errorf("decoding soh component metadata: %w", err)
+	}
+
 	if soh.Running(exp) {
 		updateComponent("State of health app is currently already running.\n")
 
@@ -126,13 +151,6 @@ func (s SOH) check(ctx context.Context, stage Action) error {
 		}
 
 		return nil
-	}
-
-	err := mapstructure.Decode(s.options.Meta, &md)
-	if err != nil {
-		updateComponent("Unable to parse metadata for this component.\n")
-
-		return fmt.Errorf("decoding soh component metadata: %w", err)
 	}
 
 	if md.C2Timeout != "" {
@@ -166,7 +184,9 @@ func (s SOH) check(ctx context.Context, stage Action) error {
 
 	plog.RemoveHandler(handlerName)
 
-	exp, _ = experiment.Get(exp.Metadata.Name)
+	if stored, err := experiment.Get(exp.Metadata.Name); err == nil {
+		exp = stored
+	}
 
 	var results map[string]any
 

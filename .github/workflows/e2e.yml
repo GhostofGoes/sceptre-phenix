@@ -1,0 +1,582 @@
+# End-to-end tests: a real phenix against a real minimega running real
+# QEMU/KVM guests built from the sceptre-phenix-images recipes, with the
+# sceptre-phenix-apps apps installed. See src/go/e2e/README.md.
+#
+# Other repositories call this workflow (workflow_call) to test their changes
+# against phenix: the apps repository passes its ref as apps-ref, the images
+# repository passes its ref as images-ref and the recipes it changed as images.
+name: E2E
+
+on:
+  # Only the Go module (the phenix under test, with its embedded UI, and the
+  # tests) and the E2E setup reach the runners; src/js, the docs and the
+  # examples do not. The nightly schedule runs regardless.
+  push:
+    branches: ['main', 'ci-e2e-minimega']
+    paths:
+      - 'src/go/**'
+      - '.github/e2e/**'
+      - '.github/actions/**'
+      - '.github/workflows/e2e.yml'
+  pull_request:
+    paths:
+      - 'src/go/**'
+      - '.github/e2e/**'
+      - '.github/actions/**'
+      - '.github/workflows/e2e.yml'
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Which shards to run
+        type: choice
+        options: [pr, nightly]
+        default: pr
+      images:
+        description: Extra image recipes to build and smoke test (space-separated)
+        type: string
+        default: ''
+      shards:
+        description: Run only these shards of the tier (space-separated names; empty runs them all; 'none' runs none)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      phenix-repository:
+        description: Repository of phenix to test (owner/name)
+        type: string
+        default: sandialabs/sceptre-phenix
+      phenix-ref:
+        description: Ref of phenix to test
+        type: string
+        default: main
+      apps-repository:
+        description: Repository of the phenix apps (default from companions.env)
+        type: string
+        default: ''
+      apps-ref:
+        description: Ref of the phenix apps
+        type: string
+        default: ''
+      images-repository:
+        description: Repository of the image recipes (default from companions.env)
+        type: string
+        default: ''
+      images-ref:
+        description: Ref of the image recipes
+        type: string
+        default: ''
+      images:
+        description: Extra image recipes to build and smoke test (space-separated)
+        type: string
+        default: ''
+      tier:
+        description: Which shards to run (pr or nightly)
+        type: string
+        default: pr
+      shards:
+        description: Run only these shards of the tier (space-separated names; empty runs them all; 'none' runs none)
+        type: string
+        default: ''
+      apps-shards:
+        description: Run only the shards that install the phenix apps
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its running run. Branch, scheduled
+# and dispatched runs are never cancelled while they run: the next one waits
+# for it (and only the newest of those waiting starts).
+concurrency:
+  group: phenix-e2e-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      phenix-repository: ${{ steps.refs.outputs.phenix-repository }}
+      phenix-ref: ${{ steps.refs.outputs.phenix-ref }}
+      apps-repository: ${{ steps.refs.outputs.apps-repository }}
+      apps-ref: ${{ steps.refs.outputs.apps-ref }}
+      images-repository: ${{ steps.refs.outputs.images-repository }}
+      images-ref: ${{ steps.refs.outputs.images-ref }}
+      images: ${{ steps.matrix.outputs.images }}
+      shard-images: ${{ steps.matrix.outputs.shard-images }}
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - name: Check out phenix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.phenix-repository || github.repository }}
+          ref: ${{ inputs.phenix-ref || github.sha }}
+          path: phenix
+          persist-credentials: false
+
+      - name: Check that every E2E test runs in exactly one shard
+        run: |
+          set -euo pipefail
+          # A -test.run pattern that matches nothing passes, so a test that no shard
+          # selects, or a shard that selects nothing, would never fail. The image
+          # jobs run TestImagesSmoke.
+          mapfile -t patterns < <(jq -r '(.pr + .nightly)[].run' phenix/.github/e2e/shards.json)
+          patterns+=('^TestImagesSmoke$')
+          mapfile -t tests < <(sed -n 's/^func \(Test[A-Za-z0-9_]*\)(.*/\1/p' phenix/src/go/e2e/*_test.go | grep -vx TestMain)
+          bad=0
+          for test in "${tests[@]}"; do
+            n=0
+            for p in "${patterns[@]}"; do
+              if [[ $test =~ $p ]]; then n=$((n + 1)); fi
+            done
+            if [ "$n" -ne 1 ]; then
+              echo "::error::$test is selected by $n shards; name it after one shard's run pattern in .github/e2e/shards.json"
+              bad=1
+            fi
+          done
+          for p in "${patterns[@]}"; do
+            n=0
+            for test in "${tests[@]}"; do
+              if [[ $test =~ $p ]]; then n=$((n + 1)); fi
+            done
+            if [ "$n" -eq 0 ]; then
+              echo "::error::no E2E test matches the shard pattern $p"
+              bad=1
+            fi
+          done
+          echo "${#tests[@]} tests in ${#patterns[@]} shard patterns"
+          exit "$bad"
+
+      - name: Select shards and images
+        id: matrix
+        env:
+          TIER: ${{ github.event_name == 'schedule' && 'nightly' || inputs.tier || 'pr' }}
+          EXTRA_IMAGES: ${{ inputs.images }}
+          ONLY_SHARDS: ${{ inputs.shards }}
+          APPS_SHARDS: ${{ inputs.apps-shards }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          case "$TIER" in pr | nightly) ;; *) fail "unknown tier '$TIER' (pr or nightly)" ;; esac
+          # The names are split on whitespace and never globbed.
+          read -r -d '' -a only <<<"$ONLY_SHARDS" || true
+          read -r -d '' -a extra <<<"$EXTRA_IMAGES" || true
+          for n in "${only[@]}" "${extra[@]}"; do
+            [[ $n =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "'$n' is not a shard or image name"
+          done
+          config=phenix/.github/e2e/shards.json
+          shards=$(jq -c --arg tier "$TIER" \
+            '.pr + (if $tier == "nightly" then .nightly else [] end)' "$config")
+          if [ "${only[*]}" = none ]; then
+            # Callers that only build and smoke test images.
+            shards='[]'
+          elif [ "${#only[@]}" -gt 0 ]; then
+            # A misspelt or renamed shard must fail the run, not test nothing.
+            for n in "${only[@]}"; do
+              if ! jq -e --arg n "$n" 'any(.name == $n)' <<<"$shards" >/dev/null; then
+                if jq -e --arg n "$n" '.pr + .nightly | any(.name == $n)' "$config" >/dev/null; then
+                  fail "shard '$n' is not in the $TIER tier"
+                fi
+                fail "there is no shard '$n' in $config"
+              fi
+            done
+            shards=$(jq -c '[.[] | select(.name | IN($ARGS.positional[]))]' --args "${only[@]}" <<<"$shards")
+          fi
+          if [ "$APPS_SHARDS" = true ]; then
+            shards=$(jq -c 'map(select(.apps))' <<<"$shards")
+          fi
+          # Every image is built and smoke tested in its own job; extra images
+          # (from the images repository) are only smoke tested.
+          shard_images=$(jq -c '[.[].images[]] | unique' <<<"$shards")
+          images=$(jq -c '(. + $ARGS.positional) | unique' --args "${extra[@]}" <<<"$shard_images")
+          echo "tier: $TIER"
+          echo "shards=$shards" | tee -a "$GITHUB_OUTPUT"
+          echo "apps=$(jq 'any(.[]; .apps)' <<<"$shards")" | tee -a "$GITHUB_OUTPUT"
+          echo "shard-images=$shard_images" | tee -a "$GITHUB_OUTPUT"
+          echo "images=$images" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Resolve repositories and refs
+        id: refs
+        env:
+          PHENIX_REPOSITORY: ${{ inputs.phenix-repository || github.repository }}
+          IN_APPS_REPOSITORY: ${{ inputs.apps-repository }}
+          IN_APPS_REF: ${{ inputs.apps-ref }}
+          IN_IMAGES_REPOSITORY: ${{ inputs.images-repository }}
+          IN_IMAGES_REF: ${{ inputs.images-ref }}
+          NEED_APPS: ${{ steps.matrix.outputs.apps }}
+          NEED_IMAGES: ${{ steps.matrix.outputs.images != '[]' }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source phenix/.github/e2e/companions.env
+          # Resolve a companion ref to a commit once, so every job of the run (and a
+          # re-run of a failed job) checks out the same commit. Only the companions
+          # a job of this run checks out are resolved: the apps for shards with
+          # apps, the image recipes for image jobs.
+          resolve() { # repository ref
+            local out sha want try
+            if [[ $2 =~ ^[0-9a-f]{40}$ ]]; then
+              echo "$2"
+              return
+            fi
+            for try in 1 2 3; do
+              if out=$(git ls-remote "$GITHUB_SERVER_URL/$1" "$2" "$2^{}"); then
+                break
+              fi
+              if [ "$try" -eq 3 ]; then
+                echo "::error::cannot list the refs of $1" >&2
+                return 1
+              fi
+              sleep 10
+            done
+            for want in "refs/heads/$2" "$2^{}" "refs/tags/$2^{}" "$2" "refs/tags/$2"; do
+              sha=$(awk -v ref="$want" '$2 == ref { print $1 }' <<<"$out")
+              if [ -n "$sha" ]; then
+                echo "$sha"
+                return
+              fi
+            done
+            echo "::error::$1 has no branch or tag $2" >&2
+            return 1
+          }
+          apps_repository=${IN_APPS_REPOSITORY:-$APPS_REPOSITORY}
+          apps_ref=
+          if [ "$NEED_APPS" = true ]; then
+            apps_ref=$(resolve "$apps_repository" "${IN_APPS_REF:-$APPS_REF}")
+          fi
+          images_repository=${IN_IMAGES_REPOSITORY:-$IMAGES_REPOSITORY}
+          images_ref=
+          if [ "$NEED_IMAGES" = true ]; then
+            images_ref=$(resolve "$images_repository" "${IN_IMAGES_REF:-$IMAGES_REF}")
+          fi
+          {
+            echo "phenix-repository=$PHENIX_REPOSITORY"
+            echo "phenix-ref=$(git -C phenix rev-parse HEAD)"
+            echo "apps-repository=$apps_repository"
+            echo "apps-ref=$apps_ref"
+            echo "images-repository=$images_repository"
+            echo "images-ref=$images_ref"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  images:
+    name: Image ${{ matrix.image }}
+    needs: plan
+    # GitHub fails a matrix with no values; shards that boot no image need none.
+    if: needs.plan.outputs.images != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.images) }}
+    steps:
+      - name: Check out phenix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plan.outputs.phenix-repository }}
+          ref: ${{ needs.plan.outputs.phenix-ref }}
+          path: phenix
+          persist-credentials: false
+
+      - name: Check out the image recipes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plan.outputs.images-repository }}
+          ref: ${{ needs.plan.outputs.images-ref }}
+          path: images
+          persist-credentials: false
+
+      # The image depends on its recipe, on the phenix image builder (the
+      # image API and command, the templates it renders, and the minimega and
+      # shell helpers inject-miniexe runs), on the builder packages e2e-setup
+      # installs, and on the miniccc and minirouter injected into it; a change
+      # to any of those rebuilds it. The images repository lists a recipe's
+      # own inputs, so a change to one recipe does not rebuild the others.
+      # Go tests under those paths are no input and are left out.
+      # The month in the key rebuilds every image monthly against current
+      # upstream packages, since use keeps cache entries alive indefinitely.
+      - name: Compute the cache key
+        id: key
+        env:
+          IMAGE: ${{ matrix.image }}
+          BUILDER: ${{ hashFiles('phenix/src/go/api/image/**', 'phenix/src/go/cmd/image.go', 'phenix/src/go/types/version/v1/image.go', 'phenix/src/go/tmpl/templates/vmdb.tmpl', 'phenix/src/go/tmpl/templates/miniccc/**', 'phenix/src/go/tmpl/templates/minirouter/**', 'phenix/src/go/tmpl/templates/protonuke/**', 'phenix/src/go/tmpl/tmpl.go', 'phenix/src/go/util/mm/mmcli/**', 'phenix/src/go/util/shell/**', 'phenix/.github/e2e/minimega.ref', 'phenix/.github/e2e/vmdb2.ref', 'phenix/.github/actions/minimega/action.yml', 'phenix/.github/actions/e2e-setup/action.yml', '!phenix/src/go/**/*_test.go') }}
+          ALL_RECIPES: ${{ hashFiles('images/Makefile', 'images/overlays/**', 'images/scripts/**') }}
+        run: |
+          set -euo pipefail
+          if [ -f images/.github/scripts/changed_recipes.py ]; then
+            recipe=$(cd images && python3 .github/scripts/changed_recipes.py --inputs "$IMAGE" | sha256sum | cut -c1-32)
+          else
+            recipe="$ALL_RECIPES"
+          fi
+          echo "key=phenix-e2e-image-$IMAGE-$(date -u +%Y-%m)-$recipe-${BUILDER:0:32}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Restore the image
+        id: cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: e2e-images/${{ matrix.image }}.qc2
+          key: ${{ steps.key.outputs.key }}
+
+      # minimega is needed both to build (inject-miniexe uses disk inject) and
+      # to smoke test the image.
+      - name: Set up phenix and minimega (and the image builder to build)
+        uses: ./phenix/.github/actions/e2e-setup
+        with:
+          image-builder: ${{ steps.cache.outputs.cache-hit != 'true' }}
+          kali-keyring: ${{ steps.cache.outputs.cache-hit != 'true' && startsWith(matrix.image, 'kali') }}
+
+      - name: Free disk space for the build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
+          df -h /
+
+      - name: Build ${{ matrix.image }} with the images Makefile
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: images
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          # The Makefile injects ./miniccc (and ./minirouter for the router
+          # image, ./protonuke for the protonuke image) from the working
+          # directory.
+          cp /usr/local/bin/miniccc /usr/local/bin/minirouter /usr/local/bin/protonuke .
+          start=$(date +%s)
+          if [ "$IMAGE" = vyos ]; then
+            # VyOS is not debootstrapped: its script repacks the release ISO as
+            # root and injects miniccc through nbd, in a roomy temp directory.
+            # Its injection container's default base, public.ecr.aws,
+            # rate-limits shared runner addresses; Microsoft's mirror of the
+            # Docker Hub library images does not.
+            sudo -E env VYOSTMP=/mnt/vyostmp \
+              INJECT_BASE_IMAGE=mcr.microsoft.com/mirror/docker/library/ubuntu:24.04 \
+              make vyos
+          else
+            make "$IMAGE" PHENIX="sudo /usr/local/bin/phenix --store.endpoint bolt:///etc/phenix/store.bdb"
+          fi
+          echo "built $IMAGE in $(( $(date +%s) - start )) s"
+          mkdir -p ../e2e-images
+          sudo mv "$IMAGE.qc2" "../e2e-images/$IMAGE.qc2"
+          sudo chown "$(id -u):$(id -g)" "../e2e-images/$IMAGE.qc2"
+          qemu-img info "../e2e-images/$IMAGE.qc2"
+
+      - name: Smoke test ${{ matrix.image }} under phenix
+        working-directory: phenix/src/go
+        env:
+          IMAGE: ${{ matrix.image }}
+          E2E_WORK_DIR: ${{ runner.temp }}/e2e-work
+          E2E_SMOKE_IMAGES: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          sudo cp "$GITHUB_WORKSPACE/e2e-images/$IMAGE.qc2" "/phenix/images/$IMAGE.qc2"
+          go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./e2e
+          sudo -E "$RUNNER_TEMP/e2e.test" -test.run '^TestImagesSmoke$' -test.v -test.timeout 30m 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+
+      # Only an image that passed its smoke test is cached and handed on; a
+      # failed one would otherwise be restored by every later run until its
+      # inputs changed. Only the images shards boot are cached: the smoke-only
+      # extras from the images repository change with every recipe edit, and
+      # the largest (kali-harmonie, 9 GiB) would evict the shards' images from
+      # the repository's 10 GB cache.
+      - name: Save the image
+        if: steps.cache.outputs.cache-hit != 'true' && contains(fromJSON(needs.plan.outputs.shard-images), matrix.image)
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: e2e-images/${{ matrix.image }}.qc2
+          key: ${{ steps.key.outputs.key }}
+
+      # Kept for a few days so that re-running a failed shard, which does not
+      # re-run the image jobs that passed, still finds its images.
+      - name: Hand the image to the test shards
+        if: contains(fromJSON(needs.plan.outputs.shard-images), matrix.image)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-image-${{ matrix.image }}
+          path: e2e-images/${{ matrix.image }}.qc2
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          # A re-run of this job uploads the names its earlier attempt used.
+          overwrite: true
+
+      - name: Collect smoke test logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          sudo cp -r "$RUNNER_TEMP/e2e-work" "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo cp /tmp/minimega/minimega.log "$RUNNER_TEMP/e2e.log" "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo find "$RUNNER_TEMP/logs" -name '*.qc2' -delete || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/logs"
+
+      - name: Upload smoke test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs-image-${{ matrix.image }}
+          path: ${{ runner.temp }}/logs
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
+
+      - name: Upload the build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-buildlog-${{ matrix.image }}
+          path: images/*.log
+          if-no-files-found: ignore
+          overwrite: true
+
+  test:
+    name: E2E ${{ matrix.shard.name }}
+    needs: [plan, images]
+    # An image that fails to build or fails its smoke test fails its own job
+    # and is not handed on; shards that do not boot it still run, and shards
+    # that do fail on the missing image.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.shards != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Check out phenix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plan.outputs.phenix-repository }}
+          ref: ${{ needs.plan.outputs.phenix-ref }}
+          path: phenix
+          persist-credentials: false
+
+      - name: Check out the phenix apps
+        if: matrix.shard.apps
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plan.outputs.apps-repository }}
+          ref: ${{ needs.plan.outputs.apps-ref }}
+          path: apps
+          persist-credentials: false
+
+      - name: Set up phenix and minimega
+        id: setup
+        uses: ./phenix/.github/actions/e2e-setup
+
+      - name: Install capture and traffic control tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          # The SCORCH pcap component post-processes captures with tshark,
+          # capinfos, editcap and mergecap; qos shapes links with netem and tbf.
+          echo 'wireshark-common wireshark-common/install-setuid boolean false' | sudo debconf-set-selections
+          sudo apt-get install -y -q --no-install-recommends tshark
+          sudo modprobe sch_netem
+          sudo modprobe sch_tbf
+          sudo modprobe ip_gre
+
+      # Only this shard's images: e2e-image-@(ntp|minirouter) and the like.
+      - name: Download the images
+        if: join(matrix.shard.images, '') != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: e2e-image-@(${{ join(matrix.shard.images, '|') }})
+          path: e2e-images
+          merge-multiple: true
+
+      - name: Install the images
+        if: join(matrix.shard.images, '') != ''
+        env:
+          IMAGES: ${{ join(matrix.shard.images, ' ') }}
+        run: |
+          set -euo pipefail
+          for image in $IMAGES; do
+            if [ ! -f "e2e-images/$image.qc2" ]; then
+              echo "::error::image $image was not handed on; see its Image job"
+              exit 1
+            fi
+            sudo mv "e2e-images/$image.qc2" "/phenix/images/$image.qc2"
+          done
+          rm -rf e2e-images
+          ls -lh /phenix/images
+
+      - name: Install the phenix apps
+        if: matrix.shard.apps
+        env:
+          MM_PYTHON: ${{ steps.setup.outputs.minimega-python }}
+        run: |
+          set -euo pipefail
+          # phenix runs as root and execs phenix-app-<name> from root's PATH.
+          # Install into a root-owned virtualenv (the Debian system Python
+          # refuses pip installs over packaged modules) and link the console
+          # scripts into /usr/local/bin.
+          sudo python3 -m venv /opt/phenix-apps
+          sudo /opt/phenix-apps/bin/pip install --quiet "$MM_PYTHON" ./apps/src/python
+          for s in /opt/phenix-apps/bin/phenix-app-* /opt/phenix-apps/bin/phenix-scorch-* /opt/phenix-apps/bin/phenix-scheduler-*; do
+            [ -e "$s" ] || continue
+            sudo ln -sf "$s" "/usr/local/bin/$(basename "$s")"
+          done
+          # The Go apps (phenix-app-mirror) build with the repository's script,
+          # which builds the module in its working directory.
+          (cd apps/src/go && ./build.sh)
+          for b in apps/src/go/bin/phenix-app-*; do
+            sudo install -m 0755 "$b" "/usr/local/bin/$(basename "$b")"
+          done
+          sudo phenix --store.endpoint bolt:///etc/phenix/store.bdb experiment apps
+
+      - name: Build the E2E tests
+        working-directory: phenix/src/go
+        run: go test -c -tags e2e -o "$RUNNER_TEMP/e2e.test" ./e2e
+
+      - name: Run the ${{ matrix.shard.name }} shard
+        env:
+          RUN: ${{ matrix.shard.run }}
+          E2E_WORK_DIR: ${{ runner.temp }}/e2e-work
+          E2E_APPS: ${{ matrix.shard.apps && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          sudo -E "$RUNNER_TEMP/e2e.test" -test.run "$RUN" -test.v -test.timeout 50m 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          # A pattern that matches no test passes ("no tests to run").
+          if ! grep -q '^=== RUN' "$RUNNER_TEMP/e2e.log"; then
+            echo "::error::-test.run '$RUN' selected no test"
+            exit 1
+          fi
+
+      - name: Summarize
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard.name }}
+        run: |
+          {
+            echo "### E2E $SHARD"
+            echo '```'
+            grep -E '^(--- (PASS|FAIL|SKIP)|    --- (PASS|FAIL|SKIP)|PASS|FAIL|ok )' "$RUNNER_TEMP/e2e.log" | head -200 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          sudo cp -r "$RUNNER_TEMP/e2e-work" "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo cp /tmp/minimega/minimega.log /tmp/minimega/minimega.stdout "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo cp -r /var/log/phenix "$RUNNER_TEMP/logs/phenix" 2>/dev/null || true
+          sudo cp "$RUNNER_TEMP/e2e.log" "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo find "$RUNNER_TEMP/logs" -name '*.qc2' -delete || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/logs"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs-${{ matrix.shard.name }}
+          path: ${{ runner.temp }}/logs
+          retention-days: 7
+          if-no-files-found: ignore
+          # A re-run of this job uploads the name its earlier attempt used.
+          overwrite: true

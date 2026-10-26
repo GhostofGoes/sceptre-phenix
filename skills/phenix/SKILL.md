@@ -59,8 +59,18 @@ for a complete, copyable two-node topology):
 - `network.interfaces[]`: `name`, `vlan`, `type: ethernet`, `proto: static|dhcp|manual`
   (router/firewall interfaces also accept `ospf`), `address`, `mask`, `gateway`, `bridge`
 - `network.rulesets[]`: firewall rules with `action: accept|drop|reject`
-- `injections[]` / `deletions[]`: files to inject into or remove from the disk image before boot
-- `delay`: boot delay (timer, user-ack, or C2/miniccc-based)
+- `injections[]` / `deletions[]`: files to inject into or remove from the disk image before boot;
+  an injection needs a non-empty `src` (a relative one is under the experiment's base directory);
+  paths with a control character or `$`, an injection path with `:`, a deletion path with `,`,
+  and a `dst` or deletion path with a `..` element are refused; `permissions` (octal, at most
+  `0777`) are set on a `src` in the experiment's base directory, and on a copy of any other regular
+  file; a directory outside the base directory cannot carry `permissions`, and two injections
+  may not give one base-directory `src` different `permissions`
+- the minimega script writes `hostname`, `vm_type`, `cpu`, drive and interface fields, VLAN
+  aliases and schedule hosts unquoted, so phenix refuses one with whitespace, a quote, `\`, `#`
+  or a control character, and a `commands` entry or `advanced` setting with a control character
+  other than trailing whitespace
+- `delay`: boot delay (timer, user-ack, or C2/miniccc-based); `timer` needs a unit (`30s`, `5m`)
 - `annotations`: free-form hints for apps; the ones the default apps read are in
   [`references/annotations.md`](references/annotations.md)
 - An `external` node represents a physical/non-minimega host in the topology (not scheduled/booted).
@@ -124,7 +134,7 @@ spec:
   vlans:
     aliases: {EXP-1: 101}               # phenix vlan alias
     min: 100                            # --vlan-min / phenix vlan range
-    max: 200                            # --vlan-max
+    max: 200                            # --vlan-max; minimega assigns 100-199
   schedules: {server-00: compute-01}    # phenix experiment schedule <exp> <algorithm>
   deployMode: all                       # inherited from --deploy-mode / config.yaml
   useGREMesh: false                     # inherited from --use-gre-mesh
@@ -227,11 +237,17 @@ curl -H "X-Phenix-Auth-Token: $TOKEN" http://localhost:3000/api/v1/experiments
   file outright, so it has the same effect as removing it by hand and any running phenix
   process needs a restart afterwards.
 - **Scenario `apiVersion` differs from Topology/Experiment** — Scenario currently uses
-  `phenix.sandia.gov/v2` while Topology/Image typically use `v1`; mixing them up in a
-  hand-written config causes schema validation failures.
+  `phenix.sandia.gov/v2` while Topology/Image typically use `v1`. phenix reads a Topology,
+  Scenario or Experiment only at that version, so validation refuses any other
+  `apiVersion`, such as a v1 Scenario, whatever its `apps`, with `unknown scenario version
+  v1: Scenario configs need apiVersion phenix.sandia.gov/v2`.
 - **`phenix config edit` on a running experiment's config requires `--force`** — edits are
-  normally blocked once an experiment exists to avoid drift between the stored config and
-  the deployed state.
+  normally blocked while an experiment runs to avoid drift between the stored config and
+  the deployed state. A forced edit stores the status the edited config carries, so it
+  keeps the experiment running, and it cannot rename a running experiment. Every other
+  config update (`PUT /api/v1/configs/experiment/{name}`, a workflow config upsert) is
+  refused while the stored experiment runs, whatever status the body carries, and when
+  the body's own status says it runs.
 - **`phenix experiment trigger-running` is deprecated** — use
   `phenix experiment trigger running <exp> [app ...]`, which also reaches the
   `configure`, `pre-start`, `post-start`, and `cleanup` stages.
@@ -269,13 +285,22 @@ it at all, it must meet three requirements (`src/go/app/doc.go`):
 2. Be executable.
 3. Be named `phenix-app-<name>`, where `<name>` is the app name used in the
    scenario's `apps[].name` field — a scenario app named `foo` resolves to the
-   executable `phenix-app-foo`. A missing executable fails the stage with
-   `external user app phenix-app-<name> does not exist in your path`.
+   executable `phenix-app-foo`. A missing executable does not fail the
+   stage: phenix logs the warning `[?] '<name>' user app (<stage>)` and goes
+   on with the next app.
 
 Apps receive experiment JSON on stdin and one lifecycle argument, emit
 experiment JSON on stdout and JSON logs on stderr, and exit 0 on success. A
 non-zero exit fails the stage, except exit code 101, which reschedules the
-experiment using the scheduler named on stdout and re-runs the app. Apps read
+experiment using the scheduler named on stdout and re-runs the app. phenix
+takes the `spec` an app returns from `configure`, `pre-start` and `cleanup`,
+and only `status.apps.<name>` from `post-start`, `running` and `cleanup`. A
+`configure` or `pre-start` spec whose injections, deletions or `advanced`
+settings experiment create would refuse, on any node that is not external
+(`do_not_boot` ones included), fails the stage and is not taken, for example
+`user app <name> returned an experiment phenix refuses: node <hostname>: injection to "<dst>" has no source`
+for an empty or `null` `src`; a `cleanup` spec is taken with a warning, so the
+cleanup of later apps still runs. Apps read
 their configuration from the environment variables listed in
 [`references/app-environment.md`](references/app-environment.md).
 

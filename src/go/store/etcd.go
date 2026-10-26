@@ -56,7 +56,7 @@ func (e *Etcd) IsInitialized(component Component) bool {
 	key := fmt.Sprintf("%s/%s", "phenix", string(component))
 
 	resp, err := e.cli.Get(context.Background(), key)
-	if err != nil {
+	if err != nil || len(resp.Kvs) == 0 {
 		return false
 	}
 
@@ -111,7 +111,7 @@ func (e Etcd) Get(c *Config) error {
 	}
 
 	if resp.Count == 0 {
-		return fmt.Errorf("config %s not found", key)
+		return fmt.Errorf("config %s not found: %w", key, ErrNotExist)
 	}
 
 	entry := resp.Kvs[0]
@@ -126,13 +126,22 @@ func (e Etcd) Get(c *Config) error {
 func (e Etcd) Create(c *Config) error {
 	key := fmt.Sprintf("%s/%s", strings.ToLower(c.Kind), c.Metadata.Name)
 
-	if resp, _ := e.cli.Get(context.Background(), key); resp.Count != 0 {
-		return fmt.Errorf("config %s/%s already exists", c.Kind, c.Metadata.Name)
+	resp, err := e.cli.Get(context.Background(), key)
+	if err != nil {
+		return fmt.Errorf("getting config %s from Etcd: %w", key, err)
+	}
+
+	if resp.Count != 0 {
+		return fmt.Errorf("config %s/%s: %w", c.Kind, c.Metadata.Name, ErrExist)
 	}
 
 	now := time.Now().Format(time.RFC3339)
 
-	c.Metadata.Created = now
+	// As in BoltDB, a rename keeps the created timestamp of the old config.
+	if c.Metadata.Created == "" {
+		c.Metadata.Created = now
+	}
+
 	c.Metadata.Updated = now
 
 	v, err := json.Marshal(c)
@@ -150,8 +159,13 @@ func (e Etcd) Create(c *Config) error {
 func (e Etcd) Update(c *Config) error {
 	key := fmt.Sprintf("%s/%s", strings.ToLower(c.Kind), c.Metadata.Name)
 
-	if resp, _ := e.cli.Get(context.Background(), key); resp.Count == 0 {
-		return fmt.Errorf("config %s/%s doesn't exist", c.Kind, c.Metadata.Name)
+	resp, err := e.cli.Get(context.Background(), key)
+	if err != nil {
+		return fmt.Errorf("getting config %s from Etcd: %w", key, err)
+	}
+
+	if resp.Count == 0 {
+		return fmt.Errorf("config %s/%s: %w", c.Kind, c.Metadata.Name, ErrNotExist)
 	}
 
 	now := time.Now().Format(time.RFC3339)
@@ -170,6 +184,62 @@ func (e Etcd) Update(c *Config) error {
 	return nil
 }
 
+// etcdModifyAttempts bounds how often Modify reads a config again after
+// another write changed it between Modify's read and its write.
+const etcdModifyAttempts = 10
+
+// Modify implements Modify as a compare-and-set: it writes the changed config
+// in a transaction that succeeds only while the key's last change is the one
+// it read. When another write, from this process or another, landed in
+// between, it reads the config again and calls change with that.
+func (e Etcd) Modify(c *Config, change func(*Config) error) error {
+	key := fmt.Sprintf("%s/%s", strings.ToLower(c.Kind), c.Metadata.Name)
+
+	for range etcdModifyAttempts {
+		resp, err := e.cli.Get(context.Background(), key)
+		if err != nil {
+			return fmt.Errorf("getting config %s from Etcd: %w", key, err)
+		}
+
+		if resp.Count == 0 || len(resp.Kvs) == 0 {
+			return fmt.Errorf("config %s not found: %w", key, ErrNotExist)
+		}
+
+		var stored Config
+
+		if err := json.Unmarshal(resp.Kvs[0].Value, &stored); err != nil {
+			return fmt.Errorf("unmarshaling config JSON: %w", err)
+		}
+
+		*c = stored
+
+		if err := change(c); err != nil {
+			return err
+		}
+
+		c.Metadata.Updated = time.Now().Format(time.RFC3339)
+
+		v, err := json.Marshal(c)
+		if err != nil {
+			return fmt.Errorf("marshaling config JSON: %w", err)
+		}
+
+		txn, err := e.cli.Txn(context.Background()).
+			If(clientv3.Compare(clientv3.ModRevision(key), "=", resp.Kvs[0].ModRevision)).
+			Then(clientv3.OpPut(key, string(v))).
+			Commit()
+		if err != nil {
+			return fmt.Errorf("writing config JSON to Etcd: %w", err)
+		}
+
+		if txn.Succeeded {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("config %s changed during each of %d attempts to modify it", key, etcdModifyAttempts)
+}
+
 func (e Etcd) Patch(c *Config, u map[string]any) error {
 	return errors.New("not implemented")
 }
@@ -177,8 +247,13 @@ func (e Etcd) Patch(c *Config, u map[string]any) error {
 func (e Etcd) Delete(c *Config) error {
 	key := fmt.Sprintf("%s/%s", strings.ToLower(c.Kind), c.Metadata.Name)
 
-	if _, err := e.cli.Delete(context.Background(), key); err != nil {
+	resp, err := e.cli.Delete(context.Background(), key)
+	if err != nil {
 		return fmt.Errorf("deleting key %s: %w", key, err)
+	}
+
+	if resp.Deleted == 0 {
+		return fmt.Errorf("deleting key %s: %w", key, ErrNotExist)
 	}
 
 	return nil

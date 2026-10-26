@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,7 +145,13 @@ func newExperimentCreateCmd() *cobra.Command {
   Used to create an experiment from existing configurations; can be a
   topology, or topology and scenario, or paths to topology/scenario
   configuration files (YAML or JSON). (Optional are the arguments for
-  scenario or base directory.)`
+  scenario or base directory.)
+
+  --vlan-min and --vlan-max set the experiment's VLAN range: minimega
+  assigns its VLAN IDs from min up to, but not including, max. Set both, or
+  neither to use minimega's default pool. While the experiment runs, minimega
+  reserves the range and refuses to start another experiment whose range
+  overlaps it.`
 
 	example := `
   phenix experiment create <experiment name> -t <topology name or /path/to/filename>
@@ -256,8 +261,8 @@ func newExperimentCreateCmd() *cobra.Command {
 	cmd.Flags().StringP("base-dir", "d", "", "Base directory to use for experiment (optional)")
 	cmd.Flags().
 		StringP("default-bridge", "b", appName, "Default bridge name to use for experiment (optional)")
-	cmd.Flags().Int("vlan-min", 0, "VLAN pool minimum")
-	cmd.Flags().Int("vlan-max", 0, "VLAN pool maximum")
+	cmd.Flags().Int("vlan-min", 0, "VLAN range min, the first VLAN ID minimega assigns (1-4095); needs --vlan-max")
+	cmd.Flags().Int("vlan-max", 0, "VLAN range max; minimega assigns VLAN IDs below it (2-4096); needs --vlan-min")
 	cmd.Flags().StringSlice("disabled-apps", []string{}, "Comma separated ist of apps to disable")
 
 	return cmd
@@ -457,10 +462,16 @@ func newExperimentStartCmd() *cobra.Command {
 
   Used to start a stopped experiment, using 'all' instead of a specific
   experiment name will include all stopped experiments; dry-run will do
-	everything but call out to minimega.
+	everything but call out to minimega. An experiment started with --dry-run
+	launches no VMs, so it can be started again, with or without --dry-run,
+	by name; 'all' leaves it alone.
+
+	--vlan-min and --vlan-max replace an end of the experiment's VLAN range,
+	which must then have both ends set or neither: minimega assigns its VLAN
+	IDs from min up to, but not including, max.
 
 	NOTE: passing the --honor-run-periodically flag will prevent the CLI from
-	returning. If Ctrl+c is pressed, the experiment will continue to run but
+	returning until the experiment stops. If Ctrl+c is pressed, the experiment will continue to run but
 	the running stage will no longer continue to be triggered for any apps
 	configured (via the scenario) to have their running stage triggered
 	periodically.`
@@ -503,12 +514,17 @@ func newExperimentStartCmd() *cobra.Command {
 			}
 
 			for _, exp := range experiments {
-				if exp.Running() {
+				// Like experiment.Start, start a dry-run experiment again: it
+				// launched no VMs. 'all' starts only stopped experiments, so it
+				// does not deploy every dry run for real.
+				if exp.Running() && (!exp.DryRun() || name == allExperiments) {
 					plog.Warn(
 						plog.TypeSystem,
 						"not starting already running experiment",
 						"exp",
 						exp.Metadata.Name,
+						"dryrun",
+						exp.DryRun(),
 					)
 
 					continue
@@ -551,7 +567,16 @@ func newExperimentStartCmd() *cobra.Command {
 				if periodic {
 					plog.Info(plog.TypeSystem, "honor-run-periodically flag was passed")
 
-					err := app.PeriodicallyRunApps(ctx, &wg, &exp)
+					// The periodic apps follow the run this start began, not the
+					// copy read before it.
+					started, err := experiment.Get(exp.Metadata.Name)
+					if err != nil {
+						err := util.HumanizeError(err, "%s", "Unable to schedule the "+exp.Metadata.Name+" experiment's periodic apps")
+
+						return err.Humanized()
+					}
+
+					err = app.PeriodicallyRunApps(ctx, &wg, started)
 					if err != nil {
 						plog.Error(
 							plog.TypeSystem,
@@ -566,7 +591,8 @@ func newExperimentStartCmd() *cobra.Command {
 			// If --honor-run-periodically was not passed, then this will return
 			// immediately so no harm no foul. Otherwise, it will wait until all
 			// Goroutines that are periodically running apps exit, which will be
-			// triggered by the context being canceled via an OS signal.
+			// triggered by the context being canceled via an OS signal, or by
+			// the experiment being stopped.
 			wg.Wait()
 
 			return nil
@@ -578,8 +604,8 @@ func newExperimentStartCmd() *cobra.Command {
 		Bool("honor-run-periodically", false, "Periodically trigger running stage in apps if configured in scenario")
 	cmd.Flags().
 		Bool("treat-mm-errors-as-warnings", false, "Treat errors from minimega as warnings instead of failing")
-	cmd.Flags().Int("vlan-min", 0, "VLAN pool minimum")
-	cmd.Flags().Int("vlan-max", 0, "VLAN pool maximum")
+	cmd.Flags().Int("vlan-min", 0, "Replace the VLAN range's min, the first VLAN ID minimega assigns (1-4095)")
+	cmd.Flags().Int("vlan-max", 0, "Replace the VLAN range's max; minimega assigns VLAN IDs below it (2-4096)")
 
 	return cmd
 }
@@ -778,13 +804,12 @@ func newExperimentReconfigureCmd() *cobra.Command {
   experiments.
 
   This differs from 'phenix experiment trigger configure' in that it re-runs
-  config validation and any registered config hooks, deletes the experiment's
-  minimega bridge so it gets recreated with current settings, and always
-  applies to all apps. Use this after editing an experiment's stored topology,
-  scenario, or deployment settings. Use 'trigger configure' to manually re-run
-  a specific app's (or apps') configure hook on demand for debugging; note it
-  does not validate the config, run config hooks, reset the minimega bridge,
-  or guard against running experiments the way 'reconfigure' does.`
+  config validation and any registered config hooks, and always applies to
+  all apps. Use this after editing an experiment's stored topology, scenario,
+  or deployment settings. Use 'trigger configure' to manually re-run a
+  specific app's (or apps') configure hook on demand for debugging; note it
+  does not validate the config, run config hooks, or guard against running
+  experiments the way 'reconfigure' does.`
 
 	cmd := &cobra.Command{
 		Use:               "reconfigure <experiment name>",
@@ -1057,9 +1082,9 @@ func newExperimentTriggerCmd() *cobra.Command {
 
   Triggering the "configure" stage is not the same as
   'phenix experiment reconfigure': this command does not validate the
-  experiment config, run config hooks, reset the minimega bridge, or guard
-  against running experiments. Use 'phenix experiment reconfigure' after
-  editing an experiment's stored topology, scenario, or deployment settings.
+  experiment config, run config hooks, or guard against running experiments.
+  Use 'phenix experiment reconfigure' after editing an experiment's stored
+  topology, scenario, or deployment settings.
 
   Valid lifecycles and shorthands: %s.`, experimentLifecycleChoices())
 
@@ -1141,13 +1166,14 @@ func newExperimentScorchCmd() *cobra.Command {
 
 			exp, err := experiment.Get(name)
 			if err != nil {
+				// exp is nil here; name the experiment from the argument.
 				err := util.HumanizeError(
 					err,
 					"%s",
 					fmt.Sprintf(
 						"Unable to start Scorch run %d for %s experiment",
 						run,
-						exp.Metadata.Name,
+						name,
 					),
 				)
 
@@ -1157,7 +1183,9 @@ func newExperimentScorchCmd() *cobra.Command {
 			ctx = app.SetContextTriggerCLI(ctx)
 
 			if err := scorchexe.Execute(ctx, exp, run); err != nil {
-				if errors.Is(err, context.Canceled) {
+				// A run interrupted by a signal is not an error, unless its
+				// stop or cleanup stage then failed.
+				if scorchexe.Canceled(err) {
 					return nil
 				}
 

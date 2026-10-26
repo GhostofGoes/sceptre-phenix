@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"phenix/util/mm"
+	"phenix/util/mm/mmcli"
 )
 
 //go:embed templates
@@ -63,8 +66,17 @@ func GenerateFromTemplate(name string, data any, w io.Writer) error {
 			}
 		},
 		"stringsJoin": strings.Join,
-		"escapeNewline": func(s string) string {
-			return strings.ReplaceAll(s, "\n", "\\n")
+		"mmQuote":     mmcli.Escape,
+		// mmWord returns value, a what, for a minimega script that writes it
+		// unquoted, refusing one that is empty or that minimega would not read
+		// as one argument (see mm.CheckArgument), which fails the rendering: a
+		// line break would end the script's line and start another command.
+		"mmWord": func(what, value string) (string, error) {
+			if err := mm.CheckArgument(value); err != nil {
+				return "", fmt.Errorf("%s: %w", what, err)
+			}
+
+			return value, nil
 		},
 	}
 

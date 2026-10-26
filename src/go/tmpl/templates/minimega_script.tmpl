@@ -6,7 +6,7 @@ vlans range {{ .VLANs.Min }} {{ .VLANs.Max }}
 
 {{- range $alias, $id := .VLANs.Aliases }}
   {{ if ne $id 0 }}
-vlans add {{ $alias }} {{ $id }}
+vlans add {{ mmWord "VLAN alias" $alias }} {{ $id }}
   {{- end }}
 {{- end }}
 
@@ -25,13 +25,13 @@ ns add-host localhost
     {{- end }}
 
 {{/* added space to place hostname above relevant block */}}
-## VM: {{ .General.Hostname }} ##
+## VM: {{ .ScriptWord "hostname" .General.Hostname }} ##
     {{- if (derefBool .General.DoNotBoot) }}
 ## DoNotBoot: {{ derefBool .General.DoNotBoot }} ##
     {{- else }}
         {{- if (derefBool .General.Snapshot) -}}
             {{ $firstDrive := index .Hardware.Drives 0 }}
-disk snapshot {{ $firstDrive.Image }} {{ $.SnapshotName .General.Hostname }}
+disk snapshot {{ .ScriptWord "drive 1 image" $firstDrive.Image }} {{ $.SnapshotName .General.Hostname }}
             {{- if ne $firstDrive.GetInjectPartition 0 }}
                 {{- if gt (len .Injections) 0 }}
 disk inject {{ $.SnapshotName .General.Hostname }}:{{ $firstDrive.GetInjectPartition }} files {{ .FileInjects $basedir }}
@@ -43,32 +43,32 @@ disk inject {{ $.SnapshotName .General.Hostname }}:{{ $firstDrive.GetInjectParti
         {{- end }}
 clear vm config
         {{- if ne (index $.Schedules .General.Hostname) "" }}
-vm config schedule {{ index $.Schedules .General.Hostname }}
+vm config schedule {{ .ScriptWord "schedule host" (index $.Schedules .General.Hostname) }}
         {{- end }}
 vm config vcpus {{ .Hardware.VCPU }}
-vm config cpu {{ .Hardware.CPU }}
+vm config cpu {{ .ScriptWord "CPU" .Hardware.CPU }}
 vm config memory {{ .Hardware.Memory }}
 vm config snapshot {{ derefBool .General.Snapshot }}
         {{- if (derefBool .General.Snapshot) }}
-vm config disk {{ .Hardware.DiskConfig ($.SnapshotName .General.Hostname) }}
+vm config disk {{ .DiskConfig ($.SnapshotName .General.Hostname) }}
         {{- else }}
-vm config disk {{ .Hardware.DiskConfig "" }}
+vm config disk {{ .DiskConfig "" }}
         {{- end }}
         {{- if eq .Hardware.OSType "linux" }}
 vm config qemu-append -vga qxl
         {{- end }}
         {{- if .Network }}
-vm config net {{ .Network.InterfaceConfig }}
+vm config net {{ .InterfaceConfig }}
         {{- end }}
-        {{- range $config, $value := .Advanced }}
+        {{- range $config, $value := .AdvancedConfig }}
 vm config {{ $config }} {{ $value }}
         {{- end }}
         {{- range $match, $replacement := .Overrides }}
-vm config qemu-override "{{ $match }}" "{{ $replacement }}"
+vm config qemu-override "{{ mmQuote $match }}" "{{ mmQuote $replacement }}"
         {{- end }}
         {{- range $label, $value := .Labels }}
-vm config tags "{{ $label }}" "{{ escapeNewline $value }}"
+vm config tags "{{ mmQuote $label }}" "{{ mmQuote $value }}"
         {{- end }}
-vm launch {{ .General.VMType }} {{ .General.Hostname }}
+vm launch {{ .ScriptWord "VM type" .General.VMType }} {{ .General.Hostname }}
     {{- end }}
 {{- end }}

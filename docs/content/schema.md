@@ -563,6 +563,7 @@ minimega_node:
         properties:
           src:
             type: string
+            minLength: 1
             example: foo.xml
           dst:
             type: string
@@ -886,8 +887,8 @@ serial_iface:
       example: 9600
     device:
       type: string
-      default: /dev/ttyS0
-      example: /dev/ttyS0
+      default: /dev/ttyphenix0
+      example: /dev/ttyphenix0
 ```
 
 ## Complete Schema

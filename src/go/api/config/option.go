@@ -61,3 +61,29 @@ func CreateWithValidation() CreateOption {
 		o.validate = true
 	}
 }
+
+type UpdateOption func(*updateOptions)
+
+type updateOptions struct {
+	force bool
+}
+
+func newUpdateOptions(opts ...UpdateOption) updateOptions {
+	var o updateOptions
+
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return o
+}
+
+// UpdateWithForce lets [Update] replace the config of a running experiment,
+// with the status the given config carries, as phenix config edit --force
+// does. Without it, Update refuses one. Update never renames a running
+// experiment.
+func UpdateWithForce(force bool) UpdateOption {
+	return func(o *updateOptions) {
+		o.force = force
+	}
+}
