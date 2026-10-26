@@ -26,7 +26,7 @@ func GetExperimentSoH(w http.ResponseWriter, r *http.Request) {
 		statusFilter = query.Get("statusFilter")
 	)
 
-	if !role.Allowed("vms", "list") {
+	if !role.Allowed("experiments", "get", exp) || !role.Allowed("vms", "list") {
 		user, _ := ctx.Value(middleware.ContextKeyUser).(string)
 		plog.Warn(
 			plog.TypeSecurity,
