@@ -35,6 +35,7 @@ import (
 	putil "phenix/util"
 	"phenix/util/common"
 	"phenix/util/mm"
+	"phenix/util/mm/mmcli"
 	"phenix/util/notes"
 	"phenix/util/plog"
 	"phenix/util/pubsub"
@@ -1448,6 +1449,10 @@ func UpdateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if badMinimegaArgs(w, req.GetDisk()) {
+		return
+	}
+
 	opts := []vm.UpdateOption{
 		vm.UpdateExperiment(expName),
 		vm.UpdateVM(name),
@@ -1573,6 +1578,12 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 	resp.Vms = make([]*proto.VM, int(req.GetTotal()))
 
 	for index, vmRequest := range req.GetVms() {
+		if err := mmcli.CheckArgs(vmRequest.GetName(), vmRequest.GetDisk()); err != nil {
+			plog.Warn(plog.TypeSecurity, "rejecting vm update", "exp", expName, "err", err)
+
+			continue
+		}
+
 		// Skip any vms that are not allowed to be updated
 		if !role.Allowed("vms", "patch", fmt.Sprintf("%s/%s", expName, vmRequest.GetName())) {
 			plog.Warn(
@@ -2391,6 +2402,12 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			if err := mmcli.CheckArg(req.GetDisk()); err != nil {
+				redeployed <- err
+
+				return
+			}
+
 			opts = []vm.RedeployOption{
 				vm.CPU(int(req.GetCpus())),
 				vm.Memory(int(req.GetRam())),
@@ -2598,6 +2615,10 @@ func StartVMCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if badMinimegaFilename(w, req.GetFilename()) {
+		return
+	}
+
 	if err := vm.StartCapture(exp, name, int(req.GetInterface()), req.GetFilename()); err != nil {
 		plog.Error(plog.TypeSystem, "starting capture for VM", "exp", exp, "vm", name, "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2767,6 +2788,10 @@ func StartCaptureSubnet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if badMinimegaArgs(w, append([]string{req.GetSubnet()}, req.GetVms()...)...) {
+		return
+	}
+
 	vmCaptures, err := vm.CaptureSubnet(exp, req.GetSubnet(), req.GetVms())
 	if err != nil {
 		plog.Error(plog.TypeSystem, "unable to start subnet capture", "err", err)
@@ -2832,6 +2857,10 @@ func StopCaptureSubnet(w http.ResponseWriter, r *http.Request) {
 		plog.Error(plog.TypeSystem, "unmarshaling request body", "err", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 
+		return
+	}
+
+	if badMinimegaArgs(w, append([]string{req.GetSubnet()}, req.GetVms()...)...) {
 		return
 	}
 
@@ -2962,6 +2991,10 @@ func SnapshotVM(w http.ResponseWriter, r *http.Request) {
 		plog.Error(plog.TypeSystem, "unmarshaling request body", "err", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 
+		return
+	}
+
+	if badMinimegaFilename(w, req.GetFilename()) {
 		return
 	}
 
@@ -3213,6 +3246,10 @@ func CommitVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if badMinimegaFilename(w, req.GetFilename()) {
+			return
+		}
+
 		filename = req.GetFilename()
 	}
 
@@ -3400,6 +3437,10 @@ func CreateVMMemorySnapshot(w http.ResponseWriter, r *http.Request) {
 			plog.Error(plog.TypeSystem, "missing filename for memory snapshot")
 			http.Error(w, "missing 'filename' key", http.StatusBadRequest)
 
+			return
+		}
+
+		if badMinimegaFilename(w, req.GetFilename()) {
 			return
 		}
 
@@ -4062,6 +4103,10 @@ func ChangeOpticalDisc(w http.ResponseWriter, r *http.Request) {
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
 
+		return
+	}
+
+	if badMinimegaArgs(w, isoPath) {
 		return
 	}
 

@@ -713,10 +713,10 @@ func addScriptToImage(img *v1.Image, name, script string) error {
 }
 
 func inject(disk string, injects ...string) error {
-	files := strings.Join(injects, " ")
+	files := mmcli.QuoteArgs(injects)
 
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk inject %s files %s", disk, files)
+	cmd.Command = fmt.Sprintf("disk inject %s files %s", mmcli.QuoteArg(disk), files)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {

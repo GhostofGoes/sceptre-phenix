@@ -23,7 +23,7 @@ var diskSizeRe = regexp.MustCompile(`^[+-]?\d+[KMGTPE]$`)
 
 func (MMDiskFiles) CommitDisk(path string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = "disk commit " + path
+	cmd.Command = "disk commit " + mmcli.QuoteArg(path)
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -31,7 +31,7 @@ func (MMDiskFiles) CommitDisk(path string) error {
 
 func (MMDiskFiles) SnapshotDisk(src, dst string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk snapshot %s %s", src, dst)
+	cmd.Command = fmt.Sprintf("disk snapshot %s %s", mmcli.QuoteArg(src), mmcli.QuoteArg(dst))
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -40,9 +40,9 @@ func (MMDiskFiles) SnapshotDisk(src, dst string) error {
 func (MMDiskFiles) RebaseDisk(src, dst string, unsafe bool) error {
 	cmd := mmcli.NewCommand()
 	if unsafe {
-		cmd.Command = fmt.Sprintf("disk set-backing %s %s", src, dst)
+		cmd.Command = fmt.Sprintf("disk set-backing %s %s", mmcli.QuoteArg(src), mmcli.QuoteArg(dst))
 	} else {
-		cmd.Command = fmt.Sprintf("disk rebase %s %s", src, dst)
+		cmd.Command = fmt.Sprintf("disk rebase %s %s", mmcli.QuoteArg(src), mmcli.QuoteArg(dst))
 	}
 
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
@@ -56,7 +56,7 @@ func (MMDiskFiles) ResizeDisk(src, size string) error {
 	}
 
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk resize %s %s", src, size)
+	cmd.Command = fmt.Sprintf("disk resize %s %s", mmcli.QuoteArg(src), size)
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -64,7 +64,8 @@ func (MMDiskFiles) ResizeDisk(src, size string) error {
 
 func (MMDiskFiles) CloneDisk(src, dst string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("shell cp %s %s", src, dst)
+	// "--" keeps a path that starts with "-" from being read as an option.
+	cmd.Command = fmt.Sprintf("shell cp -- %s %s", mmcli.QuoteArg(src), mmcli.QuoteArg(dst))
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -72,7 +73,7 @@ func (MMDiskFiles) CloneDisk(src, dst string) error {
 
 func (MMDiskFiles) RenameDisk(src, dst string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("shell mv %s %s", src, dst)
+	cmd.Command = fmt.Sprintf("shell mv -- %s %s", mmcli.QuoteArg(src), mmcli.QuoteArg(dst))
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -80,7 +81,7 @@ func (MMDiskFiles) RenameDisk(src, dst string) error {
 
 func (MMDiskFiles) DeleteDisk(src string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = "shell rm " + src
+	cmd.Command = "shell rm -- " + mmcli.QuoteArg(src)
 	_, err := mmcli.SingleDataResponse(mmcli.Run(cmd))
 
 	return err
@@ -206,7 +207,7 @@ func resolveImage(path string) []Details {
 	}
 
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk info %v recursive", path)
+	cmd.Command = fmt.Sprintf("disk info %v recursive", mmcli.QuoteArg(path))
 	images := mmcli.RunTabular(cmd)
 
 	for i, row := range images {

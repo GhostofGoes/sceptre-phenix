@@ -218,9 +218,9 @@ func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
 	cmd := mmcli.NewCommand()
 
 	if mm.IsHeadnode(dest) {
-		cmd.Command = "file get " + path
+		cmd.Command = "file get " + mmcli.QuoteArg(path)
 	} else {
-		cmd.Command = fmt.Sprintf(`mesh send %s file get %s`, dest, path)
+		cmd.Command = fmt.Sprintf(`mesh send %s file get %s`, mmcli.QuoteArg(dest), mmcli.QuoteArg(path))
 	}
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
@@ -231,7 +231,7 @@ func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
 	if mm.IsHeadnode(dest) {
 		cmd.Command = "file status"
 	} else {
-		cmd.Command = fmt.Sprintf(`mesh send %s file status`, dest)
+		cmd.Command = fmt.Sprintf(`mesh send %s file status`, mmcli.QuoteArg(dest))
 	}
 
 	for {
@@ -266,7 +266,7 @@ func (MMClusterFiles) CopyFile(path, dest string, status CopyStatus) error {
 
 func (MMClusterFiles) SyncFile(path string, status CopyStatus) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = "mesh send all file get " + path
+	cmd.Command = "mesh send all file get " + mmcli.QuoteArg(path)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -290,7 +290,7 @@ func (MMClusterFiles) DeleteFile(path string) error {
 	cmd := mmcli.NewCommand()
 
 	for _, command := range commands {
-		cmd.Command = fmt.Sprintf("%s %s", command, path)
+		cmd.Command = fmt.Sprintf("%s %s", command, mmcli.QuoteArg(path))
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {

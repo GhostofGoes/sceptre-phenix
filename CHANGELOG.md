@@ -82,6 +82,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **minimega Commands**: Quote every VM name, experiment name, filter value, file path, snapshot name, and host interpolated into a minimega command. Values from API requests and configs reached minimega unquoted, so whitespace, quotes, or `#` in them could end an argument early; in `.filter` and `namespace`, which take a nested command, the rest of the value then ran as a minimega command, including `shell`, on the minimega host. `shell rm`, `cp`, `mv`, and `mkdir` now also pass `--` before their paths, and the memory snapshot path is JSON-encoded into its QMP request. Because minimega re-parses the nested commands of `namespace` and `mesh send` with lossy quoting, and expands `$VAR` and `file:`, `http(s):`, and `tar:` arguments, the API now also rejects experiment, VM, snapshot, disk, ISO, capture, and port forward values containing quotes, backslashes, `#`, `$`, control or invisible characters, or those URL schemes with a 400; quoted values of that kind could make minimega exit. Snapshot, capture, commit, and memory snapshot file names from the API must also be relative without `..`.
 - **Workflow configs**: `POST /api/v1/workflow/configs/{branch}` no longer exposes server environment variables in its errors to callers who may not write that config, and checks the role's config names when creating one. ([#436](https://github.com/sandialabs/sceptre-phenix/pull/436))
 
 ## [1.0.0]

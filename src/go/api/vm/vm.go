@@ -459,6 +459,10 @@ func Update(opts ...UpdateOption) error { //nolint:funlen,gocyclo,cyclop  // com
 }
 
 func Screenshot(expName, vmName, size string) ([]byte, error) {
+	if err := mmcli.CheckArgs(expName, vmName, size); err != nil {
+		return nil, fmt.Errorf("getting VM screenshot: %w", err)
+	}
+
 	screenshot, err := mm.GetVMScreenshot(
 		mm.NS(expName),
 		mm.VMName(vmName),
@@ -517,7 +521,7 @@ func Restart(expName, vmName string) error {
 
 	cmd := mmcli.NewNamespacedCommand(expName)
 	qmp := `{ "execute": "system_reset" }`
-	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
+	cmd.Command = fmt.Sprintf("vm qmp %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(qmp))
 
 	_, err = mmcli.SingleResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -557,10 +561,10 @@ func Shutdown(expName, vmName string) error {
 	// Send a powerdown signal to the VM using QEMU QMP.
 	cmd := mmcli.NewNamespacedCommand(expName)
 	qmp := `{ "execute": "system_powerdown" }`
-	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
+	cmd.Command = fmt.Sprintf("vm qmp %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(qmp))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
-		cmd.Command = "vm kill " + vmName
+		cmd.Command = "vm kill " + mmcli.QuoteArg(vmName)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -590,7 +594,7 @@ func Shutdown(expName, vmName string) error {
 	if !waitForShutdown() {
 		// Forced shutdown implementation is equivalent to killing the vm without a
 		// flush to preserve the state.
-		cmd.Command = "vm kill " + vmName
+		cmd.Command = "vm kill " + mmcli.QuoteArg(vmName)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -654,7 +658,7 @@ func ResetDiskState(expName, vmName string) error {
 
 		// Kill the vm without a flush to preserve state
 		cmd := mmcli.NewNamespacedCommand(expName)
-		cmd.Command = "vm kill " + vmName
+		cmd.Command = "vm kill " + mmcli.QuoteArg(vmName)
 
 		if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 			return fmt.Errorf("killing VM %s in experiment %s: %w", vmName, expName, err)
@@ -662,12 +666,12 @@ func ResetDiskState(expName, vmName string) error {
 	}
 
 	if !mm.IsHeadnode(node) {
-		cmdPrefix = "mesh send " + node
+		cmdPrefix = "mesh send " + mmcli.QuoteArg(node)
 	}
 
 	// Create a snapshot of the original snapshot
 	// to exclude file injections in the new snapshot
-	cmd.Command = fmt.Sprintf("%s disk snapshot %s %s", cmdPrefix, origSnap, tmpSnap)
+	cmd.Command = fmt.Sprintf("%s disk snapshot %s %s", cmdPrefix, mmcli.QuoteArg(origSnap), mmcli.QuoteArg(tmpSnap))
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -681,7 +685,7 @@ func ResetDiskState(expName, vmName string) error {
 
 	// Move the snapshot to the vm instance path
 	tmpSnapFullPath := fmt.Sprintf("%s/%s", filepath.Dir(origSnap), tmpSnap)
-	cmd.Command = fmt.Sprintf("%s shell mv %s %s", cmdPrefix, tmpSnapFullPath, finalDst)
+	cmd.Command = fmt.Sprintf("%s shell mv -- %s %s", cmdPrefix, mmcli.QuoteArg(tmpSnapFullPath), mmcli.QuoteArg(finalDst))
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -856,7 +860,7 @@ func Snapshot(expName, vmName, out string, cb func(string)) error { //nolint:fun
 
 	// ***** BEGIN: SAVE VM *****
 
-	cmd.Command = fmt.Sprintf("vm save %s %s", vmName, out)
+	cmd.Command = fmt.Sprintf("vm save %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(out))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("starting memory snapshot for VM %s: %w", vmName, err)
@@ -892,7 +896,7 @@ func Snapshot(expName, vmName, out string, cb func(string)) error { //nolint:fun
 
 	// ***** END: SAVE VM *****
 
-	cmd.Command = "vm start " + vmName
+	cmd.Command = "vm start " + mmcli.QuoteArg(vmName)
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("resuming VM %s after snapshot: %w", vmName, err)
@@ -904,11 +908,11 @@ func Snapshot(expName, vmName, out string, cb func(string)) error { //nolint:fun
 	)
 
 	if !mm.IsHeadnode(host) {
-		cmdPrefix = "mesh send " + host
+		cmdPrefix = "mesh send " + mmcli.QuoteArg(host)
 	}
 
 	cmd = mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("%s shell mkdir -p %s", cmdPrefix, dst)
+	cmd.Command = fmt.Sprintf("%s shell mkdir -p -- %s", cmdPrefix, mmcli.QuoteArg(dst))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("ensuring experiment files directory exists: %w", err)
@@ -917,12 +921,10 @@ func Snapshot(expName, vmName, out string, cb func(string)) error { //nolint:fun
 	final := strings.TrimPrefix(out, expName+"_")
 
 	cmd.Command = fmt.Sprintf(
-		"%s shell mv %s/images/%s.state %s/%s.state",
+		"%s shell mv -- %s %s",
 		cmdPrefix,
-		common.PhenixBase,
-		out,
-		dst,
-		final,
+		mmcli.QuoteArg(fmt.Sprintf("%s/images/%s.state", common.PhenixBase, out)),
+		mmcli.QuoteArg(fmt.Sprintf("%s/%s.state", dst, final)),
 	)
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
@@ -930,12 +932,10 @@ func Snapshot(expName, vmName, out string, cb func(string)) error { //nolint:fun
 	}
 
 	cmd.Command = fmt.Sprintf(
-		"%s shell mv %s/images/%s.hdd %s/%s.hdd",
+		"%s shell mv -- %s %s",
 		cmdPrefix,
-		common.PhenixBase,
-		out,
-		dst,
-		final,
+		mmcli.QuoteArg(fmt.Sprintf("%s/images/%s.hdd", common.PhenixBase, out)),
+		mmcli.QuoteArg(fmt.Sprintf("%s/%s.hdd", dst, final)),
 	)
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
@@ -972,39 +972,39 @@ func Restore(expName, vmName, snap string) error {
 
 	cmd := mmcli.NewNamespacedCommand(expName)
 
-	cmd.Command = "vm config clone " + vmName
+	cmd.Command = "vm config clone " + mmcli.QuoteArg(vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("cloning config for VM %s: %w", vmName, err)
 	}
 
 	// Have to copy over UUID separate from clone.
 	// Needs to stay the same for miniccc agent to connect
-	cmd.Command = "vm config uuid " + details[0].UUID
+	cmd.Command = "vm config uuid " + mmcli.QuoteArg(details[0].UUID)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("setting uuid for VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = fmt.Sprintf("vm config state %s.state", snap)
+	cmd.Command = "vm config state " + mmcli.QuoteArg(snap+".state")
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("configuring state file for VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = fmt.Sprintf("vm config disk %s.hdd,writeback", snap)
+	cmd.Command = "vm config disk " + mmcli.QuoteArg(snap+".hdd,writeback")
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("configuring disk file for VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = "vm kill " + vmName
+	cmd.Command = "vm kill " + mmcli.QuoteArg(vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("killing VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = "vm flush " + vmName
+	cmd.Command = "vm flush " + mmcli.QuoteArg(vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("flushing VMs: %w", err)
 	}
 
-	cmd.Command = "vm launch kvm " + vmName
+	cmd.Command = "vm launch kvm " + mmcli.QuoteArg(vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("relaunching VM %s: %w", vmName, err)
 	}
@@ -1014,7 +1014,7 @@ func Restore(expName, vmName, snap string) error {
 		return fmt.Errorf("scheduling VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = "vm start " + vmName
+	cmd.Command = "vm start " + mmcli.QuoteArg(vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("starting VM %s: %w", vmName, err)
 	}
@@ -1183,13 +1183,13 @@ func CommitToDisk(expName, vmName, out string, cb func(float64)) (string, error)
 		var cmdPrefix string
 
 		if !mm.IsHeadnode(node) {
-			cmdPrefix = "mesh send " + node
+			cmdPrefix = "mesh send " + mmcli.QuoteArg(node)
 		}
 
 		tmp := fmt.Sprintf("%s/images/%s/tmp", common.PhenixBase, expName)
 
 		cmd := mmcli.NewCommand()
-		cmd.Command = fmt.Sprintf("%s shell mkdir -p %s", cmdPrefix, tmp)
+		cmd.Command = fmt.Sprintf("%s shell mkdir -p -- %s", cmdPrefix, mmcli.QuoteArg(tmp))
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -1197,7 +1197,7 @@ func CommitToDisk(expName, vmName, out string, cb func(float64)) (string, error)
 		}
 
 		tmp = fmt.Sprintf("%s/images/%s/tmp/%s.qc2", common.PhenixBase, expName, vmName)
-		cmd.Command = fmt.Sprintf("%s shell cp %s %s", cmdPrefix, snap, tmp)
+		cmd.Command = fmt.Sprintf("%s shell cp -- %s %s", cmdPrefix, mmcli.QuoteArg(snap), mmcli.QuoteArg(tmp))
 
 		err = mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -1355,30 +1355,33 @@ func MemorySnapshot(expName, vmName, out string, cb func(string)) (string, error
 	// Make sure that the memory snapshot directory exists
 	var cmdPrefix string
 	if !mm.IsHeadnode(status[0]["host"]) {
-		cmdPrefix = "mesh send " + status[0]["host"]
+		cmdPrefix = "mesh send " + mmcli.QuoteArg(status[0]["host"])
 	}
 
 	cmd.Columns = nil
 	cmd.Filters = nil
-	cmd.Command = fmt.Sprintf("%s shell mkdir -p %s", cmdPrefix, filepath.Dir(out))
+	cmd.Command = fmt.Sprintf("%s shell mkdir -p -- %s", cmdPrefix, mmcli.QuoteArg(filepath.Dir(out)))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return "", fmt.Errorf("ensuring experiment files directory exists: %w", err)
 	}
 	// ***** BEGIN: MEMORY SNAPSHOT VM *****
 
+	// Encode the path as a JSON string so quotes in it cannot change the QMP
+	// arguments.
+	protocol, _ := json.Marshal("file:" + out)
 	qmp := fmt.Sprintf(
-		`{ "execute": "dump-guest-memory", "arguments": { "protocol": "file:%s", "paging": false, "format": "elf" , "detach": true} }`,
-		out,
+		`{ "execute": "dump-guest-memory", "arguments": { "protocol": %s, "paging": false, "format": "elf" , "detach": true} }`,
+		protocol,
 	)
-	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
+	cmd.Command = fmt.Sprintf("vm qmp %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(qmp))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return "", fmt.Errorf("starting memory snapshot for VM %s: ERROR: %w", vmName, err)
 	}
 
 	qmp = `{ "execute": "query-dump" }`
-	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
+	cmd.Command = fmt.Sprintf("vm qmp %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(qmp))
 
 	var (
 		v        mm.BlockDumpResponse
@@ -1434,7 +1437,7 @@ func MemorySnapshot(expName, vmName, out string, cb func(string)) (string, error
 		// File path should be relative to the minimega files directory
 		memoryDumpPath := fmt.Sprintf("%s/files/%s", expName, filepath.Base(out))
 
-		cmd.Command = "file get " + memoryDumpPath
+		cmd.Command = "file get " + mmcli.QuoteArg(memoryDumpPath)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -1665,7 +1668,7 @@ func ChangeOpticalDisc(expName, vmName, isoPath string) error {
 	}
 
 	cmd := mmcli.NewNamespacedCommand(expName)
-	cmd.Command = fmt.Sprintf("vm cdrom change %s %s", vmName, isoPath)
+	cmd.Command = fmt.Sprintf("vm cdrom change %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(isoPath))
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -1686,7 +1689,7 @@ func EjectOpticalDisc(expName, vmName string) error {
 	}
 
 	cmd := mmcli.NewNamespacedCommand(expName)
-	cmd.Command = "vm cdrom eject " + vmName
+	cmd.Command = "vm cdrom eject " + mmcli.QuoteArg(vmName)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {

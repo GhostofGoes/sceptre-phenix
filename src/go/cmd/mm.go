@@ -18,6 +18,7 @@ import (
 	"phenix/store"
 	"phenix/util"
 	"phenix/util/common"
+	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
 )
 
@@ -165,63 +166,14 @@ func minimegaCommand(namespace string, args []string) string {
 	if len(args) == 1 {
 		command = args[0]
 	} else {
-		command = quoteMinimegaArgs(args)
+		command = mmcli.QuoteArgs(args)
 	}
 
 	if namespace != "" {
-		command = "namespace " + quoteMinimegaArg(namespace) + " " + command
+		command = "namespace " + mmcli.QuoteArg(namespace) + " " + command
 	}
 
 	return command
-}
-
-func quoteMinimegaArgs(args []string) string {
-	quoted := make([]string, len(args))
-
-	for i, arg := range args {
-		quoted[i] = quoteMinimegaArg(arg)
-	}
-
-	return strings.Join(quoted, " ")
-}
-
-// quoteMinimegaArg quotes arg so that minimega's command lexer reads it back as
-// one unchanged argument. Outside quotes the lexer splits on whitespace,
-// starts a quoted string at `"` or `'`, treats `\` as an escape, and drops
-// everything from `#` on as a comment. Inside double quotes only `"` and `\`
-// are special. An empty argument must be quoted or the lexer drops it.
-func quoteMinimegaArg(arg string) string {
-	if arg != "" && !strings.ContainsFunc(arg, needsMinimegaQuote) {
-		return arg
-	}
-
-	var b strings.Builder
-
-	b.WriteByte('"')
-
-	for _, r := range arg {
-		switch r {
-		case '"', '\\':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-
-	b.WriteByte('"')
-
-	return b.String()
-}
-
-func needsMinimegaQuote(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(`"'\#`, r)
 }
 
 // mmArgsCompletion completes minimega commands using suggestions from the
@@ -244,7 +196,7 @@ func mmArgsCompletion(
 
 	line := toComplete
 	if len(args) > 0 {
-		line = quoteMinimegaArgs(args) + " " + toComplete
+		line = mmcli.QuoteArgs(args) + " " + toComplete
 	}
 
 	suggestions, err := suggestMinimega(base, line)

@@ -1403,7 +1403,7 @@ func waitForTimeDelay(ctx context.Context, ns, host string, delay time.Duration)
 		return ctx.Err()
 	case <-time.After(delay):
 		cmd := mmcli.NewNamespacedCommand(ns)
-		cmd.Command = "vm start " + host
+		cmd.Command = "vm start " + mmcli.QuoteArg(host)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -1452,7 +1452,7 @@ func waitForC2(
 
 			if done {
 				cmd := mmcli.NewNamespacedCommand(ns)
-				cmd.Command = "vm start " + host
+				cmd.Command = "vm start " + mmcli.QuoteArg(host)
 
 				err := mmcli.ErrorResponse(mmcli.Run(cmd))
 				if err != nil {

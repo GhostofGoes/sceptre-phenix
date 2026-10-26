@@ -63,7 +63,7 @@ type Minimega struct{}
 // with the namespace that was active when it started.
 func (Minimega) ReadScriptFromFile(ns, filename string) error {
 	cmd := mmcli.NewNamespacedCommand(ns)
-	cmd.Command = "read " + filename
+	cmd.Command = "read " + mmcli.QuoteArg(filename)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -75,7 +75,7 @@ func (Minimega) ReadScriptFromFile(ns, filename string) error {
 
 func (Minimega) ClearNamespace(ns string) error {
 	cmd := mmcli.NewCommand()
-	cmd.Command = "clear namespace " + ns
+	cmd.Command = "clear namespace " + mmcli.QuoteArg(ns)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -103,7 +103,7 @@ func (Minimega) LaunchVMs(ns string, start ...string) error {
 		}
 	} else {
 		for _, name := range start {
-			cmd.Command = "vm start " + name
+			cmd.Command = "vm start " + mmcli.QuoteArg(name)
 
 			err := mmcli.ErrorResponse(mmcli.Run(cmd))
 			if err != nil {
@@ -254,10 +254,10 @@ func (m Minimega) GetVMInfo(opts ...Option) VMs { //nolint:funlen // complex log
 
 		if snapshot && disk != "" {
 			cmd = mmcli.NewCommand()
-			cmd.Command = "disk info " + disk
+			cmd.Command = "disk info " + mmcli.QuoteArg(disk)
 
 			if !IsHeadnode(row[hostColumn]) {
-				cmd.Command = fmt.Sprintf("mesh send %s %s", row[hostColumn], cmd.Command)
+				cmd.Command = fmt.Sprintf("mesh send %s %s", mmcli.QuoteArg(row[hostColumn]), cmd.Command)
 			}
 
 			resp := mmcli.RunTabular(cmd)
@@ -290,7 +290,10 @@ func (Minimega) GetVMScreenshot(opts ...Option) ([]byte, error) {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = fmt.Sprintf("vm screenshot %s file /dev/null %s", o.vm, o.screenshotSize)
+	cmd.Command = "vm screenshot " + mmcli.QuoteArg(o.vm) + " file /dev/null"
+	if o.screenshotSize != "" {
+		cmd.Command += " " + mmcli.QuoteArg(o.screenshotSize)
+	}
 
 	var (
 		screenshot []byte
@@ -365,7 +368,7 @@ func (Minimega) StartVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "vm start " + o.vm
+	cmd.Command = "vm start " + mmcli.QuoteArg(o.vm)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -379,7 +382,7 @@ func (Minimega) StopVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "vm stop " + o.vm
+	cmd.Command = "vm stop " + mmcli.QuoteArg(o.vm)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -405,7 +408,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 
 	cmd.Filters = nil
 
-	cmd.Command = "vm config clone " + o.vm
+	cmd.Command = "vm config clone " + mmcli.QuoteArg(o.vm)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -419,7 +422,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		return fmt.Errorf("clearing config for VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
-	cmd.Command = "vm kill " + o.vm
+	cmd.Command = "vm kill " + mmcli.QuoteArg(o.vm)
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -469,7 +472,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 					return fmt.Errorf("deleting old disk snapshot: %w", err)
 				}
 
-				cmd.Command = fmt.Sprintf("disk snapshot %s %s", newDisk.path, old.base)
+				cmd.Command = fmt.Sprintf("disk snapshot %s %s", mmcli.QuoteArg(newDisk.path), mmcli.QuoteArg(old.base))
 
 				err = mmcli.ErrorResponse(mmcli.Run(cmd))
 				if err != nil {
@@ -494,7 +497,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 			}
 		}
 
-		cmd.Command = "vm config disk " + disk
+		cmd.Command = "vm config disk " + mmcli.QuoteArg(disk)
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -502,7 +505,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		}
 	}
 
-	cmd.Command = "vm launch kvm " + o.vm
+	cmd.Command = "vm launch kvm " + mmcli.QuoteArg(o.vm)
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -516,7 +519,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		return fmt.Errorf("launching scheduled VMs in namespace %s: %w", o.ns, err)
 	}
 
-	cmd.Command = "vm start " + o.vm
+	cmd.Command = "vm start " + mmcli.QuoteArg(o.vm)
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -530,7 +533,7 @@ func (Minimega) KillVM(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = "vm kill " + o.vm
+	cmd.Command = "vm kill " + mmcli.QuoteArg(o.vm)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -578,7 +581,7 @@ func (Minimega) SetVMTags(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = fmt.Sprintf("clear vm tag %s ", o.vm)
+	cmd.Command = "clear vm tag " + mmcli.QuoteArg(o.vm)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -586,7 +589,7 @@ func (Minimega) SetVMTags(opts ...Option) error {
 	}
 
 	for k, v := range o.tags {
-		cmd.Command = fmt.Sprintf("vm tag %s \"%s\" \"%s\"", o.vm, k, v)
+		cmd.Command = fmt.Sprintf("vm tag %s %s %s", mmcli.QuoteArg(o.vm), mmcli.QuoteArg(k), mmcli.QuoteArg(v))
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -619,9 +622,14 @@ func (Minimega) ConnectVMInterface(opts ...Option) error {
 }
 
 func connectVMInterfaceCommand(o options) string {
-	cmd := fmt.Sprintf("vm net connect %s %d %s", o.vm, o.connectIface, o.connectVLAN)
+	cmd := fmt.Sprintf(
+		"vm net connect %s %d %s",
+		mmcli.QuoteArg(o.vm),
+		o.connectIface,
+		mmcli.QuoteArg(o.connectVLAN),
+	)
 	if o.bridge != "" {
-		cmd += " " + o.bridge
+		cmd += " " + mmcli.QuoteArg(o.bridge)
 	}
 
 	return cmd
@@ -631,7 +639,7 @@ func (Minimega) DisconnectVMInterface(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = fmt.Sprintf("vm net disconnect %s %d", o.vm, o.connectIface)
+	cmd.Command = fmt.Sprintf("vm net disconnect %s %d", mmcli.QuoteArg(o.vm), o.connectIface)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -651,7 +659,7 @@ func (Minimega) CreateBridge(opts ...Option) error {
 	o := NewOptions(opts...)
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = fmt.Sprintf("ns bridge %s gre", o.bridge)
+	cmd.Command = fmt.Sprintf("ns bridge %s gre", mmcli.QuoteArg(o.bridge))
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -676,16 +684,16 @@ func (Minimega) CreateTunnel(opts ...Option) error {
 	var cmdPrefix string
 
 	if !IsHeadnode(host) {
-		cmdPrefix = fmt.Sprintf("mesh send %s namespace %s", host, o.ns)
+		cmdPrefix = fmt.Sprintf("mesh send %s namespace %s", mmcli.QuoteArg(host), mmcli.QuoteArg(o.ns))
 	}
 
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 	cmd.Command = fmt.Sprintf(
 		"%s cc tunnel %s %d %s %d",
 		cmdPrefix,
-		o.vm,
+		mmcli.QuoteArg(o.vm),
 		o.srcPort,
-		o.dstHost,
+		mmcli.QuoteArg(o.dstHost),
 		o.dstPort,
 	)
 
@@ -710,7 +718,7 @@ func (Minimega) GetTunnels(opts ...Option) []map[string]string {
 	cmd.Command = "cc tunnel list all"
 
 	if o.vm != "" {
-		cmd.Command = "cc tunnel list " + o.vm
+		cmd.Command = "cc tunnel list " + mmcli.QuoteArg(o.vm)
 	}
 
 	if o.dstHost != "" {
@@ -718,7 +726,7 @@ func (Minimega) GetTunnels(opts ...Option) []map[string]string {
 	}
 
 	if o.dstPort != 0 {
-		cmd.Filters = append(cmd.Filters, fmt.Sprintf("'dst port'=%d", o.dstPort))
+		cmd.Filters = append(cmd.Filters, fmt.Sprintf("dst port=%d", o.dstPort))
 	}
 
 	return mmcli.RunTabular(cmd)
@@ -740,12 +748,12 @@ func (Minimega) CloseTunnel(opts ...Option) error {
 	)
 
 	if !IsHeadnode(host) {
-		cmdPrefix = fmt.Sprintf("mesh send %s namespace %s", host, o.ns)
+		cmdPrefix = fmt.Sprintf("mesh send %s namespace %s", mmcli.QuoteArg(host), mmcli.QuoteArg(o.ns))
 	}
 
 	for _, row := range tunnels {
 		cmd := mmcli.NewNamespacedCommand(o.ns)
-		cmd.Command = fmt.Sprintf("%s cc tunnel close %s %s", cmdPrefix, o.vm, row["id"])
+		cmd.Command = fmt.Sprintf("%s cc tunnel close %s %s", cmdPrefix, mmcli.QuoteArg(o.vm), mmcli.QuoteArg(row["id"]))
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {
@@ -782,19 +790,24 @@ func (Minimega) StartVMCapture(opts ...Option) error {
 	var cmdPrefix string
 
 	if !IsHeadnode(host) {
-		cmdPrefix = "mesh send " + host
+		cmdPrefix = "mesh send " + mmcli.QuoteArg(host)
 	}
 
 	dir := common.PhenixBase + "/images/" + filepath.Dir(o.captureFile)
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("%s shell mkdir -p %s", cmdPrefix, dir)
+	cmd.Command = fmt.Sprintf("%s shell mkdir -p -- %s", cmdPrefix, mmcli.QuoteArg(dir))
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("ensuring experiment files directory exists: %w", err)
 	}
 
 	cmd = mmcli.NewNamespacedCommand(o.ns)
-	cmd.Command = fmt.Sprintf("capture pcap vm %s %d %s", o.vm, o.captureIface, o.captureFile)
+	cmd.Command = fmt.Sprintf(
+		"capture pcap vm %s %d %s",
+		mmcli.QuoteArg(o.vm),
+		o.captureIface,
+		mmcli.QuoteArg(o.captureFile),
+	)
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf(
@@ -838,9 +851,9 @@ func (Minimega) StopVMCapture(opts ...Option) error {
 	cmd := mmcli.NewNamespacedCommand(o.ns)
 
 	if o.captureIfaceSet {
-		cmd.Command = fmt.Sprintf("capture pcap delete vm %s %d", o.vm, o.captureIface)
+		cmd.Command = fmt.Sprintf("capture pcap delete vm %s %d", mmcli.QuoteArg(o.vm), o.captureIface)
 	} else {
-		cmd.Command = "capture pcap delete vm " + o.vm
+		cmd.Command = "capture pcap delete vm " + mmcli.QuoteArg(o.vm)
 	}
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
@@ -1172,9 +1185,9 @@ func (m Minimega) ExecC2Command(opts ...C2Option) (string, error) { //nolint:fun
 		// an implicit tag filter matched against the VM name with a plain
 		// string compare
 		if vmUUID != "" {
-			c.Command = "cc filter uuid=" + vmUUID
+			c.Command = "cc filter " + mmcli.QuoteArg("uuid="+vmUUID)
 		} else {
-			c.Command = "cc filter name=" + vm
+			c.Command = "cc filter " + mmcli.QuoteArg("name="+vm)
 		}
 
 		if err := mmcli.ErrorResponse(mmcli.Run(c)); err != nil {
@@ -1259,7 +1272,7 @@ func (m Minimega) ExecC2Command(opts ...C2Option) (string, error) { //nolint:fun
 		if *o.mount {
 			var (
 				path = GetLocalMountPath(o.ns, o.vm)
-				cmd  = fmt.Sprintf("cc mount %s %s", vmName, path)
+				cmd  = fmt.Sprintf("cc mount %s %s", mmcli.QuoteArg(vmName), mmcli.QuoteArg(path))
 			)
 
 			if err := os.MkdirAll(path, 0o750); err != nil {
@@ -1467,7 +1480,7 @@ func (m Minimega) TapVLAN(opts ...TapOption) error { //nolint:funlen // complex 
 			o.host,
 		)
 
-		cmd = fmt.Sprintf("ip link set dev %s netns %s", o.name, o.name)
+		cmd = fmt.Sprintf("ip link set dev %s netns %s", mmcli.QuoteArg(o.name), mmcli.QuoteArg(o.name))
 
 		err = m.MeshShell(o.host, cmd)
 		if err != nil {
@@ -1483,7 +1496,7 @@ func (m Minimega) TapVLAN(opts ...TapOption) error { //nolint:funlen // complex 
 			o.host,
 		)
 
-		cmd = fmt.Sprintf("ip netns exec %s ip link set dev %s up", o.name, o.name)
+		cmd = fmt.Sprintf("ip netns exec %s ip link set dev %s up", mmcli.QuoteArg(o.name), mmcli.QuoteArg(o.name))
 
 		err = m.MeshShell(o.host, cmd)
 		if err != nil {
@@ -1500,7 +1513,12 @@ func (m Minimega) TapVLAN(opts ...TapOption) error { //nolint:funlen // complex 
 				o.host,
 			)
 
-			cmd := fmt.Sprintf("ip netns exec %s ip addr add %s dev %s", o.name, o.ip, o.name)
+			cmd := fmt.Sprintf(
+				"ip netns exec %s ip addr add %s dev %s",
+				mmcli.QuoteArg(o.name),
+				mmcli.QuoteArg(o.ip),
+				mmcli.QuoteArg(o.name),
+			)
 
 			err := m.MeshShell(o.host, cmd)
 			if err != nil {
@@ -1526,7 +1544,7 @@ func (Minimega) MeshShell(host, command string) error {
 	if IsHeadnode(host) {
 		cmd.Command = "shell " + command
 	} else {
-		cmd.Command = fmt.Sprintf("mesh send %s shell %s", host, command)
+		cmd.Command = fmt.Sprintf("mesh send %s shell %s", mmcli.QuoteArg(host), command)
 	}
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
@@ -1547,7 +1565,7 @@ func (Minimega) MeshShellResponse(host, command string) (string, error) {
 	if IsHeadnode(host) {
 		cmd.Command = "shell " + command
 	} else {
-		cmd.Command = fmt.Sprintf("mesh send %s shell %s", host, command)
+		cmd.Command = fmt.Sprintf("mesh send %s shell %s", mmcli.QuoteArg(host), command)
 	}
 
 	var (
@@ -1595,7 +1613,7 @@ func (Minimega) MeshSend(ns, host, command string) error {
 	if IsHeadnode(host) {
 		cmd.Command = command
 	} else {
-		cmd.Command = fmt.Sprintf("mesh send %s %s", host, command)
+		cmd.Command = fmt.Sprintf("mesh send %s %s", mmcli.QuoteArg(host), command)
 	}
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
@@ -1682,10 +1700,10 @@ func flush(ns string) error {
 }
 
 func inject(disk string, part int, injects ...string) error {
-	files := strings.Join(injects, " ")
+	files := mmcli.QuoteArgs(injects)
 
 	cmd := mmcli.NewCommand()
-	cmd.Command = fmt.Sprintf("disk inject %s:%d files %s", disk, part, files)
+	cmd.Command = fmt.Sprintf("disk inject %s files %s", mmcli.QuoteArg(fmt.Sprintf("%s:%d", disk, part)), files)
 
 	err := mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -1704,7 +1722,7 @@ func deleteFile(path string) error {
 	cmd := mmcli.NewCommand()
 
 	for _, command := range commands {
-		cmd.Command = fmt.Sprintf("%s %s", command, path)
+		cmd.Command = fmt.Sprintf("%s %s", command, mmcli.QuoteArg(path))
 
 		err := mmcli.ErrorResponse(mmcli.Run(cmd))
 		if err != nil {

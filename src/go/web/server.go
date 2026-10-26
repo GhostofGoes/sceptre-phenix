@@ -413,6 +413,7 @@ func Start(opts ...ServerOption) error {
 	}
 
 	api.Use(middleware.Auth(o.jwtKey, o.proxyAuthHeader))
+	api.Use(rejectUnsafeMinimegaVars)
 
 	switch o.logMiddleware {
 	case "full":

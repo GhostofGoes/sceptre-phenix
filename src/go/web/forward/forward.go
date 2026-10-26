@@ -16,6 +16,7 @@ import (
 	"phenix/api/experiment"
 	"phenix/app"
 	"phenix/util/mm"
+	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
 	"phenix/util/pubsub"
 	"phenix/web/broker"
@@ -97,6 +98,11 @@ func init() { //nolint:gochecknoinits // background worker
 
 func createPortForward(exp, vm, src, host, dst, user string) error {
 	var err error
+
+	// The destination host goes into a minimega cc tunnel command.
+	if err := mmcli.CheckArg(host); err != nil {
+		return fmt.Errorf("invalid destination host: %w", err)
+	}
 
 	listener := ft.Listener{Exp: exp, VM: vm, Owner: user} //nolint:exhaustruct // partial initialization
 

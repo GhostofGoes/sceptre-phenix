@@ -35,8 +35,10 @@ func (c *Command) String() string {
 
 	// Apply filters first so we don't need to worry about the columns not
 	// including the filtered fields.
+	// .filter takes the rest of the line as a nested command, so a filter value
+	// left unquoted could end the filter early and run a command of its own.
 	for _, f := range c.Filters {
-		cmd = fmt.Sprintf(".filter %v %v", f, cmd)
+		cmd = fmt.Sprintf(".filter %v %v", QuoteArg(f), cmd)
 	}
 
 	if len(c.Columns) > 0 {
@@ -52,7 +54,7 @@ func (c *Command) String() string {
 
 	// If there's a namespace, use it.
 	if c.Namespace != "" {
-		cmd = fmt.Sprintf("namespace %q %v", c.Namespace, cmd)
+		cmd = fmt.Sprintf("namespace %v %v", QuoteArg(c.Namespace), cmd)
 	}
 
 	// Don't record command in history.
