@@ -1448,6 +1448,12 @@ func UpdateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateVMImage(expName, name, req.GetDisk()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
 	opts := []vm.UpdateOption{
 		vm.UpdateExperiment(expName),
 		vm.UpdateVM(name),
@@ -1584,6 +1590,23 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 				expName,
 				"vm",
 				vmRequest.GetName(),
+			)
+
+			continue
+		}
+
+		if err := validateVMImage(expName, vmRequest.GetName(), vmRequest.GetDisk()); err != nil {
+			plog.Warn(
+				plog.TypeSecurity,
+				"rejecting vm disk image",
+				"user",
+				middleware.UserFromContext(ctx),
+				"exp",
+				expName,
+				"vm",
+				vmRequest.GetName(),
+				"err",
+				err,
 			)
 
 			continue
@@ -2386,6 +2409,12 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 			// Update VM struct with values from POST request body.
 			err := unmarshaler.Unmarshal(body, &req)
 			if err != nil {
+				redeployed <- err
+
+				return
+			}
+
+			if err := validateImagePath(expName, req.GetDisk(), append(topologyImages(exp), v.Disk)...); err != nil {
 				redeployed <- err
 
 				return
@@ -4061,6 +4090,12 @@ func ChangeOpticalDisc(w http.ResponseWriter, r *http.Request) {
 			isoPath,
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	if err := validateISOPath(exp, name, isoPath); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 
 		return
 	}

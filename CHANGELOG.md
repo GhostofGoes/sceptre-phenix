@@ -82,6 +82,7 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- **VM Disk and ISO Paths**: Updating or redeploying a VM and changing its optical disc through the API accepted any host path as the image, so a role with `vms` `patch`, `vms/redeploy` `update`, or `vms/cdrom` `update`, such as Experiment User, could attach a host block device or file to a guest. These images must now be the VM's current disk, an image in the experiment's topology, or a path inside the minimega files directory that is not under another experiment's `files` directory, and they may not use `$` variables, URL or `file:`/`tar:` prefixes, quotes, or control characters that minimega would rewrite. The CLI is unchanged.
 - **Workflow configs**: `POST /api/v1/workflow/configs/{branch}` no longer exposes server environment variables in its errors to callers who may not write that config, and checks the role's config names when creating one. ([#436](https://github.com/sandialabs/sceptre-phenix/pull/436))
 
 ## [1.0.0]
