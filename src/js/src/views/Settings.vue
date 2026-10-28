@@ -2,7 +2,10 @@
   <section>
     <div class="form-section">
       <h1 class="title is-4">Settings</h1>
-      <form class="content" @submit.prevent="sendSettingsToServer">
+      <p v-if="!loaded">
+        {{ loadingText('settings') }}
+      </p>
+      <form v-else class="content" @submit.prevent="sendSettingsToServer">
         <h2 class="is-size-5">Password Settings</h2>
         <b-field>
           <b-switch v-model="settings_obj.password_settings.lowercase_req">
@@ -129,18 +132,46 @@
         </b-field>
 
         <hr />
-        <!-- <b-button @click="getSettings">Reset Form</b-button> -->
-        <b-button native-type="submit" :disabled="!timeoutValid"
-          >Save Changes</b-button
-        >
+        <b-button :disabled="!changed" @click="resetForm">Reset Form</b-button>
+        <b-button native-type="submit" :disabled="!changed" :loading="saving">
+          Save Changes
+        </b-button>
       </form>
     </div>
   </section>
 </template>
 <script>
-  import axiosInstance from '@/utils/axios.js';
+  import * as settingsApi from '@/api/settings.js';
   import { useErrorNotification } from '@/utils/errorNotif';
+  import { cachePage } from '@/utils/pageCache.js';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
 
+  const copy = (obj) => JSON.parse(JSON.stringify(obj));
+
+  export default {
+    created() {
+      this.loader = createPageLoader({
+        key: 'settings',
+        fetch: pageFetchers.settings,
+        apply: (data) => {
+          // a reload must not wipe out edits that have not been saved yet
+          const keepEdits = this.loaded && this.changed;
+          this.saved = copy(data);
+          if (!keepEdits) this.settings_obj = copy(data);
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
+    },
+
+    beforeUnmount() {
+      this.loader.stop();
+    },
+
+    computed: {
+      changed() {
+        return JSON.stringify(this.settings_obj) !== JSON.stringify(this.saved);
   /**
    * Why the idle timeout settings are not valid, or null for each field that
    * is valid. The timeout is at least 0.5 minutes and the warning is shorter.
@@ -166,76 +197,46 @@
     return errors;
   }
 
-  export default {
-    computed: {
-      timeoutErrors() {
-        return timeoutErrors(this.settings_obj.timeout_settings);
       },
-      timeoutError() {
-        return this.timeoutErrors.timeout;
-      },
-      warningError() {
-        return this.timeoutErrors.warning;
-      },
-      timeoutValid() {
-        return !this.timeoutError && !this.warningError;
-      },
-    },
-
-    async created() {
-      this.getSettings();
     },
 
     methods: {
-      getSettings() {
-        console.log('getting settings');
-        axiosInstance.get('settings').then((response) => {
-          const state = response.data;
-          console.log(state);
-          this.settings_obj = state;
-        });
-      },
-      sendSettingsToServer() {
-        if (!this.timeoutValid) {
-          return;
-        }
+      loadingText,
 
-        axiosInstance
-          .post('settings', this.settings_obj, { timeout: 0 })
-          .then((resp) => {
-            console.log(resp);
+      // back to the settings last loaded from or saved to the server
+      resetForm() {
+        this.settings_obj = copy(this.saved);
+      },
+
+      sendSettingsToServer() {
+        // Enter submits the form too
+        if (this.saving || !this.changed || !this.timeoutValid) return;
+        const sent = copy(this.settings_obj);
+        this.saving = true;
+        settingsApi
+          .saveSettings(sent)
+          .then((_) => {
+            this.saved = sent;
+            cachePage('settings', copy(sent));
             this.$buefy.toast.open({
               message: 'Settings updated',
               type: 'is-success',
-              duration: 3000,
             });
           })
           .catch((err) => {
             useErrorNotification(err);
+          })
+          .finally(() => {
+            this.saving = false;
           });
       },
     },
     data() {
       return {
-        settings_obj: {
-          password_settings: {
-            number_req: false,
-            symbol_req: false,
-            lowercase_req: false,
-            uppercase_req: false,
-            min_length: 8,
-          },
-          timeout_settings: {
-            enabled: false,
-            timeout_min: 30,
-            warning_min: 3,
-          },
-          logging_settings: {
-            max_file_age: 365,
-            max_file_rotations: 3,
-            max_file_size: 100,
-          },
-        },
+        loaded: false,
+        saving: false,
+        saved: null,
+        settings_obj: null,
       };
     },
   };

@@ -10,32 +10,63 @@
       "const": "User"
     },
     "metadata": {
+      "description": "Name and optional metadata for the configuration resource.",
       "properties": {
         "annotations": {
           "additionalProperties": {
             "type": "string"
           },
+          "description": "String-valued metadata associated with the configuration resource.",
+          "examples": [
+            {
+              "owner": "range-team"
+            }
+          ],
+          "title": "Annotations",
           "type": "object"
         },
         "created": {
+          "description": "RFC 3339 time at which phenix created the configuration resource.",
+          "examples": [
+            "2026-01-01T00:00:00Z"
+          ],
+          "readOnly": true,
+          "title": "Created",
           "type": "string"
         },
         "name": {
+          "description": "Unique name of the configuration resource.",
+          "examples": [
+            "example-topology"
+          ],
           "minLength": 1,
           "pattern": "^[a-zA-Z0-9_@.-]*$",
+          "title": "Name",
           "type": "string"
         },
         "updated": {
+          "description": "RFC 3339 time at which phenix last updated the configuration resource.",
+          "examples": [
+            "2026-01-02T00:00:00Z"
+          ],
+          "readOnly": true,
+          "title": "Updated",
           "type": "string"
         }
       },
       "required": [
         "name"
       ],
+      "title": "Metadata",
       "type": "object"
     },
     "spec": {
       "$ref": "defs.schema.json#/$defs/User",
+      "description": "Kind-specific configuration fields.",
+      "examples": [
+        {}
+      ],
+      "title": "Specification",
       "type": "object"
     }
   },

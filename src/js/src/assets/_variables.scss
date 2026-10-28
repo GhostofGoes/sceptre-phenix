@@ -2,10 +2,6 @@
 @import 'bulma/sass/utilities/_all';
 @import 'buefy/src/scss/utils/_all';
 
-// The text and surface colors below give text a contrast of 7:1 or more
-// (WCAG 1.4.6) on each surface that holds them.
-
-$logo: #9a4420;
 // derived via: https://m2.material.io/design/color/the-color-system.html#tools-for-picking-colors
 // Bulma builds its $colors map in the import above, before these two values
 // are set. The `is-primary` and `is-link` classes use the $colors map below;
@@ -27,8 +23,6 @@ $background-ter: #4a4a4a;
 $border: white;
 $text: white;
 $text-strong: white;
-$text-weak: whitesmoke;
-$input-color: black;
 
 // Link text: 7.2:1 on $background-ter, 10:1 on $background.
 $link-text: #d0ecf3;
@@ -169,7 +163,6 @@ $input-icon-color: lighten($scheme-main, 20);
 $input-icon-active-color: lighten($scheme-main, 10);
 $input-hover-color: lighten($link, 10); // dropdown arrows etc.
 
-$progress-text-color: black;
 $hr-background-color: whitesmoke;
 
 $fullhd: 1536px + (2 * $gap);

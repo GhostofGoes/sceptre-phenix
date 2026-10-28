@@ -191,14 +191,9 @@
               v-model="user.new_password"></b-input>
           </b-field>
           <b-field
-            v-if="roleAllowed('users', 'create')"
-            label="Role"
-            label-for="edit-user-role">
-            <b-select
-              id="edit-user-role"
-              :compat-fallthrough="false"
-              v-model="user.role_name"
-              expanded>
+            v-if="roleAllowed('users/roles', 'patch', user.username)"
+            label="Role">
+            <b-select v-model="user.role_name" expanded>
               <option v-for="(r, i) in roleNames" :key="i">
                 {{ r }}
               </option>
@@ -210,7 +205,7 @@
             label-for="edit-user-resource-names"
             grouped
             style="padding-bottom: 20px"
-            v-if="roleAllowed('users', 'create')">
+            v-if="roleAllowed('users/roles', 'patch', user.username)">
             <b-input
               id="edit-user-resource-names"
               :compat-fallthrough="false"
@@ -340,6 +335,28 @@
     </b-modal>
     <!-- BODY -->
     <b-field grouped position="is-right">
+      <div
+        v-if="paginationNeeded"
+        class="control is-flex is-align-items-center">
+        <b-switch v-model="table.isPaginated" size="is-small" type="is-light"
+          >Paginate</b-switch
+        >
+      </div>
+      <b-field>
+        <b-input
+          v-model="searchText"
+          placeholder="Find a user"
+          icon="search"
+          aria-label="Find a user"></b-input>
+        <p v-if="searchText" class="control">
+          <button
+            class="button input-button"
+            aria-label="Clear user search"
+            @click="searchText = ''">
+            <b-icon icon="window-close"></b-icon>
+          </button>
+        </p>
+      </b-field>
       <p v-if="roleAllowed('users', 'create')" class="control">
         <b-tooltip label="create a new user" type="is-light is-left">
           <button
@@ -353,8 +370,8 @@
     </b-field>
     <div>
       <b-table
-        :data="users"
-        :paginated="table.isPaginated"
+        :data="filteredUsers"
+        :paginated="table.isPaginated && paginationNeeded"
         aria-next-label="Next page"
         aria-previous-label="Previous page"
         aria-page-label="Page"
@@ -365,32 +382,62 @@
         :pagination-size="table.paginationSize"
         :default-sort-direction="table.defaultSortDirection"
         default-sort="username">
-        <b-table-column field="username" label="User" sortable v-slot="props">
-          <!-- A button, so the keyboard reaches it too. -->
-          <b-tooltip label="change user settings" type="is-dark">
-            <button
-              type="button"
-              class="users__name"
-              @click="editUser(props.row.username)">
+        <template #empty>
+          <section class="section">
+            <div class="content has-text-white has-text-centered">
+              {{
+                !loaded
+                  ? loadingText('users')
+                  : searchText
+                    ? 'No users match the search'
+                    : 'No users found'
+              }}
+            </div>
+          </section>
+        </template>
+        <b-table-column
+          field="username"
+          label="User"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
+          <b-tooltip
+            v-if="roleAllowed('users', 'patch', props.row.username)"
+            label="change user settings"
+            type="is-dark">
+            <a @click="editUser(props.row.username)">
               {{ props.row.username }}
-            </button>
+            </a>
           </b-tooltip>
+          <template v-else>{{ props.row.username }}</template>
         </b-table-column>
-        <b-table-column field="first_name" label="First Name" v-slot="props">
+        <b-table-column
+          field="first_name"
+          label="First Name"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
           {{ props.row.first_name }}
         </b-table-column>
         <b-table-column
           field="last_name"
           label="Last Name"
           sortable
+          header-class="sort-inline"
           v-slot="props">
           {{ props.row.last_name }}
         </b-table-column>
-        <b-table-column field="role" label="Role" sortable v-slot="props">
+        <b-table-column
+          field="role_name"
+          label="Role"
+          sortable
+          header-class="sort-inline"
+          v-slot="props">
           {{ props.row.role_name ? props.row.role_name : 'Not yet assigned' }}
         </b-table-column>
         <b-table-column label="Actions" width="150" centered v-slot="props">
           <b-tooltip
+            v-if="userTokenAllowed(props.row.username)"
             class="action"
             :delay="500"
             label="create new user token"
@@ -404,13 +451,13 @@
             </button>
           </b-tooltip>
           <b-tooltip
+            v-if="roleAllowed('users', 'delete', props.row.username)"
             class="action"
             :delay="500"
             label="delete user"
             type="is-light"
             multilined>
             <button
-              v-if="roleAllowed('users', 'delete', props.row.username)"
               class="button is-light is-small"
               :aria-label="`Delete user ${props.row.username}`"
               @click="deleteUser(props.row.username)">
@@ -418,13 +465,13 @@
             </button>
           </b-tooltip>
           <b-tooltip
+            v-if="roleAllowed('users', 'patch', props.row.username)"
             class="action"
             :delay="500"
             label="edit user"
             type="is-light"
             multilined>
             <button
-              v-if="roleAllowed('users', 'patch', props.row.username)"
               class="button is-light is-small"
               :aria-label="`Edit user ${props.row.username}`"
               @click="editUser(props.row.username)">
@@ -433,18 +480,6 @@
           </b-tooltip>
         </b-table-column>
       </b-table>
-      <br />
-      <b-field v-if="paginationNeeded" grouped position="is-right">
-        <div class="control is-flex">
-          <b-switch
-            v-model="table.isPaginated"
-            size="is-small"
-            type="is-light"
-            @input="changePaginate()"
-            >Paginate</b-switch
-          >
-        </div>
-      </b-field>
     </div>
     <b-loading
       :is-full-page="false"
@@ -454,48 +489,75 @@
 </template>
 
 <script>
-  import axiosInstance from '@/utils/axios.js';
+  import * as settingsApi from '@/api/settings.js';
+  import * as usersApi from '@/api/users.js';
   import { uniq } from 'lodash-es';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import { usePhenixStore } from '@/store';
   import { useTable } from '@/utils/useTable.js';
-  import { roleAllowed } from '@/utils/rbac.js';
-  import { useErrorNotification } from '@/utils/errorNotif';
+  import { roleAllowed, userTokenAllowed } from '@/utils/rbac.js';
+  import { showError, useErrorNotification } from '@/utils/errorNotif';
+  import { createPageLoader, loadingText } from '@/utils/pageLoader.js';
+  import { pageFetchers } from '@/utils/pageData.js';
+
+  // Resource names are typed space-separated and sent as a list.
+  function splitResourceNames(names) {
+    return (names ?? '').split(/\s+/).filter(Boolean);
+  }
 
   export default {
     setup() {
-      return { ...useTable(), roleAllowed };
+      return { ...useTable({ name: 'users' }), roleAllowed, userTokenAllowed };
     },
     beforeUnmount() {
       removeWsHandler(this.handleWs);
+      this.loader.stop();
     },
     async created() {
       addWsHandler(this.handleWs);
-      this.updateUsers();
+      this.loader = createPageLoader({
+        key: 'users',
+        fetch: pageFetchers.users,
+        apply: ({ users, roleNames }) => {
+          this.users = users;
+          this.roleNames = roleNames;
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
       this.getPasswordRequirements();
     },
     computed: {
-      // Whether the edit dialog shows the account of the signed-in user.
-      editingSelf() {
-        return this.user.username === usePhenixStore().username;
-      },
-      // Intentionally restores the persisted pagination toggle as a side
-      // effect on first access.
-      /* eslint-disable vue/no-side-effects-in-computed-properties */
-      paginationNeeded() {
-        this.restorePaginate();
-
-        if (this.users.length <= 10) {
-          this.table.isPaginated = false;
-          return false;
-        } else {
-          return true;
+      filteredUsers() {
+        const text = this.searchText.trim().toLowerCase();
+        if (!text) {
+          return this.users;
         }
+
+        return this.users.filter((u) =>
+          [u.username, u.first_name, u.last_name, u.role_name].some((v) =>
+            v?.toLowerCase().includes(text),
+          ),
+        );
       },
-      /* eslint-enable vue/no-side-effects-in-computed-properties */
+      paginationNeeded() {
+        return this.filteredUsers.length > this.table.perPage;
+      },
+    },
+    watch: {
+      searchText() {
+        this.table.currentPage = 1;
+      },
+      // After the user changes the name, the form does not know if it is
+      // taken.
+      'user.username'() {
+        this.userExists = false;
+      },
     },
 
     methods: {
+      loadingText,
+
       handleWs(msg) {
         // We only care about publishes pertaining to a user resource.
         if (msg.resource.type != 'user') {
@@ -508,8 +570,11 @@
           case 'create': {
             let user = msg.result;
 
-            user.resource_names = user.resource_names.join(' ');
-            user.role_name = user.role.name;
+            if (users.some((u) => u.username == user.username)) {
+              break;
+            }
+
+            user.role_name = user.role?.name;
             users.push(user);
 
             this.users = [...users];
@@ -527,10 +592,7 @@
               if (users[i].username == msg.resource.name) {
                 let user = msg.result;
 
-                user.resource_names =
-                  user.resource_names === null
-                    ? null
-                    : user.resource_names.join(' ');
+                user.role_name = user.role?.name;
                 users[i] = user;
 
                 break;
@@ -566,36 +628,6 @@
           }
         }
       },
-      updateUsers() {
-        axiosInstance
-          .get('users')
-          .then((response) => {
-            var state = response.data;
-            state.users.forEach((u) => (u.role_name = u.role.name));
-            this.users = state.users;
-            this.isWaiting = false;
-          })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isWaiting = false;
-          });
-
-        // this is only used when creating/editing a user for the role dropdown
-        if (roleAllowed('roles', 'list')) {
-          axiosInstance
-            .get('roles')
-            .then((response) => {
-              const state = response.data;
-              this.roleNames = state.roles.map((r) => r.name);
-              this.isWaiting = false;
-            })
-            .catch((err) => {
-              useErrorNotification(err);
-              this.isWaiting = false;
-            });
-        }
-      },
-
       createUser() {
         for (let i = 0; i < this.users.length; i++) {
           if (this.users[i].username == this.user.username) {
@@ -608,7 +640,6 @@
           this.$buefy.toast.open({
             message: 'You must include a username',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -618,7 +649,6 @@
           this.$buefy.toast.open({
             message: 'You must include a first name',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -628,7 +658,6 @@
           this.$buefy.toast.open({
             message: 'You must include a last name',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -638,7 +667,6 @@
           this.$buefy.toast.open({
             message: 'You must include a password',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -649,7 +677,6 @@
           this.$buefy.toast.open({
             message: 'Password does not meet requirements',
             type: 'is-warning',
-            duration: 4000,
           });
           return;
         }
@@ -658,7 +685,6 @@
           this.$buefy.toast.open({
             message: 'You must include a password confirmation',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -668,7 +694,6 @@
           this.$buefy.toast.open({
             message: 'Your passwords do not match',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
@@ -678,25 +703,19 @@
           this.$buefy.toast.open({
             message: 'You must select a role',
             type: 'is-warning',
-            duration: 4000,
           });
 
           return;
         }
 
-        // The request is a copy, so the dialog keeps what was typed when
-        // the server refuses it.
-        const user = { ...this.user };
-        delete user.confirmPassword;
-
-        if (user.resource_names) {
-          user.resource_names = user.resource_names.split(' ');
-        }
+        // send a copy, so a failed request leaves the form as it was
+        const { confirmPassword: _, ...user } = this.user;
+        user.resource_names = splitResourceNames(user.resource_names);
 
         this.isWaiting = true;
 
-        axiosInstance
-          .post('users', user)
+        usersApi
+          .createUser(user)
           .then((_) => {
             this.isWaiting = false;
             this.resetLocalUser();
@@ -716,14 +735,16 @@
           });
       },
       editUser(username) {
-        for (let i = 0; i < this.users.length; i++) {
-          if (this.users[i].username == username) {
-            this.user = this.users[i];
-            break;
-          }
+        const row = this.users.find((u) => u.username == username);
+        if (!row) {
+          return;
         }
 
-        this.user.resource_names = uniq(this.user.resource_names).join(' ');
+        // edit a copy, so closing the dialog without saving changes nothing
+        this.user = {
+          ...row,
+          resource_names: uniq(row.resource_names ?? []).join(' '),
+        };
 
         this.isEditActive = true;
       },
@@ -734,12 +755,9 @@
           store.username == this.user.username &&
           store.role.name != this.user.role_name
         ) {
-          this.$buefy.toast.open({
-            message:
-              'You cannot change the role of the user you are currently logged in as.',
-            type: 'is-danger',
-            duration: 5000,
-          });
+          showError(
+            'You cannot change the role of the user you are currently logged in as.',
+          );
 
           this.resetLocalUser();
           this.isWaiting = false;
@@ -748,49 +766,34 @@
           return;
         }
 
-        delete this.user.id;
+        const { id: _, ...user } = this.user;
+        user.resource_names = splitResourceNames(user.resource_names);
 
-        let user = this.user;
-
-        user.resource_names = user.resource_names.split(' ');
-
-        this.isEditActive = false;
         this.isWaiting = true;
 
-        axiosInstance
-          .patch('users/' + user.username, user)
-          .then((_) => {
+        // the dialog stays open until the change is saved, so a rejected
+        // change can be corrected rather than typed again
+        usersApi
+          .updateUser(user.username, user)
+          .then(() => {
             delete user.password;
             delete user.new_password;
 
-            let users = this.users;
-
-            for (let i = 0; i < users.length; i++) {
-              if (users[i].username == user.username) {
-                users[i] = user;
-                break;
-              }
-            }
-
-            this.users = [...users];
-            this.isWaiting = false;
+            this.users = this.users.map((u) =>
+              u.username == user.username ? { ...u, ...user } : u,
+            );
+            this.isEditActive = false;
+            this.resetLocalUser();
           })
-          .catch((err) => {
-            useErrorNotification(err);
-            this.isWaiting = false;
-          });
-
-        this.resetLocalUser();
+          .catch((err) => useErrorNotification(err))
+          .finally(() => (this.isWaiting = false));
       },
 
       deleteUser(username) {
         if (username === usePhenixStore().username) {
-          this.$buefy.toast.open({
-            message:
-              'You cannot delete the user you are currently logged in as.',
-            type: 'is-danger',
-            duration: 4000,
-          });
+          showError(
+            'You cannot delete the user you are currently logged in as.',
+          );
 
           return;
         }
@@ -808,8 +811,8 @@
           onConfirm: () => {
             this.isWaiting = true;
 
-            axiosInstance
-              .delete('users/' + username)
+            usersApi
+              .deleteUser(username)
               .then((_) => {
                 let users = this.users;
 
@@ -824,6 +827,7 @@
               })
               .catch((err) => {
                 useErrorNotification(err);
+                this.isWaiting = false;
               });
           },
         });
@@ -852,8 +856,8 @@
           lifetime: this.user.token_lifetime,
         };
 
-        axiosInstance
-          .post(`users/${this.user.username}/tokens`, data)
+        usersApi
+          .createUserToken(this.user.username, data)
           .then((resp) => {
             let token = resp.data;
 
@@ -879,6 +883,7 @@
 
       resetLocalUser() {
         this.user = {};
+        this.userExists = false;
       },
       // Another user has the name: the User Name field says so, a toast
       // announces it, and focus goes back to the field.
@@ -887,7 +892,6 @@
         this.$buefy.toast.open({
           message: 'User already exists',
           type: 'is-warning',
-          duration: 4000,
         });
         this.$refs.createUsername?.focus();
       },
@@ -940,17 +944,9 @@
         return true;
       },
       getPasswordRequirements() {
-        axiosInstance.get('settings/password').then((response) => {
+        settingsApi.getPasswordRequirements().then((response) => {
           this.passwordReqs = response.data;
         });
-      },
-    },
-
-    watch: {
-      // After the user changes the name, the form does not know if it is
-      // taken.
-      'user.username'() {
-        this.userExists = false;
       },
     },
 
@@ -961,13 +957,15 @@
         tokenLifetimeHelp: 'number of days this token should be valid',
         roleNames: [],
         users: [],
+        searchText: '',
+        loaded: false,
         user: {},
         userExists: false,
         isCreateActive: false,
         isEditActive: false,
         isNewTokenActive: false,
         isProxyTokenCopied: false,
-        isWaiting: true,
+        isWaiting: false, // set while a change is being saved
 
         passwordReqs: {
           number_req: false,

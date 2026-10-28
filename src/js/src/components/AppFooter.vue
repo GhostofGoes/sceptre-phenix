@@ -4,7 +4,7 @@ component.
 -->
 
 <template>
-  <footer>
+  <footer class="app-footer">
     <hr class="mb-4" />
     <div class="container is-fluid">
       <small>
@@ -14,10 +14,7 @@ component.
         </p>
         <div class="app-footer__end">
           <nav class="app-footer__links" aria-label="Help">
-            <a
-              href="https://phenix.sceptre.dev/latest/"
-              target="_blank"
-              rel="noopener noreferrer"
+            <a :href="DOCS_URL" target="_blank" rel="noopener noreferrer"
               >Help<span class="is-sr-only"> (opens in new tab)</span></a
             >
           </nav>
@@ -30,8 +27,12 @@ component.
 
 <script>
   import { formatVersion } from '@/utils/version.js';
+  import { DOCS_URL } from '@/utils/docs.js';
 
   export default {
+    setup() {
+      return { DOCS_URL };
+    },
     async created() {
       try {
         let resp = await fetch(this.$router.resolve({ name: 'version' }).href);
@@ -39,7 +40,7 @@ component.
 
         this.version = formatVersion(version);
       } catch (err) {
-        console.log(`ERROR getting version: ${err}`);
+        console.warn('failed to get the phenix version', err);
       }
     },
 
