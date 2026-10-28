@@ -160,7 +160,7 @@
               </option>
             </b-select>
           </b-field>
-          <b-field>
+          <b-field :addons="false" class="has-addons">
             <b-autocomplete
               v-model="searchQuery"
               aria-label="Find a config"
