@@ -73,7 +73,7 @@ textarea:focus {
 
   .navbar-start > .navbar-item,
   .navbar-end > .navbar-item {
-    padding-inline: 0.5rem;
+    padding-inline: 0.4rem;
   }
 }
 
@@ -86,49 +86,9 @@ a.navbar-item:focus {
   color: $text-strong !important;
 }
 
+// $success is 4.3:1 on the table's $background-bis; this tint of it is 5:1
 div.is-success {
-  color: map.get($text-on-dark, 'success');
-}
-
-// The is-* hues as text on the dark surfaces. Bulma uses the $colors fills,
-// which have less than 7:1 there.
-@each $name, $color in $text-on-dark {
-  .has-text-#{$name} {
-    color: $color !important;
-  }
-
-  .help.is-#{$name} {
-    color: $color;
-  }
-}
-
-// Bulma draws the cross in $scheme-main, which is 2.6:1 on the modal
-// backdrop (WCAG 1.4.11).
-.modal-close::before,
-.modal-close::after,
-.delete::before,
-.delete::after {
-  background-color: $text-strong;
-}
-
-// A hovered row has the light $scheme-main-bis fill.
-.table.is-hoverable tbody tr:not(.is-selected):hover {
-  color: $dark-text;
-}
-
-// Bulma colors a hovered checkbox or radio label with $input-hover-color.
-.checkbox:hover,
-.radio:hover {
-  color: $link-text;
-}
-
-// A user can select days of the next and previous month, so they need the
-// contrast of the other days.
-.datepicker
-  .datepicker-table
-  .datepicker-body
-  .datepicker-cell.is-nearby:not(.is-selected) {
-  color: $text-strong;
+  color: #5cd69c;
 }
 
 .b-table {
