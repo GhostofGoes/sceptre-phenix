@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -46,22 +45,22 @@ func newImageListCmd() *cobra.Command {
 
 			var optional []string
 
-			if MustGetBool(cmd.Flags(), "format") {
+			if mustGet(cmd.Flags().GetBool, "format") {
 				optional = append(optional, "Format")
 			}
 
-			if MustGetBool(cmd.Flags(), "compressed") {
+			if mustGet(cmd.Flags().GetBool, "compressed") {
 				optional = append(optional, "Compressed")
 			}
 
-			if MustGetBool(cmd.Flags(), "mirror") {
+			if mustGet(cmd.Flags().GetBool, "mirror") {
 				optional = append(optional, "Mirror")
 			}
 
 			if len(imgs) == 0 {
-				fmt.Fprintln(os.Stdout, "\nThere are no image configurations available")
+				fmt.Fprintln(cmd.OutOrStdout(), "\nThere are no image configurations available")
 			} else {
-				printer.PrintTableOfImageConfigs(os.Stdout, optional, imgs...)
+				printer.PrintTableOfImageConfigs(cmd.OutOrStdout(), optional, imgs...)
 			}
 
 			return nil
@@ -110,41 +109,38 @@ func newImageCreateCmd() *cobra.Command {
 			}
 
 			img.Name = args[0]
-			img.Size = MustGetString(cmd.Flags(), "size")
-			img.Variant = MustGetString(cmd.Flags(), "variant")
-			img.Release = MustGetString(cmd.Flags(), "release")
-			img.Mirror = MustGetString(cmd.Flags(), "mirror")
-			img.Format = v1.Format(MustGetString(cmd.Flags(), "format"))
-			img.Compress = MustGetBool(cmd.Flags(), "compress")
-			img.Ramdisk = MustGetBool(cmd.Flags(), "ramdisk")
-			img.NoVirtuals = MustGetBool(cmd.Flags(), "no-virtuals")
-			img.SkipDefaultPackages = MustGetBool(cmd.Flags(), "skip-default-pkgs")
+			img.Size = mustGet(cmd.Flags().GetString, "size")
+			img.Variant = mustGet(cmd.Flags().GetString, "variant")
+			img.Release = mustGet(cmd.Flags().GetString, "release")
+			img.Mirror = mustGet(cmd.Flags().GetString, "mirror")
+			img.Format = v1.Format(mustGet(cmd.Flags().GetString, "format"))
+			img.Compress = mustGet(cmd.Flags().GetBool, "compress")
+			img.Ramdisk = mustGet(cmd.Flags().GetBool, "ramdisk")
+			img.NoVirtuals = mustGet(cmd.Flags().GetBool, "no-virtuals")
+			img.SkipDefaultPackages = mustGet(cmd.Flags().GetBool, "skip-default-pkgs")
 
-			if overlays := MustGetString(cmd.Flags(), "overlays"); overlays != "" {
-				img.Overlays = strings.Split(overlays, ",")
+			if overlays := mustGet(cmd.Flags().GetString, "overlays"); overlays != "" {
+				img.Overlays = commaList(overlays)
 			}
 
-			if packages := MustGetString(cmd.Flags(), "packages"); packages != "" {
-				img.Packages = strings.Split(packages, ",")
+			if packages := mustGet(cmd.Flags().GetString, "packages"); packages != "" {
+				img.Packages = commaList(packages)
 			}
 
-			if components := MustGetString(cmd.Flags(), "components"); components != "" {
-				img.Components = strings.Split(components, ",")
+			if components := mustGet(cmd.Flags().GetString, "components"); components != "" {
+				img.Components = commaList(components)
 			}
 
-			if scripts := MustGetString(cmd.Flags(), "scripts"); scripts != "" {
-				img.ScriptPaths = strings.Split(scripts, ",")
+			if scripts := mustGet(cmd.Flags().GetString, "scripts"); scripts != "" {
+				img.ScriptPaths = commaList(scripts)
 			}
 
-			if kernel := MustGetString(cmd.Flags(), "kernel-args"); kernel != "" {
-				img.Kernel = strings.Split(kernel, ",")
+			if kernel := mustGet(cmd.Flags().GetString, "kernel-args"); kernel != "" {
+				img.Kernel = commaList(kernel)
 			}
 
-			units := img.Size[len(img.Size)-1:]
-			if units != "M" && units != "G" {
-				return errors.New(
-					"must provide a valid unit for disk size option (e.g., '500M' or '10G')",
-				)
+			if err := image.ValidateSize(img.Size); err != nil {
+				return fmt.Errorf("invalid --size %q: %w", img.Size, err)
 			}
 
 			err := image.Create(&img)
@@ -193,6 +189,11 @@ func newImageCreateCmd() *cobra.Command {
 	return cmd
 }
 
+// commaList is the items of a comma-separated flag value, with no space at their ends and no empty items.
+func commaList(value string) []string {
+	return normalizeVMFilterValues([]string{value})
+}
+
 func newImageCreateFromCmd() *cobra.Command {
 	desc := `Create image configuration from existing one
 
@@ -216,16 +217,16 @@ func newImageCreateFromCmd() *cobra.Command {
 				scripts  []string
 			)
 
-			if opt := MustGetString(cmd.Flags(), "overlays"); opt != "" {
-				overlays = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "overlays"); opt != "" {
+				overlays = commaList(opt)
 			}
 
-			if opt := MustGetString(cmd.Flags(), "packages"); opt != "" {
-				packages = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "packages"); opt != "" {
+				packages = commaList(opt)
 			}
 
-			if opt := MustGetString(cmd.Flags(), "scripts"); opt != "" {
-				scripts = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "scripts"); opt != "" {
+				scripts = commaList(opt)
 			}
 
 			err := image.CreateFromConfig(name, saveas, overlays, packages, scripts)
@@ -320,13 +321,13 @@ func newImageBuildCmd() *cobra.Command {
 
 			var (
 				name      = args[0]
-				cache     = MustGetBool(cmd.Flags(), "cache")
-				dryrun    = MustGetBool(cmd.Flags(), "dry-run")
+				cache     = mustGet(cmd.Flags().GetBool, "cache")
+				dryrun    = mustGet(cmd.Flags().GetBool, "dry-run")
 				output    string
 				verbosity int
 			)
 
-			if MustGetString(cmd.Flags(), "output") == "" {
+			if mustGet(cmd.Flags().GetString, "output") == "" {
 				cwd, err := os.Getwd()
 				if err != nil {
 					err := util.HumanizeError(err, "Unable to get the current working directory")
@@ -336,14 +337,14 @@ func newImageBuildCmd() *cobra.Command {
 
 				output = cwd
 			} else {
-				output = MustGetString(cmd.Flags(), "output")
+				output = mustGet(cmd.Flags().GetString, "output")
 			}
 
-			if MustGetBool(cmd.Flags(), "verbose") {
+			if mustGet(cmd.Flags().GetBool, "verbose") {
 				verbosity |= image.VVerbose
 			}
 
-			if MustGetBool(cmd.Flags(), "very-verbose") {
+			if mustGet(cmd.Flags().GetBool, "very-verbose") {
 				verbosity |= image.VVVerbose
 			}
 
@@ -381,6 +382,7 @@ func newImageDeleteCmd() *cobra.Command {
 		Use:     "delete <configuration name>",
 		Aliases: []string{deleteAlias},
 		Short:   "Delete an existing image configuration",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
@@ -426,16 +428,16 @@ func newImageAppendCmd() *cobra.Command {
 				scripts  []string
 			)
 
-			if opt := MustGetString(cmd.Flags(), "overlays"); opt != "" {
-				overlays = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "overlays"); opt != "" {
+				overlays = commaList(opt)
 			}
 
-			if opt := MustGetString(cmd.Flags(), "packages"); opt != "" {
-				packages = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "packages"); opt != "" {
+				packages = commaList(opt)
 			}
 
-			if opt := MustGetString(cmd.Flags(), "scripts"); opt != "" {
-				scripts = strings.Split(opt, ",")
+			if opt := mustGet(cmd.Flags().GetString, "scripts"); opt != "" {
+				scripts = commaList(opt)
 			}
 
 			err := image.Append(name, overlays, packages, scripts)
@@ -478,9 +480,9 @@ func newImageRemoveCmd() *cobra.Command {
 
 			var (
 				name     = args[0]
-				overlays = strings.Split(MustGetString(cmd.Flags(), "overlays"), ",")
-				packages = strings.Split(MustGetString(cmd.Flags(), "packages"), ",")
-				scripts  = strings.Split(MustGetString(cmd.Flags(), "scripts"), ",")
+				overlays = commaList(mustGet(cmd.Flags().GetString, "overlays"))
+				packages = commaList(mustGet(cmd.Flags().GetString, "packages"))
+				scripts  = commaList(mustGet(cmd.Flags().GetString, "scripts"))
 			)
 
 			err := image.Remove(name, overlays, packages, scripts)
@@ -584,7 +586,7 @@ func newImageInjectMiniExeCmd() *cobra.Command {
 			var (
 				exe  = args[0]
 				disk = args[1]
-				init = MustGetString(cmd.Flags(), "init-system")
+				init = mustGet(cmd.Flags().GetString, "init-system")
 			)
 
 			err := image.InjectMiniExe(exe, disk, init)

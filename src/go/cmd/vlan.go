@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -64,7 +62,7 @@ func newVlanAliasCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANAliases(os.Stdout, info)
+				printer.PrintTableOfVLANAliases(cmd.OutOrStdout(), info)
 			case 1:
 				exp := args[0]
 
@@ -79,7 +77,7 @@ func newVlanAliasCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANAliases(os.Stdout, info)
+				printer.PrintTableOfVLANAliases(cmd.OutOrStdout(), info)
 			case aliasLookupArgs:
 				return printVLANAliasID(cmd.OutOrStdout(), args[0], args[1])
 			case aliasArgs:
@@ -87,12 +85,12 @@ func newVlanAliasCmd() *cobra.Command {
 					exp   = args[0]
 					alias = args[1]
 					id    = args[2]
-					force = MustGetBool(cmd.Flags(), "force")
+					force = mustGet(cmd.Flags().GetBool, "force")
 				)
 
-				vid, err := strconv.Atoi(id)
+				vid, err := parseCLIVLANID(id)
 				if err != nil {
-					return errors.New("the VLAN identifier provided is not a valid integer")
+					return err
 				}
 
 				if err := vlan.SetAlias(
@@ -194,7 +192,7 @@ func newVlanRangeCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANRanges(os.Stdout, info)
+				printer.PrintTableOfVLANRanges(cmd.OutOrStdout(), info)
 			case 1:
 				exp := args[0]
 
@@ -209,27 +207,23 @@ func newVlanRangeCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				printer.PrintTableOfVLANRanges(os.Stdout, info)
+				printer.PrintTableOfVLANRanges(cmd.OutOrStdout(), info)
 			case aliasArgs:
 				var (
 					exp    = args[0]
 					minVal = args[1]
 					maxVal = args[2]
-					force  = MustGetBool(cmd.Flags(), "force")
+					force  = mustGet(cmd.Flags().GetBool, "force")
 				)
 
-				vmin, err := strconv.Atoi(minVal)
+				vmin, err := parseCLIVLANID(minVal)
 				if err != nil {
-					return errors.New(
-						"the VLAN range minimum identifier provided is not a valid integer",
-					)
+					return fmt.Errorf("the VLAN range minimum: %w", err)
 				}
 
-				vmax, err := strconv.Atoi(maxVal)
+				vmax, err := parseCLIVLANID(maxVal)
 				if err != nil {
-					return errors.New(
-						"the VLAN range maximum identifier provided is not a valid integer",
-					)
+					return fmt.Errorf("the VLAN range maximum: %w", err)
 				}
 
 				if err := vlan.SetRange(
@@ -244,7 +238,7 @@ func newVlanRangeCmd() *cobra.Command {
 						"Unable to set the VLAN range for the "+exp+" experiment",
 					)
 
-					return fmt.Errorf(err.Humanize(), 1)
+					return err.Humanized()
 				}
 
 				plog.Info(plog.TypeSystem, "vlan range set", "exp", exp)
@@ -266,6 +260,7 @@ func init() { //nolint:gochecknoinits // cobra command
 
 	vlanCmd.AddCommand(newVlanAliasCmd())
 	vlanCmd.AddCommand(newVlanRangeCmd())
+	vlanCmd.AddCommand(newVlanListCmd(), newVlanBlacklistCmd(), newVlanReleaseCmd(), newVlanPinLiveCmd())
 
 	addCommandToRoot(vlanCmd, true)
 }

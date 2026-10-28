@@ -1,19 +1,25 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"os/signal"
 	"path"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"phenix/api/experiment"
+	"phenix/api/livecapture"
 	"phenix/api/vm"
 	"phenix/util"
 	"phenix/util/mm"
@@ -21,18 +27,23 @@ import (
 	"phenix/util/printer"
 )
 
+// memRangeMsg is the error for a VM memory value that the CLI refuses.
+const memRangeMsg = "memory must be a multiple of 512 from 512 to 16384"
+
 const (
 	infoArgs               = 2
 	pauseArgs              = 2
-	defaultMem             = 512
 	connectArgs            = 4
 	disconnectArgs         = 3
 	startCaptureArgs       = 4
 	startSubnetArgs        = 2
+	startVLANArgs          = 2
 	stopCaptureArgs        = 2
 	stopCaptureIfaceArgs   = 3
 	stopSubnetArgs         = 2
+	stopVLANArgs           = 2
 	stopAllArgs            = 1
+	streamCaptureArgs      = 3
 	memSnapArgs            = 3
 	mountArgs              = 2
 	unmountArgs            = 2
@@ -63,7 +74,7 @@ func vmArgsCompletion(_ *cobra.Command, args []string, toComplete string) ([]str
 		}
 		return names, cobra.ShellCompDirectiveNoFileComp
 	} else if len(args) == 1 {
-		vms, err := vm.List(args[0])
+		vms, err := vm.List(context.Background(), args[0])
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveError
 		}
@@ -88,7 +99,85 @@ func addVMLabelFlag(cmd *cobra.Command) {
 	)
 }
 
-func normalizeVMLabels(labels []string) []string {
+func addVMHostFlag(cmd *cobra.Command) {
+	cmd.Flags().StringArray(
+		"host",
+		nil,
+		"Cluster host to filter VMs by, named exactly as minimega reports it; may be repeated",
+	)
+	_ = cmd.RegisterFlagCompletionFunc("host", vmHostCompletion)
+}
+
+func vmHostCompletion(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) == 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	vms, err := vm.List(context.Background(), args[0])
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+
+	return vmHostNames(vms, toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+// vmHostNames returns the distinct cluster hosts running the VMs, sorted, that
+// start with prefix.
+func vmHostNames(vms []mm.VM, prefix string) []string {
+	seen := map[string]struct{}{}
+
+	for _, vmInfo := range vms {
+		if vmInfo.Host != "" && strings.HasPrefix(vmInfo.Host, prefix) {
+			seen[vmInfo.Host] = struct{}{}
+		}
+	}
+
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// vmInfoHosts returns the --host values, split at commas; nil when the flag is
+// not set.
+func vmInfoHosts(cmd *cobra.Command) ([]string, error) {
+	if !cmd.Flags().Changed("host") {
+		return nil, nil
+	}
+
+	flagHosts, err := cmd.Flags().GetStringArray("host")
+	if err != nil {
+		return nil, fmt.Errorf("getting vm host values: %w", err)
+	}
+
+	hosts := normalizeVMFilterValues(flagHosts)
+	if len(hosts) == 0 {
+		return nil, errors.New("must provide at least one VM host filter")
+	}
+
+	return hosts, nil
+}
+
+// filterVMsByHost keeps the VMs running on any of hosts, as the UI's Hosts
+// filter does; no hosts keeps every VM, and none left is an error.
+func filterVMsByHost(vms []mm.VM, hosts []string) ([]mm.VM, error) {
+	if len(hosts) == 0 {
+		return vms, nil
+	}
+
+	matched := make([]mm.VM, 0, len(vms))
+
+	for _, vmInfo := range vms {
+		if vmInfo.OnAnyHost(hosts) {
+			matched = append(matched, vmInfo)
+		}
+	}
+
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("no VMs matched host(s): %s", strings.Join(hosts, ", "))
+	}
+
+	return matched, nil
+}
+
+func normalizeVMFilterValues(labels []string) []string {
 	var normalized []string
 
 	for _, label := range labels {
@@ -103,6 +192,36 @@ func normalizeVMLabels(labels []string) []string {
 	}
 
 	return normalized
+}
+
+// parseLabelFlags turns the key=value values of the --label flag into labels. A key must not be blank; a value can be
+// empty and can hold "=".
+func parseLabelFlags(values []string) (map[string]string, error) {
+	labels := make(map[string]string, len(values))
+
+	for _, value := range values {
+		k, v, ok := strings.Cut(value, "=")
+		if !ok || strings.TrimSpace(k) == "" {
+			return nil, fmt.Errorf("invalid label %q (expected key=value)", value)
+		}
+
+		labels[k] = v
+	}
+
+	return labels, nil
+}
+
+// errBadIfaceIndex is returned for a network interface index argument that is not one.
+var errBadIfaceIndex = errors.New("the network interface index must be an integer")
+
+// parseIfaceIndex parses the network interface index argument of vm net: a whole number, 0 or more.
+func parseIfaceIndex(arg string) (int, error) {
+	iface, err := strconv.Atoi(arg)
+	if err != nil || iface < 0 {
+		return 0, fmt.Errorf("%w of 0 or more, not %q", errBadIfaceIndex, arg)
+	}
+
+	return iface, nil
 }
 
 func vmLabelMatchesLabel(label, expected string) (bool, error) {
@@ -150,7 +269,7 @@ func vmMatchesAnyLabel(vmInfo mm.VM, labels []string) (bool, error) {
 }
 
 func listVMsByLabel(expName string, labels []string) ([]mm.VM, error) {
-	allVMs, err := vm.List(expName)
+	allVMs, err := vm.List(context.Background(), expName)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +444,7 @@ func vmTargetNamesForCommand(cmd *cobra.Command, args []string) (string, []strin
 		return "", nil, fmt.Errorf("getting vm label values: %w", err)
 	}
 
-	labels := normalizeVMLabels(append(flagLabels, args[1:]...))
+	labels := normalizeVMFilterValues(append(flagLabels, args[1:]...))
 	if len(labels) == 0 {
 		return "", nil, errors.New("must provide at least one VM label filter")
 	}
@@ -365,6 +484,14 @@ func processVariableVMsArgument(fn func(expName, vmName string) error, cmd *cobr
 	return nil
 }
 
+// withoutContext is fn for the CLI, whose minimega commands wait as long as
+// they must (see mm.Context).
+func withoutContext(fn func(ctx context.Context, expName, vmName string) error) func(expName, vmName string) error {
+	return func(expName, vmName string) error {
+		return fn(context.Background(), expName, vmName)
+	}
+}
+
 /*
 ---------- VM Command Definitions ----------
 */
@@ -381,6 +508,61 @@ func newVMCmd() *cobra.Command {
 	return cmd
 }
 
+// listVMInfoVMs returns the VMs vm info starts from: those carrying a label,
+// the named VM, or every VM in the experiment.
+func listVMInfoVMs(cmd *cobra.Command, args []string) ([]mm.VM, error) {
+	var (
+		vms []mm.VM
+		err error
+	)
+
+	if cmd.Flags().Changed("label") {
+		flagLabels, err := cmd.Flags().GetStringArray("label")
+		if err != nil {
+			return nil, fmt.Errorf("getting vm label values: %w", err)
+		}
+
+		labels := normalizeVMFilterValues(append(flagLabels, args[1:]...))
+		if len(labels) == 0 {
+			return nil, errors.New("must provide at least one VM label filter")
+		}
+
+		vms, err = listVMsByLabel(args[0], labels)
+		if err != nil {
+			err := util.HumanizeError(err, "Unable to get a filtered list of VMs")
+
+			return nil, err.Humanized()
+		}
+	} else {
+		switch len(args) {
+		case 1:
+			vms, err = vm.List(context.Background(), args[0])
+			if err != nil {
+				err := util.HumanizeError(err, "Unable to get a list of VMs")
+
+				return nil, err.Humanized()
+			}
+		case infoArgs:
+			vmInfo, err := vm.Get(context.Background(), args[0], args[1])
+			if err != nil {
+				err := util.HumanizeError(
+					err,
+					"%s",
+					"Unable to get information for the "+args[1]+" VM",
+				)
+
+				return nil, err.Humanized()
+			}
+
+			vms = []mm.VM{*vmInfo}
+		default:
+			return nil, errors.New("invalid argument")
+		}
+	}
+
+	return vms, nil
+}
+
 func newVMInfoCmd() *cobra.Command {
 	desc := `Table of VM(s)
 
@@ -395,7 +577,15 @@ func newVMInfoCmd() *cobra.Command {
 
     phenix vm info my-experiment --filter RUNNING=true
     phenix vm info my-experiment --filter RUNNING=true --filter OS_TYPE=linux
-    phenix vm info my-experiment --filter DISK=jammy`
+    phenix vm info my-experiment --filter DISK=jammy
+
+  Repeat --host to list only the VMs running on any of the named cluster
+  hosts, named exactly as minimega reports them. --host combines with the VM
+  name or --label, and with --filter: a VM must match each of them. For
+  example:
+
+    phenix vm info my-experiment --host compute1 --host compute2
+    phenix vm info my-experiment --host compute1 --label role-web`
 
 	cmd := &cobra.Command{
 		Use:               "info <experiment name> [vm name]",
@@ -407,67 +597,34 @@ func newVMInfoCmd() *cobra.Command {
 				return errors.New("must provide an experiment name")
 			}
 
-			var (
-				vms []mm.VM
-				err error
-			)
-
-			if cmd.Flags().Changed("label") {
-				flagLabels, err := cmd.Flags().GetStringArray("label")
-				if err != nil {
-					return fmt.Errorf("getting vm label values: %w", err)
-				}
-
-				labels := normalizeVMLabels(append(flagLabels, args[1:]...))
-				if len(labels) == 0 {
-					return errors.New("must provide at least one VM label filter")
-				}
-
-				vms, err = listVMsByLabel(args[0], labels)
-				if err != nil {
-					err := util.HumanizeError(err, "Unable to get a filtered list of VMs")
-
-					return err.Humanized()
-				}
-			} else {
-				switch len(args) {
-				case 1:
-					vms, err = vm.List(args[0])
-					if err != nil {
-						err := util.HumanizeError(err, "Unable to get a list of VMs")
-
-						return err.Humanized()
-					}
-				case infoArgs:
-					vmInfo, err := vm.Get(args[0], args[1])
-					if err != nil {
-						err := util.HumanizeError(
-							err,
-							"%s",
-							"Unable to get information for the "+args[1]+" VM",
-						)
-
-						return err.Humanized()
-					}
-
-					vms = []mm.VM{*vmInfo}
-				default:
-					return errors.New("invalid argument")
-				}
-			}
-
-			vms, err = filterVMInfo(vms, MustGetStringArray(cmd.Flags(), "filter"))
+			hosts, err := vmInfoHosts(cmd)
 			if err != nil {
 				return err
 			}
 
-			printer.PrintTableOfVMs(os.Stdout, MustGetBool(cmd.Flags(), "taps"), vms...)
+			vms, err := listVMInfoVMs(cmd, args)
+			if err != nil {
+				return err
+			}
+
+			vms, err = filterVMsByHost(vms, hosts)
+			if err != nil {
+				return err
+			}
+
+			vms, err = filterVMInfo(vms, mustGet(cmd.Flags().GetStringArray, "filter"))
+			if err != nil {
+				return err
+			}
+
+			printer.PrintTableOfVMs(os.Stdout, outputPalette(os.Stdout), mustGet(cmd.Flags().GetBool, "taps"), vms...)
 
 			return nil
 		},
 	}
 
 	addVMLabelFlag(cmd)
+	addVMHostFlag(cmd)
 	cmd.Flags().StringArrayP("filter", "f", nil, "Filter output by column value (COLUMN=VALUE); may be repeated")
 	cmd.Flags().BoolP("taps", "t", false, "Include tap interface names")
 
@@ -511,7 +668,7 @@ func newVMRestartCmd() *cobra.Command {
 		Short:             "Restart running, paused, or powered off VM(s) for a specific experiment",
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return processVariableVMsArgument(vm.Restart, cmd, args, "restart", "restarted")
+			return processVariableVMsArgument(withoutContext(vm.Restart), cmd, args, "restart", "restarted")
 		},
 	}
 
@@ -532,7 +689,7 @@ func newVMResetDiskCmd() *cobra.Command {
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return processVariableVMsArgument(vm.ResetDiskState, cmd, args, "reset disk", "disk reset")
+			return processVariableVMsArgument(withoutContext(vm.ResetDiskState), cmd, args, "reset the disk of", "disk reset")
 		},
 	}
 
@@ -551,7 +708,10 @@ func newVMRedeployCmd() *cobra.Command {
 	desc := `Redeploy running experiment VM(s)
 
   Used to redeploy running virtual machine(s) for a specific experiment; several redeploy
-  values can be modified`
+  values can be modified. The CPU and memory values change only when their flags are set.
+  A new disk replaces only the first disk of the VM. The disk value is
+  <path>[,<interface>][,<cache>]; a field that the value leaves out keeps the value of
+  the old first disk.`
 
 	cmd := &cobra.Command{
 		Use:               "redeploy <experiment name> [vm name]",
@@ -565,8 +725,8 @@ func newVMRedeployCmd() *cobra.Command {
 			}
 
 			var (
-				disk   = MustGetString(cmd.Flags(), "disk")
-				inject = MustGetBool(cmd.Flags(), "replicate-injects")
+				disk   = mustGet(cmd.Flags().GetString, "disk")
+				inject = mustGet(cmd.Flags().GetBool, "replicate-injects")
 			)
 
 			if cpu != 0 && (cpu < 1 || cpu > 8) {
@@ -574,9 +734,7 @@ func newVMRedeployCmd() *cobra.Command {
 			}
 
 			if mem != 0 && (mem < 512 || mem > 16384 || mem%512 != 0) {
-				return errors.New(
-					"memory must be one of 512, 1024, 2048, 3072, 4096, 8192, 12288, 16384",
-				)
+				return errors.New(memRangeMsg)
 			}
 
 			opts := []vm.RedeployOption{
@@ -588,7 +746,7 @@ func newVMRedeployCmd() *cobra.Command {
 			}
 
 			for _, vmName := range vmNames {
-				err := vm.Redeploy(expName, vmName, opts...)
+				err := vm.Redeploy(context.Background(), expName, vmName, opts...)
 				if err != nil {
 					err := util.HumanizeError(err, "%s", "Unable to redeploy the "+vmName+" VM")
 
@@ -602,11 +760,10 @@ func newVMRedeployCmd() *cobra.Command {
 		},
 	}
 
-	// not sure that this is the correct way to handle ints
-	cmd.Flags().IntVarP(&cpu, "cpu", "c", 1, "Number of VM CPUs (1-8 is valid)")
+	cmd.Flags().IntVarP(&cpu, "cpu", "c", 0, "Number of VM CPUs (1-8 is valid; 0 keeps the current value)")
 	cmd.Flags().
-		IntVarP(&mem, "mem", "m", defaultMem, "Amount of memory in megabytes (512, 1024, 2048, 3072, 4096, 8192, 12288, 16384 are valid)")
-	cmd.Flags().StringP("disk", "d", "", "VM backing disk image")
+		IntVarP(&mem, "mem", "m", 0, "Amount of memory in megabytes (a multiple of 512 from 512 to 16384; 0 keeps the current value)")
+	cmd.Flags().StringP("disk", "d", "", "New first disk: <path>[,<interface>][,<cache>]")
 	cmd.Flags().BoolP("replicate-injects", "r", false, "Recreate disk snapshot and VM injections")
 	cmd.Flags().
 		IntVarP(&part, "partition", "p", 1, "Partition of disk to inject files into (only used if disk option is specified)")
@@ -627,7 +784,7 @@ func newVMShutdownCmd() *cobra.Command {
 		Long:              desc,
 		ValidArgsFunction: vmArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return processVariableVMsArgument(vm.Shutdown, cmd, args, "shutdown", "shutdown")
+			return processVariableVMsArgument(withoutContext(vm.Shutdown), cmd, args, "shutdown", "shutdown")
 		},
 	}
 
@@ -686,11 +843,11 @@ func newVMSetCmd() *cobra.Command {
 			}
 
 			var (
-				disk          = MustGetString(cmd.Flags(), "disk")
-				dnb           = MustGetBool(cmd.Flags(), "do-not-boot")
-				snapshot      = MustGetBool(cmd.Flags(), "snapshot")
-				rawLabels     = MustGetStringArray(cmd.Flags(), "label-changes")
-				appendLabels  = MustGetBool(cmd.Flags(), "append-labels")
+				disk          = mustGet(cmd.Flags().GetString, "disk")
+				dnb           = mustGet(cmd.Flags().GetBool, "do-not-boot")
+				snapshot      = mustGet(cmd.Flags().GetBool, "snapshot")
+				rawLabels     = mustGet(cmd.Flags().GetStringArray, "label-changes")
+				appendLabels  = mustGet(cmd.Flags().GetBool, "append-labels")
 				cpuChanged    = cmd.Flags().Changed("cpu")
 				memChanged    = cmd.Flags().Changed("mem")
 				partChanged   = cmd.Flags().Changed("partition")
@@ -705,20 +862,12 @@ func newVMSetCmd() *cobra.Command {
 			}
 
 			if memChanged && (mem < 512 || mem > 16384 || mem%512 != 0) {
-				return errors.New(
-					"memory must be one of 512, 1024, 2048, 3072, 4096, 8192, 12288, 16384",
-				)
+				return errors.New(memRangeMsg)
 			}
 
-			labels := make(map[string]string)
-
-			for _, t := range rawLabels {
-				k, v, ok := strings.Cut(t, "=")
-				if !ok || k == "" {
-					return fmt.Errorf("invalid label %q (expected key=value)", t)
-				}
-
-				labels[k] = v
+			labels, err := parseLabelFlags(rawLabels)
+			if err != nil {
+				return err
 			}
 
 			if !cpuChanged && !memChanged && disk == "" && !partChanged &&
@@ -775,7 +924,7 @@ func newVMSetCmd() *cobra.Command {
 
 	cmd.Flags().IntVarP(&cpu, "cpu", "c", 0, "Number of VM CPUs (1-8 is valid)")
 	cmd.Flags().
-		IntVarP(&mem, "mem", "m", 0, "Amount of memory in megabytes (512, 1024, 2048, 3072, 4096, 8192, 12288, 16384 are valid)")
+		IntVarP(&mem, "mem", "m", 0, "Amount of memory in megabytes (a multiple of 512 from 512 to 16384)")
 	cmd.Flags().StringP("disk", "d", "", "VM backing disk image file")
 	cmd.Flags().
 		IntVarP(&part, "partition", "p", 0, "Partition of disk to inject files into")
@@ -812,9 +961,9 @@ func newVMNetConnectCmd() *cobra.Command {
 				vlan    = args[3]
 			)
 
-			iface, err := strconv.Atoi(args[2])
+			iface, err := parseIfaceIndex(args[2])
 			if err != nil {
-				return errors.New("the network interface index must be an integer")
+				return err
 			}
 
 			if err := vm.Connect(expName, vmName, iface, vlan); err != nil {
@@ -849,9 +998,9 @@ func newVMNetDisconnectCmd() *cobra.Command {
 				vmName  = args[1]
 			)
 
-			iface, err := strconv.Atoi(args[2])
+			iface, err := parseIfaceIndex(args[2])
 			if err != nil {
-				return errors.New("the network interface index must be an integer")
+				return err
 			}
 
 			if err := vm.Disconnect(expName, vmName, iface); err != nil {
@@ -936,7 +1085,7 @@ func newVMCaptureCmd() *cobra.Command {
 				out      = args[3]
 			)
 
-			v, err := vm.Get(expName, vmName)
+			v, err := vm.Get(context.Background(), expName, vmName)
 			if err != nil {
 				err := util.HumanizeError(
 					err,
@@ -958,7 +1107,7 @@ func newVMCaptureCmd() *cobra.Command {
 				return err.Humanized()
 			}
 
-			if err := vm.StartCaptureForVM(v, expName, vmName, iface, out); err != nil {
+			if err := vm.StartCaptureForVM(context.Background(), v, expName, vmName, iface, out); err != nil {
 				err := util.HumanizeError(
 					err,
 					"%s",
@@ -994,8 +1143,7 @@ func newVMCaptureCmd() *cobra.Command {
 			var (
 				expName = args[0]
 				subnet  = args[1]
-				filter  = MustGetString(cmd.Flags(), "filter")
-				vmList  = []string{}
+				filter  = mustGet(cmd.Flags().GetString, "filter")
 			)
 
 			ipv4Re := regexp.MustCompile(`(?:\d{1,3}[.]){3}\d{1,3}(?:\/\d{1,2})?`)
@@ -1004,36 +1152,12 @@ func newVMCaptureCmd() *cobra.Command {
 				return fmt.Errorf("an invalid ipv4 subnet was detected: %v", subnet)
 			}
 
-			// Apply the optional filter to restrict the
-			// VMs searched
-			if len(filter) > 0 {
-				filterTree := mm.BuildTree(filter)
-
-				vms, err := vm.List(expName)
-				if err != nil {
-					err := util.HumanizeError(
-						err,
-						"%s",
-						"Unable to retrieve a list of VMs for "+expName+" ",
-					)
-
-					return err.Humanized()
-				}
-
-				for _, vm := range vms {
-					if filterTree == nil {
-						continue
-					} else {
-						if !filterTree.Evaluate(&vm) {
-							continue
-						}
-
-						vmList = append(vmList, vm.Name)
-					}
-				}
+			vmList, err := subnetFilterVMs(expName, filter)
+			if err != nil {
+				return err
 			}
 
-			vms, err := vm.CaptureSubnet(expName, subnet, vmList)
+			vms, err := vm.CaptureSubnet(context.Background(), expName, subnet, vmList)
 			if err != nil {
 				err := util.HumanizeError(
 					err,
@@ -1046,7 +1170,49 @@ func newVMCaptureCmd() *cobra.Command {
 
 			plog.Info(plog.TypeSystem, "subnet packet captures started", "subnet", subnet)
 
-			printer.PrintTableOfSubnetCaptures(os.Stdout, vms)
+			printer.PrintTableOfSubnetCaptures(cmd.OutOrStdout(), vms)
+
+			return nil
+		},
+	}
+
+	startVLANCaptures := &cobra.Command{
+		Use:   "start-vlan <experiment name> <vlan alias>",
+		Short: "Start packet captures for the specified VLAN",
+		Long: `Start packet captures for the specified VLAN
+
+  Starts a packet capture on each interface on the VLAN of the running VMs.
+  Give the VLAN alias in the case that minimega reports it, for example EXP_1.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < startVLANArgs {
+				return errors.New("must provide an experiment name and VLAN")
+			}
+
+			var (
+				expName = args[0]
+				vlan    = args[1]
+				filter  = mustGet(cmd.Flags().GetString, "filter")
+			)
+
+			vmList, err := subnetFilterVMs(expName, filter)
+			if err != nil {
+				return err
+			}
+
+			captures, err := vm.CaptureVLAN(context.Background(), expName, vlan, vmList)
+			if err != nil {
+				err := util.HumanizeError(
+					err,
+					"%s",
+					"Unable to start the packet capture(s) on VLAN "+vlan+" ",
+				)
+
+				return err.Humanized()
+			}
+
+			plog.Info(plog.TypeSystem, "VLAN packet captures started", "vlan", vlan, "exp", expName)
+
+			printer.PrintTableOfSubnetCaptures(cmd.OutOrStdout(), captures)
 
 			return nil
 		},
@@ -1076,7 +1242,7 @@ func newVMCaptureCmd() *cobra.Command {
 			if len(args) == stopCaptureIfaceArgs {
 				ifaceArg := args[2]
 
-				v, err := vm.Get(expName, vmName)
+				v, err := vm.Get(context.Background(), expName, vmName)
 				if err != nil {
 					err := util.HumanizeError(
 						err,
@@ -1098,7 +1264,7 @@ func newVMCaptureCmd() *cobra.Command {
 					return err.Humanized()
 				}
 
-				if err := vm.StopCapture(expName, vmName, iface); err != nil {
+				if err := vm.StopCapture(context.Background(), expName, vmName, iface); err != nil {
 					err := util.HumanizeError(
 						err,
 						"%s",
@@ -1122,7 +1288,7 @@ func newVMCaptureCmd() *cobra.Command {
 				return nil
 			}
 
-			err := vm.StopCaptures(expName, vmName)
+			err := vm.StopCaptures(context.Background(), expName, vmName)
 			if err != nil {
 				err := util.HumanizeError(
 					err,
@@ -1150,8 +1316,7 @@ func newVMCaptureCmd() *cobra.Command {
 			var (
 				expName = args[0]
 				subnet  = args[1]
-				filter  = MustGetString(cmd.Flags(), "filter")
-				vmList  = []string{}
+				filter  = mustGet(cmd.Flags().GetString, "filter")
 			)
 
 			ipv4Re := regexp.MustCompile(`(?:\d{1,3}[.]){3}\d{1,3}(?:\/\d{1,2})?`)
@@ -1160,36 +1325,12 @@ func newVMCaptureCmd() *cobra.Command {
 				return fmt.Errorf("an invalid subnet was detected: %v", subnet)
 			}
 
-			// Apply the optional filter to restrict the
-			// VMs searched
-			if len(filter) > 0 {
-				filterTree := mm.BuildTree(filter)
-
-				vms, err := vm.List(expName)
-				if err != nil {
-					err := util.HumanizeError(
-						err,
-						"%s",
-						"Unable to retrieve a list of VMs for "+expName+" ",
-					)
-
-					return err.Humanized()
-				}
-
-				for _, vm := range vms {
-					if filterTree == nil {
-						continue
-					} else {
-						if !filterTree.Evaluate(&vm) {
-							continue
-						}
-
-						vmList = append(vmList, vm.Name)
-					}
-				}
+			vmList, err := subnetFilterVMs(expName, filter)
+			if err != nil {
+				return err
 			}
 
-			if _, err := vm.StopCaptureSubnet(expName, subnet, vmList); err != nil {
+			if _, err := vm.StopCaptureSubnet(context.Background(), expName, subnet, vmList); err != nil {
 				err := util.HumanizeError(
 					err,
 					"%s",
@@ -1205,6 +1346,45 @@ func newVMCaptureCmd() *cobra.Command {
 		},
 	}
 
+	stopVLANCaptures := &cobra.Command{
+		Use:   "stop-vlan <experiment name> <vlan alias>",
+		Short: "Stop the packet captures for the specified VLAN",
+		Long: `Stop the packet captures for the specified VLAN
+
+  Stops the packet capture on each interface on the VLAN of the running VMs.
+  The captures on other interfaces of the VMs continue.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < stopVLANArgs {
+				return errors.New("must provide an experiment name and VLAN")
+			}
+
+			var (
+				expName = args[0]
+				vlan    = args[1]
+				filter  = mustGet(cmd.Flags().GetString, "filter")
+			)
+
+			vmList, err := subnetFilterVMs(expName, filter)
+			if err != nil {
+				return err
+			}
+
+			if _, err := vm.StopCaptureVLAN(context.Background(), expName, vlan, vmList); err != nil {
+				err := util.HumanizeError(
+					err,
+					"%s",
+					"Unable to stop the packet capture(s) on VLAN "+vlan+" ",
+				)
+
+				return err.Humanized()
+			}
+
+			plog.Info(plog.TypeSystem, "VLAN packet captures stopped", "vlan", vlan, "exp", expName)
+
+			return nil
+		},
+	}
+
 	stopAllCaptures := &cobra.Command{
 		Use:   "stop-all <experiment name>",
 		Short: "Stop all packet captures for the specified experiment",
@@ -1215,7 +1395,7 @@ func newVMCaptureCmd() *cobra.Command {
 
 			expName := args[0]
 
-			if _, err := vm.StopCaptureSubnet(expName, "", []string{}); err != nil {
+			if _, err := vm.StopCaptureSubnet(context.Background(), expName, "", []string{}); err != nil {
 				err := util.HumanizeError(
 					err,
 					"%s",
@@ -1233,14 +1413,178 @@ func newVMCaptureCmd() *cobra.Command {
 
 	cmd.AddCommand(startVMCapture)
 	cmd.AddCommand(startSubnetCaptures)
+	cmd.AddCommand(startVLANCaptures)
 	cmd.AddCommand(stopVMCaptures)
 	cmd.AddCommand(stopSubnetCaptures)
+	cmd.AddCommand(stopVLANCaptures)
 	cmd.AddCommand(stopAllCaptures)
+	cmd.AddCommand(newVMCaptureStreamCmd())
 
 	startSubnetCaptures.Flags().StringP("filter", "f", "", "Filter to restrict the list of VMs")
 	stopSubnetCaptures.Flags().StringP("filter", "f", "", "Filter to restrict the list of VMs")
+	startVLANCaptures.Flags().StringP("filter", "f", "", "Filter to restrict the list of VMs")
+	stopVLANCaptures.Flags().StringP("filter", "f", "", "Filter to restrict the list of VMs")
 
 	return cmd
+}
+
+// subnetFilterVMs returns the names of the VMs of experiment expName that the
+// --filter value filter matches, to restrict capture start-subnet,
+// stop-subnet, start-vlan and stop-vlan to them. It is empty for an empty filter, and an error when the
+// filter matches no VM, as an empty list restricts nothing.
+func subnetFilterVMs(expName, filter string) ([]string, error) {
+	if filter == "" {
+		return []string{}, nil
+	}
+
+	vms, err := vm.List(context.Background(), expName)
+	if err != nil {
+		err := util.HumanizeError(err, "%s", "Unable to retrieve a list of VMs for "+expName+" ")
+
+		return nil, err.Humanized()
+	}
+
+	var names []string
+
+	if filterTree := mm.BuildTree(filter); filterTree != nil {
+		for _, v := range vms {
+			if filterTree.Evaluate(&v) {
+				names = append(names, v.Name)
+			}
+		}
+	}
+
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no VMs matched filter %q", filter)
+	}
+
+	return names, nil
+}
+
+func newVMCaptureStreamCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stream <experiment name> <vm name> <iface name/index>",
+		Short: "Write a running packet capture to stdout as it is captured",
+		Long: `Write a running packet capture to stdout as it is captured
+
+  Writes the capture as a pcap stream: every packet captured so far (or, with
+  --from-now, none of them), then each packet as it is captured, until the
+  capture stops or the command is interrupted. Pipe it into Wireshark to
+  watch it live:
+
+    phenix vm capture stream <exp> <vm> <iface> | wireshark -k -i -`,
+		ValidArgsFunction: vmArgsCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != streamCaptureArgs {
+				return errors.New("must provide an experiment name, VM name, and iface name/index")
+			}
+
+			var (
+				expName = args[0]
+				vmName  = args[1]
+				output  = mustGet(cmd.Flags().GetString, "output")
+				fromNow = mustGet(cmd.Flags().GetBool, "from-now")
+			)
+
+			v, err := vm.Get(context.Background(), expName, vmName)
+			if err != nil {
+				err := util.HumanizeError(err, "%s", "Unable to get details for the "+vmName+" VM")
+
+				return err.Humanized()
+			}
+
+			iface, err := vm.ResolveInterface(v, args[2])
+			if err != nil {
+				err := util.HumanizeError(
+					err,
+					"%s",
+					"Unable to resolve interface "+args[2]+" on the "+vmName+" VM",
+				)
+
+				return err.Humanized()
+			}
+
+			out := os.Stdout
+
+			if output != "" && output != "-" {
+				out, err = os.Create(output)
+				if err != nil {
+					return fmt.Errorf("creating %s: %w", output, err)
+				}
+
+				defer out.Close()
+			} else if term.IsTerminal(int(os.Stdout.Fd())) { //nolint:gosec // G115 file descriptors fit in an int
+				return errors.New("refusing to write a packet capture to a terminal: pipe it to a program or use --output")
+			}
+
+			// a signal ends the stream rather than the process, so the cleanup
+			// below runs; once one has, the next ends the process at once, even
+			// while it waits on minimega
+			ctx, stop := signal.NotifyContext(cmd.Context(), captureStreamStopSignals()...)
+			defer stop()
+
+			context.AfterFunc(ctx, stop)
+
+			// with SIGPIPE ignored, a write to a pipe whose reader has gone
+			// fails with EPIPE instead of killing the process
+			signal.Ignore(syscall.SIGPIPE)
+
+			tap, err := livecapture.Open(expName, vmName, iface)
+			if err != nil {
+				err := util.HumanizeError(
+					err,
+					"%s",
+					"Unable to follow the packet capture on the "+vmName+" VM",
+				)
+
+				return err.Humanized()
+			}
+
+			// the process exits once streaming ends, before a released Tap's
+			// idle expiry would remove the spool of a capture on another node.
+			// From here a signal ends the process: CloseAll removes the spool
+			// before it waits for a read in flight, which on a node that does
+			// not answer lasts until the read times out.
+			defer func() {
+				stop()
+				livecapture.CloseAll()
+			}()
+
+			err = tap.Stream(ctx, fromNow, func(b []byte) error {
+				_, err := out.Write(b)
+
+				return err //nolint:wrapcheck // the reader went away
+			})
+
+			// a signal, or the reader closing the pipe, is how streaming
+			// normally ends
+			if err != nil && ctx.Err() == nil && !errors.Is(err, syscall.EPIPE) {
+				return fmt.Errorf("streaming the capture: %w", err)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringP("output", "o", "", "Write the capture to this file instead of stdout")
+	cmd.Flags().Bool("from-now", false, "Skip the packets captured before the command started")
+
+	return cmd
+}
+
+// captureStreamStopSignals are the signals that end `phenix vm capture
+// stream`. One the process was started ignoring, as nohup has it ignore a
+// hangup, stays ignored: asking to be notified of it would stop that.
+func captureStreamStopSignals() []os.Signal {
+	stopOn := []os.Signal{syscall.SIGTERM}
+
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGHUP} {
+		if !signal.Ignored(sig) {
+			stopOn = append(stopOn, sig)
+		}
+	}
+
+	return stopOn
 }
 
 func newVMMemorySnapshotCmd() *cobra.Command {
@@ -1268,7 +1612,7 @@ func newVMMemorySnapshotCmd() *cobra.Command {
 			)
 
 			cb := func(s string) {}
-			if res, err := vm.MemorySnapshot(expName, vmName, snapshot, cb); err != nil {
+			if res, err := vm.MemorySnapshot(context.Background(), expName, vmName, snapshot, cb); err != nil {
 				if res != "failed" {
 					err := util.HumanizeError(
 						err,
@@ -1335,7 +1679,7 @@ func newVMMountCmd() *cobra.Command {
 				return err.Humanized()
 			}
 
-			fmt.Fprintf(os.Stdout, "VM %s in experiment %s mounted at: %s\n", vmName, expName, mountPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "VM %s in experiment %s mounted at: %s\n", vmName, expName, mountPath)
 			plog.Info(
 				plog.TypeSystem,
 				"vm mounted",
@@ -1380,7 +1724,7 @@ func newVMUnmountCmd() *cobra.Command {
 				return err.Humanized()
 			}
 
-			fmt.Fprintf(os.Stdout, "VM %s in experiment %s unmounted\n", vmName, expName)
+			fmt.Fprintf(cmd.OutOrStdout(), "VM %s in experiment %s unmounted\n", vmName, expName)
 			plog.Info(plog.TypeSystem, "vm unmounted", "vm", vmName, "exp", expName)
 
 			return nil
@@ -1405,6 +1749,8 @@ func init() { //nolint:gochecknoinits // cobra command
 	vmCmd.AddCommand(newVMNetCmd())
 	vmCmd.AddCommand(newVMCaptureCmd())
 	vmCmd.AddCommand(newVMMemorySnapshotCmd())
+	vmCmd.AddCommand(newVMSnapshotCmd())
+	vmCmd.AddCommand(newVMCommitCmd())
 	vmCmd.AddCommand(newVMMountCmd())
 	vmCmd.AddCommand(newVMUnmountCmd())
 
