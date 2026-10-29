@@ -244,7 +244,11 @@
       </div>
     </b-modal>
     <!-- CONTENT -->
-    <b-field grouped position="is-right" style="margin: 12px 0px">
+    <b-field
+      class="disks-toolbar"
+      grouped
+      position="is-right"
+      style="margin: 12px 0px">
       <b-field expanded>
         <stat-strip v-if="loaded" label="Disk totals" :stats="totalsShown" />
       </b-field>
@@ -503,11 +507,11 @@
           { key: 'disks', label: 'Disks', value: totals.disks },
           { key: 'in-use', label: 'In use', value: totals.inUse },
           {
-            key: 'virtual-size',
-            label: 'Total virtual size',
-            value: bytesText(totals.virtualBytes),
-            detail: totals.unknownSizes
-              ? `(${totals.unknownSizes} unknown)`
+            key: 'disk-size',
+            label: 'Total size on disk',
+            value: bytesText(totals.sizeBytes),
+            detail: totals.unknownDiskSizes
+              ? `(${totals.unknownDiskSizes} unknown)`
               : '',
           },
         ];
@@ -942,6 +946,12 @@
   .row-actions {
     display: inline-flex;
     gap: 5px;
+  }
+
+  /* the controls drop below the counts when both do not fit on one row */
+  .disks-toolbar > :deep(.field-body > .field.is-grouped) {
+    flex-wrap: wrap;
+    row-gap: 0.75rem;
   }
 
   /* a long name wraps beside its warning icon, never under it */
