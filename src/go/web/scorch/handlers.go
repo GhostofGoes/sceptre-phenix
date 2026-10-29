@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,40 @@ var (
 	mu sync.Mutex //nolint:gochecknoglobals // global lock
 )
 
+// allowed reports whether the requesting user's role grants verb on resource
+// for the experiment, writing a 403 and logging the attempt when it does not.
+func allowed(w http.ResponseWriter, r *http.Request, resource, verb, exp string) bool {
+	ctx := r.Context()
+	role, _ := ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+
+	if role.Allowed(resource, verb, exp) {
+		return true
+	}
+
+	plog.Warn(
+		plog.TypeSecurity,
+		"scorch action not allowed",
+		"user",
+		ctx.Value(middleware.ContextKeyUser),
+		"exp",
+		exp,
+		"action",
+		resource+"/"+verb,
+	)
+	http.Error(w, "forbidden", http.StatusForbidden)
+
+	return false
+}
+
+// canWriteTerminal reports whether the requesting user may type into a break
+// terminal. The terminal is a shell on the phenix host, so it needs the same
+// permission as starting a SCORCH pipeline; anyone else gets a read-only view.
+func canWriteTerminal(r *http.Request, exp string) bool {
+	role, _ := r.Context().Value(middleware.ContextKeyRole).(rbac.Role)
+
+	return role.Allowed("experiments/trigger", "create", exp)
+}
+
 // GetTerminals - GET /experiments/{name}/scorch/terminals.
 func GetTerminals(w http.ResponseWriter, r *http.Request) {
 	plog.Debug(plog.TypeSystem, "HTTP handler called", "handler", "GetTerminal")
@@ -74,6 +109,15 @@ func GetTerminals(w http.ResponseWriter, r *http.Request) {
 		vars = mux.Vars(r)
 		exp  = vars["name"]
 	)
+
+	// GetExperimentTerminals accepts a comma-separated list of experiments, so
+	// authorize each one rather than the joined string, which a wildcard
+	// resource name such as "a*" would match.
+	for name := range strings.SplitSeq(exp, ",") {
+		if !allowed(w, r, "experiments", "get", name) {
+			return
+		}
+	}
 
 	terms, _ := GetExperimentTerminals(exp, -1)
 
@@ -92,6 +136,10 @@ func ConnectTerminal(w http.ResponseWriter, r *http.Request) {
 		cmp   = vars["cmp"]
 	)
 
+	if !allowed(w, r, "experiments", "get", exp) {
+		return
+	}
+
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {
 		http.Error(w, "invalid run ID provided", http.StatusBadRequest)
@@ -106,7 +154,7 @@ func ConnectTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t, err := initTerminal(exp, run, loop, stage, cmp)
+	t, err := initTerminal(exp, run, loop, stage, cmp, canWriteTerminal(r, exp))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 
@@ -123,6 +171,10 @@ func StreamTerminal(w http.ResponseWriter, r *http.Request) {
 
 	exp := mux.Vars(r)["name"]
 	pid, _ := strconv.Atoi(mux.Vars(r)["pid"])
+
+	if !allowed(w, r, "experiments", "get", exp) {
+		return
+	}
 
 	t, err := GetTerminalByPID(pid)
 	if err != nil {
@@ -151,7 +203,9 @@ func StreamTerminal(w http.ResponseWriter, r *http.Request) {
 
 	close(done)
 
+	mu.Lock()
 	t.RO = rwTerm[pid] != id
+	mu.Unlock()
 
 	plog.Debug(plog.TypeSystem, "starting web terminal streamer", "pid", pid)
 
@@ -166,7 +220,15 @@ func ExitTerminal(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.Atoi(mux.Vars(r)["pid"])
 	id := mux.Vars(r)["id"]
 
-	if rwTerm[pid] != id {
+	if !allowed(w, r, "experiments/trigger", "create", exp) {
+		return
+	}
+
+	mu.Lock()
+	owner := rwTerm[pid]
+	mu.Unlock()
+
+	if owner != id {
 		plog.Error(
 			plog.TypeSystem,
 			"terminal client doesn't own R/W rights to PTY",
@@ -333,7 +395,7 @@ func terminalWsHandler(t WebTerm) func(*websocket.Conn) {
 	}
 }
 
-func initTerminal(exp string, run, loop int, stage, cmp string) (WebTerm, error) {
+func initTerminal(exp string, run, loop int, stage, cmp string, writable bool) (WebTerm, error) {
 	key := fmt.Sprintf("%s|%d|%d|%s|%s", exp, run, loop, stage, cmp)
 
 	t, err := GetTerminalByExperiment(key)
@@ -357,7 +419,7 @@ func initTerminal(exp string, run, loop int, stage, cmp string) (WebTerm, error)
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, ok := rwTerm[t.Pid]; ok {
+	if _, ok := rwTerm[t.Pid]; ok || !writable {
 		t.RO = true
 	} else {
 		rwTerm[t.Pid] = id
@@ -377,7 +439,12 @@ func initTerminal(exp string, run, loop int, stage, cmp string) (WebTerm, error)
 		select {
 		case <-time.After(TerminalInitTimeout):
 			mu.Lock()
-			delete(rwTerm, t.Pid)
+			// Only give up read/write ownership if this client still holds it;
+			// a read-only client timing out must not strip the writer's.
+			if rwTerm[t.Pid] == id {
+				delete(rwTerm, t.Pid)
+			}
+
 			delete(termClientIDs, id)
 			mu.Unlock()
 		case <-done:
@@ -401,6 +468,10 @@ func GetComponentOutput(w http.ResponseWriter, r *http.Request) error {
 		cmp   = vars["cmp"]
 	)
 
+	if !allowed(w, r, "experiments", "get", exp) {
+		return nil
+	}
+
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {
 		return weberror.NewWebError(err, "invalid run ID '%s' provided", vars["run"])
@@ -420,7 +491,7 @@ func GetComponentOutput(w http.ResponseWriter, r *http.Request) error {
 
 	if resp.running {
 		if resp.terminal {
-			t, err := initTerminal(exp, run, loop, stage, cmp)
+			t, err := initTerminal(exp, run, loop, stage, cmp, canWriteTerminal(r, exp))
 			if err != nil {
 				return weberror.NewWebError(err, "unable to initialize terminal")
 			}
@@ -477,6 +548,10 @@ func StreamComponentOutput(w http.ResponseWriter, r *http.Request) {
 		stage = vars["stage"]
 		cmp   = vars["cmp"]
 	)
+
+	if !allowed(w, r, "experiments", "get", exp) {
+		return
+	}
 
 	run, err := strconv.Atoi(vars["run"])
 	if err != nil {

@@ -212,7 +212,7 @@ Key: E - experiment resource, V - VM resource, U - user resource
 |      |      |
 |------|------|
 | Verb | create |
-| Desc | trigger the running stage of an experiment |
+| Desc | trigger the running stage of an experiment, or type into and exit a SCORCH break terminal |
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 
