@@ -445,6 +445,7 @@
             :delay="500"
             label="create new user token"
             type="is-light"
+            position="is-left"
             multilined>
             <button
               class="button is-light is-small"
@@ -459,6 +460,7 @@
             :delay="500"
             label="delete user"
             type="is-light"
+            position="is-left"
             multilined>
             <button
               class="button is-light is-small"
@@ -473,6 +475,7 @@
             :delay="500"
             label="edit user"
             type="is-light"
+            position="is-left"
             multilined>
             <button
               class="button is-light is-small"

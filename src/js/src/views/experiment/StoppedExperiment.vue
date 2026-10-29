@@ -510,18 +510,9 @@
             </b-table-column>
             <b-table-column label="Labels" centered v-slot="props">
               <b-tooltip label="View/Edit Labels" type="is-dark">
-                <button
-                  type="button"
-                  class="plain-button"
-                  :aria-label="`View or edit labels for ${props.row.name} (${tagCount(props.row.tags)})`"
-                  @click="showTagsModal(props.row)">
-                  <font-awesome-layers full-width aria-hidden="true">
-                    <font-awesome-icon icon="tag" />
-                    <font-awesome-layers-text
-                      counter
-                      :value="tagCount(props.row.tags)" />
-                  </font-awesome-layers>
-                </button>
+                <div @click="showTagsModal(props.row)" class="is-clickable">
+                  <VmLabelCount :tags="props.row.tags" />
+                </div>
               </b-tooltip>
             </b-table-column>
             <b-table-column label="Boot" centered v-slot="props">
@@ -556,7 +547,10 @@
                     experiment.name + '/' + props.row.name,
                   )
                 ">
-                <b-tooltip :label="getSnapshotLabel(props.row)" type="is-dark">
+                <b-tooltip
+                  :label="getSnapshotLabel(props.row)"
+                  type="is-dark"
+                  position="is-left">
                   <div>
                     <b-select
                       :aria-label="`Persistence for VM ${props.row.name}`"
@@ -610,9 +604,9 @@
   } from '@/components/experiment/experimentTabs.js';
   import { debounce } from 'lodash-es';
   import { addSearch } from '@/utils/searchHistory.js';
-  import { tagCount } from '@/utils/tagCount';
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
+  import VmLabelCount from '@/components/experiment/VmLabelCount.vue';
   import { roleAllowed } from '@/utils/rbac.js';
   import { plural, pluralWord } from '@/utils/plural.js';
   import * as disksApi from '@/api/disks.js';
@@ -637,7 +631,7 @@
 
   export default {
     emits: ['running'],
-    components: { DiskSelect, DiskWarning, ExperimentFilesTab },
+    components: { DiskSelect, DiskWarning, ExperimentFilesTab, VmLabelCount },
     mixins: [formattingMixin],
     setup() {
       const { table } = useTable({
@@ -647,7 +641,6 @@
       return {
         table,
         roleAllowed,
-        tagCount,
         TAB,
         pluralWord,
         diskWarning,
@@ -1574,11 +1567,6 @@
 
   .dnb {
     color: #ffffff;
-  }
-
-  .fa-layers-counter {
-    /* counter on tag icon */
-    transform: scale(0.7) translateX(50%) translateY(-50%);
   }
 
   :deep(.tabs ul) {

@@ -27,18 +27,17 @@
             Require a symbol
           </b-switch>
         </b-field>
-        <b-field>
-          <span id="settings-password-min-length"
-            >Minimum length of password</span
-          >
+        <b-field class="setting-number" :addons="false">
           <b-numberinput
             aria-labelledby="settings-password-min-length"
             v-model="settings_obj.password_settings.min_length"
-            class="custom-small"
             min="4"
             max="32"
             :controls="false">
           </b-numberinput>
+          <span id="settings-password-min-length"
+            >Minimum length of password</span
+          >
         </b-field>
         <h2 class="is-size-5">Timeout Settings</h2>
         <b-field>
@@ -46,10 +45,10 @@
             Log out users after period of inactivity
           </b-switch>
         </b-field>
-        <b-field :type="timeoutError ? 'is-danger' : null">
-          <span id="settings-idle-timeout"
-            >Time (minutes) to log out users after idle for</span
-          >
+        <b-field
+          class="setting-number"
+          :addons="false"
+          :type="timeoutError ? 'is-danger' : null">
           <b-numberinput
             aria-labelledby="settings-idle-timeout"
             :aria-invalid="timeoutError ? 'true' : null"
@@ -60,19 +59,22 @@
             :disabled="!settings_obj.timeout_settings.enabled"
             :controls="false"
             step=".5"
-            min="0.5"
-            class="custom-small">
+            min="0.5">
           </b-numberinput>
-          <template #message>
-            <span v-if="timeoutError" id="settings-idle-timeout-error">{{
-              timeoutError
-            }}</span>
-          </template>
-        </b-field>
-        <b-field :type="warningError ? 'is-danger' : null">
-          <span id="settings-idle-warning"
-            >Display idle user logout with (minutes) left</span
+          <span id="settings-idle-timeout"
+            >Time (minutes) to log out users after idle for</span
           >
+        </b-field>
+        <p
+          v-if="timeoutError"
+          id="settings-idle-timeout-error"
+          class="help is-danger setting-error">
+          {{ timeoutError }}
+        </p>
+        <b-field
+          class="setting-number"
+          :addons="false"
+          :type="warningError ? 'is-danger' : null">
           <b-numberinput
             aria-labelledby="settings-idle-warning"
             :aria-invalid="warningError ? 'true' : null"
@@ -83,52 +85,46 @@
             :disabled="!settings_obj.timeout_settings.enabled"
             :controls="false"
             step=".5"
-            min="0"
-            class="custom-small">
+            min="0">
           </b-numberinput>
-          <template #message>
-            <span v-if="warningError" id="settings-idle-warning-error">{{
-              warningError
-            }}</span>
-          </template>
+          <span id="settings-idle-warning"
+            >Display idle user logout with (minutes) left</span
+          >
         </b-field>
 
         <h2 class="is-size-5">File Logging Settings</h2>
-        <b-field>
-          <span id="settings-log-max-size">Max log file size (MiB)</span>
+        <b-field class="setting-number" :addons="false">
           <b-numberinput
             aria-labelledby="settings-log-max-size"
             v-model="settings_obj.logging_settings.max_file_size"
             :controls="false"
-            step="1"
-            class="custom-small">
+            step="1">
           </b-numberinput>
+          <span id="settings-log-max-size">Max log file size (MiB)</span>
         </b-field>
-        <b-field>
-          <span id="settings-log-max-rotations"
-            >Max number of file rotations (0 for infinite)</span
-          >
+        <b-field class="setting-number" :addons="false">
           <b-numberinput
             aria-labelledby="settings-log-max-rotations"
             v-model="settings_obj.logging_settings.max_file_rotations"
             :controls="false"
             step="1"
-            class="custom-small"
             min="0">
           </b-numberinput>
-        </b-field>
-        <b-field>
-          <span id="settings-log-max-age"
-            >Max rotated log file age (0 for infinite)</span
+          <span id="settings-log-max-rotations"
+            >Max number of file rotations (0 for infinite)</span
           >
+        </b-field>
+        <b-field class="setting-number" :addons="false">
           <b-numberinput
             aria-labelledby="settings-log-max-age"
             v-model="settings_obj.logging_settings.max_file_age"
             :controls="false"
             step="1"
-            class="custom-small"
             min="0">
           </b-numberinput>
+          <span id="settings-log-max-age"
+            >Max rotated log file age (0 for infinite)</span
+          >
         </b-field>
 
         <hr />
@@ -158,20 +154,6 @@
           // a reload must not wipe out edits that have not been saved yet
           const keepEdits = this.loaded && this.changed;
           this.saved = copy(data);
-          if (!keepEdits) this.settings_obj = copy(data);
-          this.loaded = true;
-        },
-      });
-      this.loader.start();
-    },
-
-    beforeUnmount() {
-      this.loader.stop();
-    },
-
-    computed: {
-      changed() {
-        return JSON.stringify(this.settings_obj) !== JSON.stringify(this.saved);
   /**
    * Why the idle timeout settings are not valid, or null for each field that
    * is valid. The timeout is at least 0.5 minutes and the warning is shorter.
@@ -197,6 +179,20 @@
     return errors;
   }
 
+          if (!keepEdits) this.settings_obj = copy(data);
+          this.loaded = true;
+        },
+      });
+      this.loader.start();
+    },
+
+    beforeUnmount() {
+      this.loader.stop();
+    },
+
+    computed: {
+      changed() {
+        return JSON.stringify(this.settings_obj) !== JSON.stringify(this.saved);
       },
     },
 
@@ -242,13 +238,29 @@
   };
 </script>
 <style scoped>
-  /* Buefy fields keep their message slot; it shows only with an error. */
-  .form-section :deep(.help:empty) {
-    display: none;
+  /* a number box sized to its value before its label, like the switches */
+  .setting-number {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
 
-  .custom-small {
-    width: 25%;
-    min-width: 150px;
+  .setting-number :deep(.b-numberinput) {
+    flex: none;
+    width: 5.5em;
+    margin-bottom: 0;
+  }
+
+  /* dark like the page; text is 11:1 and the border 4.2:1 on the form */
+  .setting-number :deep(.input) {
+    background-color: #333333;
+    border-color: #b1b1b1;
+    color: #f5f5f5;
+  }
+
+  .setting-number :deep(.input[disabled]) {
+    border-color: #686868;
+    color: #b1b1b1;
+    box-shadow: none;
   }
 </style>
