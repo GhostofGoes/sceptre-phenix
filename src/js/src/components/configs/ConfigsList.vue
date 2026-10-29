@@ -262,7 +262,7 @@
       <b-table-column
         field="kind"
         label="Kind"
-        width="200"
+        width="150"
         header-class="sort-inline"
         sortable
         v-slot="props">
@@ -307,7 +307,11 @@
         <time-with-age :time="props.row.metadata.updated" />
       </b-table-column>
 
-      <b-table-column label="Actions" centered v-slot="props">
+      <b-table-column
+        label="Actions"
+        centered
+        cell-class="config-actions"
+        v-slot="props">
         <b-tooltip
           class="action"
           :delay="500"
@@ -785,6 +789,12 @@
     margin-left: auto;
   }
 
+  /* edit, download and delete stay on one row; the other columns give way */
+  :deep(td.config-actions) {
+    white-space: nowrap;
+  }
+
+  /* 7.2:1; #686868 and whitesmoke were 5.1:1. */
   .x-modal-dark :deep(textarea) {
     background-color: #575757;
     color: white;

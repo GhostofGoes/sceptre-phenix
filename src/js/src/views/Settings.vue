@@ -128,10 +128,17 @@
         </b-field>
 
         <hr />
-        <b-button :disabled="!changed" @click="resetForm">Reset Form</b-button>
-        <b-button native-type="submit" :disabled="!changed" :loading="saving">
-          Save Changes
-        </b-button>
+        <div class="buttons">
+          <b-button :disabled="!changed" @click="resetForm"
+            >Reset Form</b-button
+          >
+          <b-button
+            native-type="submit"
+            :disabled="!changed || !timeoutValid"
+            :loading="saving">
+            Save Changes
+          </b-button>
+        </div>
       </form>
     </div>
   </section>
@@ -151,9 +158,6 @@
         key: 'settings',
         fetch: pageFetchers.settings,
         apply: (data) => {
-          // a reload must not wipe out edits that have not been saved yet
-          const keepEdits = this.loaded && this.changed;
-          this.saved = copy(data);
   /**
    * Why the idle timeout settings are not valid, or null for each field that
    * is valid. The timeout is at least 0.5 minutes and the warning is shorter.
@@ -179,6 +183,9 @@
     return errors;
   }
 
+          // a reload must not wipe out edits that have not been saved yet
+          const keepEdits = this.loaded && this.changed;
+          this.saved = copy(data);
           if (!keepEdits) this.settings_obj = copy(data);
           this.loaded = true;
         },
