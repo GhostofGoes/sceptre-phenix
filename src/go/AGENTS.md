@@ -19,7 +19,7 @@ Run from `src/go/`:
 |---|---|
 | Focused tests | `go test -race ./path/to/package/...` |
 | All Go tests | `make test` (shuffled, `-race`; `V=1` for verbose output, `COVERPROFILE=<file>` for coverage) |
-| Go tests with coverage | `make test-cover` |
+| Go tests with coverage | `make test-cover` (`make test COVERPROFILE=coverage.out`, then prints the total) |
 | Repeat the concurrency-heavy packages | `make test-stress` (`STRESS_COUNT`, default 20) |
 | Fuzz every fuzz target | `make fuzz` (`FUZZTIME` each, default 30s) |
 | Unreachable functions | `make deadcode` (also a prek hook) |
@@ -151,9 +151,7 @@ no field the schema leaves out; send `[]`, not `null`, for an empty list.
 route the router serves as a role of no permissions and fails on any answer
 but 401 or 403 (404 for the job routes in `rbacHidden`); a route outside
 `/api/v1`, or one any signed-in user may call, goes in `rbacExempt` with the
-reason. A deprecated alias registered
-with `aliasRoute` must be `deprecated: true` in `openapi.yml`;
-`web/deprecation_test.go` checks both directions and its headers.
+reason.
 `types/openapi_test.go` requires every schema and property in `openapi.yml`
 to have a title and a description, and every scalar property an example,
 default or enum. A route the Unix socket serves gets a case in
