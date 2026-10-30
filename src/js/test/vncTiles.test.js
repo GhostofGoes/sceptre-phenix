@@ -53,18 +53,18 @@ describe('the tiles', () => {
 
   it("asks for a VM's details by its name, if the role may get it", async () => {
     const wrapper = await render({ vms: [vm()] });
-    await wrapper.find('a.vnc-tile-name').trigger('click');
+    const name = wrapper.get('button.vnc-tile-name');
+    expect(name.attributes('aria-haspopup')).toBe('dialog');
+    await name.trigger('click');
     expect(wrapper.emitted('info')).toEqual([[vm()]]);
 
     rbac.allowed = denyOnly(['vms', 'get']);
     const denied = await render({ vms: [vm()] });
-    expect(denied.find('a.vnc-tile-name').exists()).toBe(false);
+    expect(denied.find('button.vnc-tile-name').exists()).toBe(false);
     expect(tileNames(denied)).toEqual(['web']);
   });
 });
 
-it('passes on the zoom picked', async () => {
-  const wrapper = await render({ vms: [] });
 it('writes the VM names at 7:1 or more on their bar', () => {
   const style = componentDeclarations(
     'src/components/experiment/VncTiles.vue',
@@ -76,6 +76,8 @@ it('writes the VM names at 7:1 or more on their bar', () => {
   );
 });
 
+it('passes on the zoom picked', async () => {
+  const wrapper = await render({ vms: [] });
   wrapper.findComponent({ name: 'BSlider' }).vm.$emit('update:modelValue', 8);
   expect(wrapper.emitted('update:zoom')).toEqual([[8]]);
 });

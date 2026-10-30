@@ -16,13 +16,13 @@
         <section class="modal-card-body">
           <b-field
             label="User Name"
-            label-for="create-user-username"
+            label-for="user-create-username"
             :type="{ 'is-danger': userExists }"
             :message="{ 'User already exists': userExists }">
             <b-input
-              id="create-user-username"
-              :compat-fallthrough="false"
               ref="createUsername"
+              id="user-create-username"
+              :compat-fallthrough="false"
               type="text"
               autocomplete="off"
               v-model="user.username"
@@ -30,17 +30,17 @@
               maxlength="32"
               autofocus></b-input>
           </b-field>
-          <b-field label="First Name" label-for="create-user-first-name">
+          <b-field label="First Name" label-for="user-create-first-name">
             <b-input
-              id="create-user-first-name"
+              id="user-create-first-name"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
               v-model="user.first_name"></b-input>
           </b-field>
-          <b-field label="Last Name" label-for="create-user-last-name">
+          <b-field label="Last Name" label-for="user-create-last-name">
             <b-input
-              id="create-user-last-name"
+              id="user-create-last-name"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
@@ -48,10 +48,10 @@
           </b-field>
           <b-field
             label="Password"
-            label-for="create-user-password"
+            label-for="user-create-password"
             :type="createModalErrors.passwordErrorLevel">
             <b-input
-              id="create-user-password"
+              id="user-create-password"
               :compat-fallthrough="false"
               type="password"
               autocomplete="new-password"
@@ -62,23 +62,23 @@
               "
               :aria-describedby="
                 createModalErrors.passwordErrorMessage
-                  ? 'create-user-password-error'
+                  ? 'user-create-password-error'
                   : null
               "
               v-model="user.password"></b-input>
             <template #message>
               <span
                 v-if="createModalErrors.passwordErrorMessage"
-                id="create-user-password-error"
+                id="user-create-password-error"
                 >{{ createModalErrors.passwordErrorMessage }}</span
               >
             </template>
           </b-field>
           <b-field
             label="Confirm Password"
-            label-for="create-user-confirm-password">
+            label-for="user-create-confirm-password">
             <b-input
-              id="create-user-confirm-password"
+              id="user-create-confirm-password"
               :compat-fallthrough="false"
               type="password"
               autocomplete="new-password"
@@ -86,9 +86,9 @@
               maxlength="32"
               v-model="user.confirmPassword"></b-input>
           </b-field>
-          <b-field label="Role" label-for="create-user-role">
+          <b-field label="Role" label-for="user-create-role">
             <b-select
-              id="create-user-role"
+              id="user-create-role"
               :compat-fallthrough="false"
               v-model="user.role_name"
               expanded>
@@ -100,15 +100,15 @@
           <!-- This padding isn't strictly necessary, but helps prevent tooltip from breaking view -->
           <b-field
             label="Resource Name(s)"
-            label-for="create-user-resource-names"
+            label-for="user-create-resources"
             grouped
             style="padding-bottom: 20px">
             <b-input
-              id="create-user-resource-names"
+              id="user-create-resources"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
-              aria-describedby="create-user-resource-names-help"
+              aria-describedby="user-create-resources-help"
               v-model="user.resource_names"
               expanded></b-input>
             <b-tooltip
@@ -120,11 +120,11 @@
                 type="button"
                 class="users__help"
                 aria-label="Help for resource names"
-                aria-describedby="create-user-resource-names-help">
+                aria-describedby="user-create-resources-help">
                 <b-icon icon="question-circle"></b-icon>
               </button>
             </b-tooltip>
-            <span id="create-user-resource-names-help" class="is-sr-only">{{
+            <span id="user-create-resources-help" class="is-sr-only">{{
               resourceNamesHelp
             }}</span>
           </b-field>
@@ -153,18 +153,18 @@
           <h2 class="modal-card-title">User {{ user.username }}</h2>
         </header>
         <section class="modal-card-body">
-          <b-field label="First Name" label-for="edit-user-first-name">
+          <b-field label="First Name" label-for="user-edit-first-name">
             <b-input
-              id="edit-user-first-name"
+              id="user-edit-first-name"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
               v-model="user.first_name"
               autofocus></b-input>
           </b-field>
-          <b-field label="Last Name" label-for="edit-user-last-name">
+          <b-field label="Last Name" label-for="user-edit-last-name">
             <b-input
-              id="edit-user-last-name"
+              id="user-edit-last-name"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
@@ -172,17 +172,17 @@
           </b-field>
           <!-- The user's current password. A password manager fills it only
                when users edit their own account. -->
-          <b-field label="Password" label-for="edit-user-password">
+          <b-field label="Password" label-for="user-edit-password">
             <b-input
-              id="edit-user-password"
+              id="user-edit-password"
               :compat-fallthrough="false"
               type="password"
               :autocomplete="editingSelf ? 'current-password' : 'off'"
               v-model="user.password"></b-input>
           </b-field>
-          <b-field label="New Password" label-for="edit-user-new-password">
+          <b-field label="New Password" label-for="user-edit-new-password">
             <b-input
-              id="edit-user-new-password"
+              id="user-edit-new-password"
               :compat-fallthrough="false"
               type="password"
               autocomplete="new-password"
@@ -192,8 +192,13 @@
           </b-field>
           <b-field
             v-if="roleAllowed('users/roles', 'patch', user.username)"
-            label="Role">
-            <b-select v-model="user.role_name" expanded>
+            label="Role"
+            label-for="user-edit-role">
+            <b-select
+              id="user-edit-role"
+              :compat-fallthrough="false"
+              v-model="user.role_name"
+              expanded>
               <option v-for="(r, i) in roleNames" :key="i">
                 {{ r }}
               </option>
@@ -202,16 +207,16 @@
           <!-- This padding isn't strictly necessary, but helps prevent tooltip from breaking view -->
           <b-field
             label="Resource Name(s)"
-            label-for="edit-user-resource-names"
+            label-for="user-edit-resources"
             grouped
             style="padding-bottom: 20px"
             v-if="roleAllowed('users/roles', 'patch', user.username)">
             <b-input
-              id="edit-user-resource-names"
+              id="user-edit-resources"
               :compat-fallthrough="false"
               type="text"
               autocomplete="off"
-              aria-describedby="edit-user-resource-names-help"
+              aria-describedby="user-edit-resources-help"
               v-model="user.resource_names"
               expanded></b-input>
             <b-tooltip
@@ -223,11 +228,11 @@
                 type="button"
                 class="users__help"
                 aria-label="Help for resource names"
-                aria-describedby="edit-user-resource-names-help">
+                aria-describedby="user-edit-resources-help">
                 <b-icon icon="question-circle"></b-icon>
               </button>
             </b-tooltip>
-            <span id="edit-user-resource-names-help" class="is-sr-only">{{
+            <span id="user-edit-resources-help" class="is-sr-only">{{
               resourceNamesHelp
             }}</span>
           </b-field>
@@ -254,9 +259,9 @@
         </header>
         <section class="modal-card-body">
           <template v-if="user.token">
-            <b-field label="Token" label-for="token-value">
+            <b-field label="Token" label-for="user-token-token">
               <b-input
-                id="token-value"
+                id="user-token-token"
                 :compat-fallthrough="false"
                 type="text"
                 v-model="user.token"
@@ -270,9 +275,9 @@
               @click="copy">
             </b-button>
 
-            <b-field label="Expires" label-for="token-expires">
+            <b-field label="Expires" label-for="user-token-expires">
               <b-input
-                id="token-expires"
+                id="user-token-expires"
                 :compat-fallthrough="false"
                 type="text"
                 v-model="user.token_exp"
@@ -280,22 +285,22 @@
             </b-field>
           </template>
           <template v-else>
-            <b-field label="Description" label-for="token-description">
+            <b-field label="Description" label-for="user-token-description">
               <b-input
-                id="token-description"
+                id="user-token-description"
                 :compat-fallthrough="false"
                 type="text"
                 autocomplete="off"
                 v-model="user.token_desc"
                 autofocus></b-input>
             </b-field>
-            <b-field label="Lifetime (days)" label-for="token-lifetime">
+            <b-field label="Lifetime (days)" label-for="user-token-lifetime">
               <b-input
-                id="token-lifetime"
+                id="user-token-lifetime"
                 :compat-fallthrough="false"
                 type="text"
                 autocomplete="off"
-                aria-describedby="token-lifetime-help"
+                aria-describedby="user-token-lifetime-help"
                 v-model="user.token_lifetime"></b-input>
             </b-field>
             <b-tooltip
@@ -306,11 +311,11 @@
                 type="button"
                 class="users__help"
                 aria-label="Help for lifetime"
-                aria-describedby="token-lifetime-help">
+                aria-describedby="user-token-lifetime-help">
                 <b-icon icon="question-circle"></b-icon>
               </button>
             </b-tooltip>
-            <span id="token-lifetime-help" class="is-sr-only">{{
+            <span id="user-token-lifetime-help" class="is-sr-only">{{
               tokenLifetimeHelp
             }}</span>
           </template>
@@ -348,9 +353,9 @@
       <b-field :addons="false" class="has-addons">
         <b-input
           v-model="searchText"
-          placeholder="Find a user"
+          placeholder="Find a User"
           icon="search"
-          aria-label="Find a user"></b-input>
+          aria-label="Find a User"></b-input>
         <p v-if="searchText" class="control">
           <button
             class="button input-button"
@@ -392,7 +397,7 @@
                 !loaded
                   ? loadingText('users')
                   : searchText
-                    ? 'No users match the search'
+                    ? 'No users match your search'
                     : 'No users found'
               }}
             </div>
@@ -408,9 +413,12 @@
             v-if="roleAllowed('users', 'patch', props.row.username)"
             label="change user settings"
             type="is-dark">
-            <a @click="editUser(props.row.username)">
+            <button
+              type="button"
+              class="plain-button link-button"
+              @click="editUser(props.row.username)">
               {{ props.row.username }}
-            </a>
+            </button>
           </b-tooltip>
           <template v-else>{{ props.row.username }}</template>
         </b-table-column>
@@ -569,6 +577,10 @@
             v?.toLowerCase().includes(text),
           ),
         );
+      },
+      // Whether the edit dialog shows the account of the signed-in user.
+      editingSelf() {
+        return this.user.username === usePhenixStore().username;
       },
       paginationNeeded() {
         return this.filteredUsers.length > this.table.perPage;
@@ -1014,17 +1026,6 @@
 </script>
 
 <style scoped>
-  /* The name button looks like the text it replaces, and shows its focus. */
-  .users__name {
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-
   /* The help icon is a button, so the keyboard can show its tooltip. */
   .users__help {
     display: inline-flex;

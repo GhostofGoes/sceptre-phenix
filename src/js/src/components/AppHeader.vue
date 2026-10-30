@@ -52,7 +52,7 @@ what their role allows.
         v-if="auth && roleAllowed('experiments', 'list')"
         tag="router-link"
         :to="{ name: 'scorch' }"
-        >Scorch</b-navbar-item
+        >SCORCH</b-navbar-item
       >
       <b-navbar-item
         v-if="auth && roleAllowed('experiments', 'list')"
@@ -244,14 +244,10 @@ what their role allows.
     padding-block: 0.25rem;
   }
 
-  /* darker than $primary so white text keeps 5:1 (AA) */
-  .tunneler-button.button.is-primary {
-    background-color: #b5501f;
-  }
-
+  /* darker than the primary fill (#8f3a15); white is 9.3:1 on it */
   .tunneler-button.button.is-primary:hover,
   .tunneler-button.button.is-primary.router-link-exact-active {
-    background-color: #9a4420;
+    background-color: #7a3010;
   }
 
   /* a normal-size button, narrower so the header fits on one row */

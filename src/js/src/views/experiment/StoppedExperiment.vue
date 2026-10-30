@@ -245,8 +245,8 @@
             backend-sorting
             :default-sort-direction="table.defaultSortDirection"
             default-sort="name"
-            @sort="onSort"
-            ref="vmTable">
+            scrollable
+            @sort="onSort">
             <template #empty>
               <section class="section">
                 <div class="content has-text-white has-text-centered">
@@ -510,9 +510,13 @@
             </b-table-column>
             <b-table-column label="Labels" centered v-slot="props">
               <b-tooltip label="View/Edit Labels" type="is-dark">
-                <div @click="showTagsModal(props.row)" class="is-clickable">
+                <button
+                  type="button"
+                  class="plain-button is-clickable"
+                  :aria-label="`Labels of ${props.row.name}: ${labelCount(props.row)}`"
+                  @click="showTagsModal(props.row)">
                   <VmLabelCount :tags="props.row.tags" />
-                </div>
+                </button>
               </b-tooltip>
             </b-table-column>
             <b-table-column label="Boot" centered v-slot="props">
@@ -528,8 +532,7 @@
                   <button
                     type="button"
                     class="plain-button"
-                    :aria-label="`Boot ${props.row.name}`"
-                    :aria-pressed="!props.row.dnb"
+                    :aria-label="getBootLabel(props.row)"
                     @click="updateDnb(props.row)">
                     <font-awesome-icon
                       :class="bootDecorator(props.row)"
@@ -607,6 +610,7 @@
   import { addWsHandler, removeWsHandler } from '@/utils/websocket';
   import VMLabelsModal from '@/components/VMLabelsModal.vue';
   import VmLabelCount from '@/components/experiment/VmLabelCount.vue';
+  import { tagCount } from '@/utils/tagCount';
   import { roleAllowed } from '@/utils/rbac.js';
   import { plural, pluralWord } from '@/utils/plural.js';
   import * as disksApi from '@/api/disks.js';
@@ -727,6 +731,27 @@
     },
 
     computed: {
+      // the header checkbox: whether every VM on this page that can be
+      // selected is, and selecting all of them or none
+      checkAll: {
+        get() {
+          const names = this.selectableVmNames;
+          return (
+            names.length > 0 &&
+            names.every((name) => this.selectedRows.includes(name))
+          );
+        },
+        set(on) {
+          this.selectedRows = on ? [...this.selectableVmNames] : [];
+        },
+      },
+
+      selectableVmNames() {
+        return (this.experiment.vms ?? [])
+          .filter((vm) => !vm.external)
+          .map((vm) => vm.name);
+      },
+
       defaultSort() {
         return (
           this.table.sortColumn === 'name' &&
@@ -1386,6 +1411,10 @@
         );
       },
 
+      labelCount(vm) {
+        return tagCount(vm.tags);
+      },
+
       getBootLabel(vm) {
         return vm.dnb ? `Boot ${vm.name}` : `Do Not Boot ${vm.name}`;
       },
@@ -1463,30 +1492,11 @@
           },
         );
 
-        // clear the selection; the checkAll watcher does not fire when it
-        // is already false, so rows picked one by one are cleared here
-        this.checkAll = false;
         this.selectedRows = [];
       },
     },
 
     watch: {
-      checkAll(newVal) {
-        if (newVal) {
-          var visibleItems = this.$refs['vmTable'].visibleData;
-          // add all visible items
-          this.selectedRows = [];
-          for (var i = 0; i < visibleItems.length; i++) {
-            let item = visibleItems[i];
-
-            if (!item.external) {
-              this.selectedRows.push(item.name);
-            }
-          }
-        } else {
-          this.selectedRows = [];
-        }
-      },
       activeTab(newVal, oldVal) {
         // each tab keeps its own search and history while the other is open
         this.searchVMs.cancel();
@@ -1545,7 +1555,6 @@
         algorithm: null,
         isWaiting: false, // set while a change is being saved
         searchHistory: [],
-        checkAll: false,
         selectedRows: [],
         activeTab: tabFromQuery(this.$route.query, this.offeredTabs()),
         vlanModal: {

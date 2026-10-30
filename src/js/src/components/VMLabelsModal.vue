@@ -10,8 +10,8 @@
           <template v-if="canEdit()">
             <textarea
               class="textarea has-fixed-size"
-              rows="1"
               :aria-label="`Note ${props.index + 1}`"
+              rows="1"
               v-model="props.row.value"
               @input="(evt) => resizeNoteTextArea(evt.target)"
               @keypress="noteKeyHandler"
@@ -233,14 +233,5 @@
 
   textarea {
     overflow-y: hidden;
-  }
-
-  .plain-button {
-    padding: 0;
-    border: none;
-    background: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
   }
 </style>

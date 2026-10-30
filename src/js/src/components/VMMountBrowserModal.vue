@@ -23,15 +23,20 @@
         </b-breadcrumb>
         <b-table :data="files" :loading="filesLoading" class="fixed-table">
           <b-table-column field="name" label="File" v-slot="props">
-            <a
+            <button
               v-if="props.row.isDir"
-              href="#"
-              @click.prevent="currentPath = props.row.path"
-              >{{ `${props.row.name}/` }}</a
-            >
-            <a v-else href="#" @click.prevent="downloadFile(props.row.path)">{{
-              props.row.name
-            }}</a>
+              type="button"
+              class="plain-button link-button"
+              @click="currentPath = props.row.path">
+              {{ `${props.row.name}/` }}
+            </button>
+            <button
+              v-else
+              type="button"
+              class="plain-button link-button"
+              @click="downloadFile(props.row.path)">
+              {{ props.row.name }}
+            </button>
           </b-table-column>
           <b-table-column
             field="size"

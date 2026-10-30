@@ -1,6 +1,6 @@
 <template>
   <div class="netflow-captures">
-    <b-button ref="trigger" icon-left="download" size="is-small" @click="open">
+    <b-button icon-left="download" size="is-small" @click="open">
       Download captures
     </b-button>
     <b-modal
@@ -160,19 +160,12 @@
 
       // the dialog's state, announced as it changes
       status() {
-        if (this.loading) return 'Loading captures...';
+        if (this.loading) return 'Loading captures…';
         if (this.failed) return 'Could not load captures.';
         if (this.loaded && this.captures.length === 0) {
-          return 'No captures recorded yet. Starting a netflow capture records it.';
+          return 'No captures recorded yet. Start a capture with the netflow button to record one.';
         }
         return '';
-      },
-    },
-
-    watch: {
-      // Buefy leaves focus in the closed dialog; return it to the button
-      active(on) {
-        if (!on) this.$nextTick(() => this.$refs.trigger?.$el?.focus());
       },
     },
 
@@ -273,11 +266,6 @@
   /* a size never splits from its unit beside the two-line times */
   .netflow-captures-size {
     white-space: nowrap;
-  }
-
-  /* Bulma's info blue gives white text only 3.5:1; its dark shade gives 5.3:1 */
-  .netflow-captures-table .tag.is-info {
-    background-color: #296fa8;
   }
 
   .netflow-captures-state {

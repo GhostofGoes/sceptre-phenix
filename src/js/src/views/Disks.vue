@@ -264,7 +264,7 @@
             <b-field :addons="false" class="has-addons">
               <b-autocomplete
                 v-model="filterString"
-                placeholder="Find a disk"
+                placeholder="Find a Disk"
                 icon="search"
                 @select="(option) => (selected = option)"
                 :data="filteredDisks.map(diskLabel)">
@@ -629,19 +629,16 @@
             }
           });
       },
+      // a failed commit or rebase leaves its dialog open, ready to cancel
       commitDisk(path, deleteOnSuccess) {
         this.commitModal.isWaiting = true;
         disksApi
           .commitDisk(path)
-          .then(() => {
-            if (deleteOnSuccess) {
-              this.actionWrapper(() => disksApi.deleteDisk(path));
-            } else {
-              this.updateDisks();
-            }
-          })
+          .then(() => deleteOnSuccess && disksApi.deleteDisk(path))
+          .then(() => this.updateDisks())
           .catch((err) => {
             useErrorNotification(err);
+            this.commitModal.isWaiting = false;
           });
       },
       snapshotDisk(path) {
@@ -664,7 +661,13 @@
       },
       rebaseDisk(path, dst, unsafe) {
         this.rebaseModal.isWaiting = true;
-        this.actionWrapper(() => disksApi.rebaseDisk(path, dst, unsafe));
+        disksApi
+          .rebaseDisk(path, dst, unsafe)
+          .then(() => this.updateDisks())
+          .catch((err) => {
+            useErrorNotification(err);
+            this.rebaseModal.isWaiting = false;
+          });
       },
       resizeDisk(path) {
         this.$buefy.dialog.prompt({

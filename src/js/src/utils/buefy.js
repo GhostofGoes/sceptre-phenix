@@ -1,7 +1,11 @@
 import {
   Autocomplete,
   BDialog,
+  BDropdown,
   BModal,
+  BTable,
+  BTableColumn,
+  BTooltip,
   Breadcrumb,
   Button,
   Checkbox,
@@ -29,6 +33,7 @@ import {
   Upload,
 } from 'buefy';
 import { setNotificationApp } from '@/utils/notify.js';
+import { returnFocus } from '@/utils/returnFocus.js';
 import { TOAST_DURATION } from '@/utils/toast.js';
 
 // Register only the Buefy components the UI uses: app.use(Buefy) pulls every
@@ -82,5 +87,72 @@ export function installBuefy(app) {
   // $buefy.dialog renders aria-modal="false" with no role, which ARIA forbids
   BDialog.props.ariaRole = { type: String, default: 'alertdialog' };
   BDialog.props.ariaModal = { type: Boolean, default: true };
+  for (const component of [BModal, BDialog, BDropdown]) {
+    component.mixins = [...(component.mixins ?? []), returnFocus];
+  }
+  // $buefy.dialog extends BModal, so it gets this too
+  BModal.mixins = [...BModal.mixins, nameFromTitle];
+  BModal.props.ariaRole = { type: String, default: 'dialog' };
+  BModal.props.ariaModal = { type: Boolean, default: true };
+  // phenix is desktop only: a zoomed page keeps its tables and their header
+  // sorts rather than Buefy's mobile cards, whose sort controls are unnamed
+  BTable.props.mobileCards = { type: Boolean, default: false };
+  BTableColumn.props.thAttrs = { type: Function, default: sortableHeading };
+  // a tooltip shows on keyboard focus as on hover (WCAG 1.4.13)
+  BTooltip.props.triggers = { type: Array, default: () => ['hover', 'focus'] };
   buefyPlugins.forEach((plugin) => app.use(plugin));
+}
+
+let labelCount = 0;
+
+// Names an open modal or dialog that has no accessible name (WCAG 4.1.2) with
+// its .modal-card-title, or an untitled dialog with its message.
+function labelFromTitle(root) {
+  if (!(root instanceof HTMLElement)) return;
+  const el = root.matches('.modal') ? root : root.querySelector('.modal');
+  if (!el || el.hasAttribute('aria-label')) return;
+  const named = el.getAttribute('aria-labelledby');
+  if (named && named.split(/\s+/).every((id) => document.getElementById(id))) {
+    return;
+  }
+  const label =
+    el.querySelector('.modal-card-title') ??
+    (el.matches('.dialog')
+      ? el.querySelector('.modal-card-body .media-content > p')
+      : null);
+  if (!label) return;
+  if (!label.id) {
+    labelCount += 1;
+    label.id = `modal-label-${labelCount}`;
+  }
+  el.setAttribute('aria-labelledby', label.id);
+}
+
+// names the modal each time it opens, as its content can change in between
+const nameFromTitle = {
+  mounted() {
+    if (this.isActive) this.$nextTick(() => labelFromTitle(this.$el));
+  },
+  watch: {
+    isActive(active) {
+      if (active) this.$nextTick(() => labelFromTitle(this.$el));
+    },
+  },
+};
+
+// A sortable heading's attributes: Tab reaches it, Enter or Space sorts by it
+// as a click does, and aria-sort says how the table is sorted.
+function sortableHeading(column) {
+  if (!column.sortable) return {};
+  const table = column.$table;
+  const sorted = table && table.currentSortColumn === column;
+  return {
+    tabindex: 0,
+    'aria-sort': sorted ? (table.isAsc ? 'ascending' : 'descending') : 'none',
+    onKeydown(event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.currentTarget.click();
+    },
+  };
 }

@@ -8,22 +8,30 @@
       <form v-else class="content" @submit.prevent="sendSettingsToServer">
         <h2 class="is-size-5">Password Settings</h2>
         <b-field>
-          <b-switch v-model="settings_obj.password_settings.lowercase_req">
+          <b-switch
+            v-model="settings_obj.password_settings.lowercase_req"
+            type="is-light">
             Require a lowercase letter
           </b-switch>
         </b-field>
         <b-field>
-          <b-switch v-model="settings_obj.password_settings.uppercase_req">
+          <b-switch
+            v-model="settings_obj.password_settings.uppercase_req"
+            type="is-light">
             Require an uppercase letter
           </b-switch>
         </b-field>
         <b-field>
-          <b-switch v-model="settings_obj.password_settings.number_req">
+          <b-switch
+            v-model="settings_obj.password_settings.number_req"
+            type="is-light">
             Require a number
           </b-switch>
         </b-field>
         <b-field>
-          <b-switch v-model="settings_obj.password_settings.symbol_req">
+          <b-switch
+            v-model="settings_obj.password_settings.symbol_req"
+            type="is-light">
             Require a symbol
           </b-switch>
         </b-field>
@@ -31,7 +39,7 @@
           <b-numberinput
             aria-labelledby="settings-password-min-length"
             v-model="settings_obj.password_settings.min_length"
-            min="4"
+            min="8"
             max="32"
             :controls="false">
           </b-numberinput>
@@ -41,7 +49,9 @@
         </b-field>
         <h2 class="is-size-5">Timeout Settings</h2>
         <b-field>
-          <b-switch v-model="settings_obj.timeout_settings.enabled">
+          <b-switch
+            v-model="settings_obj.timeout_settings.enabled"
+            type="is-light">
             Log out users after period of inactivity
           </b-switch>
         </b-field>
@@ -91,6 +101,12 @@
             >Display idle user logout with (minutes) left</span
           >
         </b-field>
+        <p
+          v-if="warningError"
+          id="settings-idle-warning-error"
+          class="help is-danger setting-error">
+          {{ warningError }}
+        </p>
 
         <h2 class="is-size-5">File Logging Settings</h2>
         <b-field class="setting-number" :addons="false">
@@ -152,12 +168,6 @@
 
   const copy = (obj) => JSON.parse(JSON.stringify(obj));
 
-  export default {
-    created() {
-      this.loader = createPageLoader({
-        key: 'settings',
-        fetch: pageFetchers.settings,
-        apply: (data) => {
   /**
    * Why the idle timeout settings are not valid, or null for each field that
    * is valid. The timeout is at least 0.5 minutes and the warning is shorter.
@@ -183,6 +193,12 @@
     return errors;
   }
 
+  export default {
+    created() {
+      this.loader = createPageLoader({
+        key: 'settings',
+        fetch: pageFetchers.settings,
+        apply: (data) => {
           // a reload must not wipe out edits that have not been saved yet
           const keepEdits = this.loaded && this.changed;
           this.saved = copy(data);
@@ -200,6 +216,18 @@
     computed: {
       changed() {
         return JSON.stringify(this.settings_obj) !== JSON.stringify(this.saved);
+      },
+      timeoutErrors() {
+        return timeoutErrors(this.settings_obj?.timeout_settings ?? {});
+      },
+      timeoutError() {
+        return this.timeoutErrors.timeout;
+      },
+      warningError() {
+        return this.timeoutErrors.warning;
+      },
+      timeoutValid() {
+        return !this.timeoutError && !this.warningError;
       },
     },
 
@@ -269,5 +297,15 @@
     border-color: #686868;
     color: #b1b1b1;
     box-shadow: none;
+  }
+
+  /* the red border is 4.2:1 on the form */
+  .setting-number :deep(.input.is-danger) {
+    border-color: #ff8fa3;
+  }
+
+  .setting-error {
+    margin-top: -0.5rem;
+    margin-bottom: 0.75rem;
   }
 </style>

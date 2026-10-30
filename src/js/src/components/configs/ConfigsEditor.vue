@@ -153,28 +153,25 @@
           </b-switch>
         </b-field>
 
-        <button
-          v-if="mode == 'edit' && !expStart"
-          class="button is-success"
-          id="editor"
-          @click="saveConfig(editor.lang)"
-          :disabled="!validConfig">
-          Save
-        </button>
-        <button
-          v-if="mode == 'create'"
-          class="button is-success"
-          id="editor"
-          @click="createConfig(editor.lang)"
-          :disabled="!validConfig">
-          Create
-        </button>
-        <button
-          class="button is-danger"
-          id="editor"
-          @click="confirmResetEditor">
-          Exit
-        </button>
+        <div class="buttons editor-buttons">
+          <button
+            v-if="mode == 'edit' && !expStart"
+            class="button is-success"
+            @click="saveConfig(editor.lang)"
+            :disabled="!validConfig">
+            Save
+          </button>
+          <button
+            v-if="mode == 'create'"
+            class="button is-success"
+            @click="createConfig(editor.lang)"
+            :disabled="!validConfig">
+            Create
+          </button>
+          <button class="button is-danger" @click="confirmResetEditor">
+            Exit
+          </button>
+        </div>
       </div>
       <div class="column">
         <div>
@@ -688,7 +685,7 @@
   };
 </script>
 <style scoped>
-  /*Quickfix for css. incorporate into main css packages*/
+  /* the editor's panel in the app's grays, not Bulma's light gradient */
   /* Darker stops give white text 7:1 or more on all of the gradient. */
   .hero.is-light.is-bold {
     background-image: linear-gradient(
@@ -702,6 +699,7 @@
     background-color: #575757;
     color: #fff;
   }
+
   .x-modal-dark {
     background-color: #4a4a4a;
   }
@@ -728,8 +726,7 @@
     overflow-wrap: anywhere;
   }
 
-  button#editor {
-    margin-top: 125px;
-    margin-right: 10px;
+  .editor-buttons {
+    margin-top: 1.5rem;
   }
 </style>

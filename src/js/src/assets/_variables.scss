@@ -2,6 +2,9 @@
 @import 'bulma/sass/utilities/_all';
 @import 'buefy/src/scss/utils/_all';
 
+// The text and surface colors below give text a contrast of 7:1 or more
+// (WCAG 1.4.6) on each surface that holds them.
+
 // derived via: https://m2.material.io/design/color/the-color-system.html#tools-for-picking-colors
 // Bulma builds its $colors map in the import above, before these two values
 // are set. The `is-primary` and `is-link` classes use the $colors map below;
@@ -34,21 +37,21 @@ $button-ghost-color: $link-text;
 $button-ghost-hover-color: $link-text;
 // A see-through toast loses contrast to the page under it.
 $toast-opacity: 1;
-// Text on light fills (turquoise, green, yellow, cyan).
+// Text on light fills, such as the cyan $link.
 $dark-text: $black;
 
 // The is-* color classes. Each entry is (fill, text on the fill, light fill,
 // text on the light fill), 7:1 or more also on the hover and active shades.
-// `is-primary` stays Bulma's turquoise. `is-info`, `is-link` and `is-danger`
+// `is-primary` (orange), `is-success`, `is-info`, `is-link` and `is-danger`
 // get darker fills, because no text color has 7:1 on Bulma's fills.
 $colors: map.merge(
   $colors,
   (
     'primary': (
-      $turquoise,
-      $dark-text,
-      $primary-light,
-      #005e50,
+      #8f3a15,
+      $white,
+      findLightColor($primary),
+      #7a3010,
     ),
     'link': (
       hsl(229, 53%, 46%),
@@ -63,8 +66,8 @@ $colors: map.merge(
       #1c4d75,
     ),
     'success': (
-      $success,
-      $dark-text,
+      #17603d,
+      $white,
       $success-light,
       #1b583c,
     ),
@@ -86,7 +89,7 @@ $colors: map.merge(
 // The same hues as light text on the dark surfaces, for `has-text-*` and
 // `.help.is-*` (see _general.scss): 7:1 or more on $background-ter.
 $text-on-dark: (
-  'primary': #b5f2e9,
+  'primary': #ffe4d6,
   'link': $link-text,
   'info': #daeaf6,
   'success': #caefde,
@@ -118,14 +121,6 @@ $modal-background-background-color: rgba($black, 0.86);
 $modal-card-head-border-bottom: transparent;
 $modal-card-foot-border-top: 1px solid $scheme-main-bis;
 
-// success buttons and tags: white is 2.1:1 on Bulma's #48c78e, 5.3:1 on this
-$success-fill: (#1e7b4b, white, $success-light, $success-dark);
-$tag-colors: map.merge(
-  $colors,
-  (
-  )
-);
-
 $button-border-color: lighten($scheme-main, 10);
 $button-hover-color: $text-strong;
 // Bulma's focused and pressed text, #363636, is 2.2:1 on a default button
@@ -140,7 +135,6 @@ $button-colors: map.merge(
       $scheme-main,
       $scheme-invert,
     ),
-    'success': $success-fill,
   )
 );
 
