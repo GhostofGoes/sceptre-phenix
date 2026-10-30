@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,26 @@ func TestDoctorConfigFiles(t *testing.T) {
 				t.Errorf("doctorConfigFiles() keys mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// A config or users file that does not parse fails with its path and line
+// only, since the parse error quotes the start of the line, here part of a password.
+func TestDoctorConfigFilesUsersDetail(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"config", "users"} {
+		dir := t.TempDir()
+		writeTestFile(t, dir, "config.yaml", "log:\n  level: debug\n")
+		path := writeTestFile(t, dir, name+".yaml", "bo:hunter2:global-admin\n")
+
+		want := doctorCheck{
+			Name: name + " file", Status: doctorFail, Detail: path + " does not parse at line 1, so phenix ignores it",
+		}
+
+		if diff := cmp.Diff(want, doctorConfigFiles([]string{dir}).checks[name]); diff != "" {
+			t.Errorf("%s file check mismatch (-want +got):\n%s", name, diff)
+		}
 	}
 }
 
@@ -304,8 +325,8 @@ func TestMinimegaCheck(t *testing.T) {
 	}
 }
 
-// A flag wins, then a config value the global settings prefer, then the
-// environment, then any other config value, then the default.
+// A flag wins, then a non-empty environment variable, then the config file,
+// then the default, as viper reads them.
 func TestSettingSource(t *testing.T) {
 	t.Parallel()
 
@@ -317,12 +338,12 @@ func TestSettingSource(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		key                            string
-		flagChanged, fileFirst, inFile bool
-		want                           string
+		key                 string
+		flagChanged, inFile bool
+		want                string
 	}{
-		"flag":             {key: "log.level", flagChanged: true, fileFirst: true, inFile: true, want: sourceFlag},
-		"file first":       {key: "ui.listen-endpoint", fileFirst: true, inFile: true, want: sourceFile},
+		"flag":             {key: "log.level", flagChanged: true, inFile: true, want: sourceFlag},
+		"flag over env":    {key: "ui.listen-endpoint", flagChanged: true, inFile: true, want: sourceFlag},
 		"env over file":    {key: "ui.listen-endpoint", inFile: true, want: sourceEnv},
 		"empty env":        {key: "log.level", inFile: true, want: sourceFile},
 		"default":          {key: "log.level", want: sourceDefault},
@@ -333,12 +354,108 @@ func TestSettingSource(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := settingSource(tc.key, tc.flagChanged, tc.fileFirst, tc.inFile, lookupEnv)
+			got := settingSource(tc.key, tc.flagChanged, tc.inFile, lookupEnv)
 			if got != tc.want {
 				t.Errorf("settingSource(%s) = %q, want %q", tc.key, got, tc.want)
 			}
 		})
 	}
+}
+
+// A PHENIX_ variable that phenix reads in place of a different config file
+// value warns by name, never value; an equal one, or one a flag overrides,
+// does not.
+func TestEnvOverridesCheck(t *testing.T) {
+	t.Parallel()
+
+	const config, users = "/etc/phenix/config.yaml", "/etc/phenix/users.yaml"
+
+	env := map[string]string{
+		"PHENIX_LOG_LEVEL":          "debug",
+		"PHENIX_UI_USERS":           "admin:pw:global-admin  bob:pw:viewer",
+		"PHENIX_UI_JWT_SIGNING_KEY": "env-secret",
+		"PHENIX_STORE_ENDPOINT":     "bolt:///tmp/s.bdb",
+		"PHENIX_LOG_SYSTEM_MAX_AGE": "90",
+	}
+	lookupEnv := func(name string) (string, bool) {
+		v, ok := env[name]
+
+		return v, ok
+	}
+
+	tests := map[string]struct {
+		files   map[string]fileSetting
+		sources map[string]string
+		want    doctorCheck
+	}{
+		"none": {
+			files: map[string]fileSetting{"log.level": {file: config, value: "info"}},
+			want:  passCheck("no PHENIX_ variable overrides a different config file value"),
+		},
+		"same values": {
+			files: map[string]fileSetting{
+				"log.level":          {file: config, value: "debug"},
+				"log.system.max-age": {file: config, value: 90},
+				"ui.users":           {file: users, value: []any{"admin:pw:global-admin", "bob:pw:viewer"}},
+			},
+			sources: map[string]string{"log.level": sourceEnv, "log.system.max-age": sourceEnv, "ui.users": sourceEnv},
+			want:    passCheck("no PHENIX_ variable overrides a different config file value"),
+		},
+		"different values": {
+			files: map[string]fileSetting{
+				"log.level":          {file: config, value: "info"},
+				"ui.jwt-signing-key": {file: config, value: "file-secret"},
+				"ui.users":           {file: users, value: []any{"admin:pw:global-admin"}},
+				"store.endpoint":     {file: config, value: "bolt:///etc/phenix/store.bdb"},
+			},
+			sources: map[string]string{
+				"log.level": sourceEnv, "ui.jwt-signing-key": sourceEnv, "ui.users": sourceEnv, "store.endpoint": sourceFlag,
+			},
+			want: warnCheck("PHENIX_LOG_LEVEL overrides log.level in " + config +
+				". PHENIX_UI_JWT_SIGNING_KEY overrides ui.jwt-signing-key in " + config +
+				". PHENIX_UI_USERS overrides ui.users in " + users),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := make(map[string]resolvedSetting)
+			for key, source := range tc.sources {
+				settings[key] = resolvedSetting{source: source}
+			}
+
+			if diff := cmp.Diff(tc.want, envOverridesCheck(settings, tc.files, lookupEnv)); diff != "" {
+				t.Errorf("envOverridesCheck() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A list variable is the config file's list when its space-separated fields
+// are the list's items, and a scalar when its text is the value's.
+func TestSameSettingValueProperty(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		items := rapid.SliceOf(rapid.StringMatching(`[a-z0-9:-]{1,8}`)).Draw(t, "items")
+		sep := rapid.SampledFrom([]string{" ", "  ", "\t"}).Draw(t, "sep")
+
+		list := make([]any, len(items))
+		for i, item := range items {
+			list[i] = item
+		}
+
+		if !sameSettingValue(strings.Join(items, sep), list) {
+			t.Fatalf("sameSettingValue(%q, %v) = false, want true", strings.Join(items, sep), list)
+		}
+
+		n := rapid.Int().Draw(t, "n")
+		if !sameSettingValue(strconv.Itoa(n), n) || sameSettingValue(strconv.Itoa(n)+"0", n) {
+			t.Fatalf("sameSettingValue does not compare %d as its text", n)
+		}
+	})
 }
 
 // The environment variable of a setting is its key in upper case, prefixed
@@ -412,13 +529,15 @@ func TestWorstStatus(t *testing.T) {
 	}
 }
 
-// Whatever the JWT signing key and users, in settings or environment variables,
-// and whatever a sudo command or unknown PHENIX_ variable holds, neither the
-// text nor the JSON report contains them, with or without --report.
+// Whatever the JWT signing key and users, in settings, environment variables
+// or a users file that does not parse, and whatever a sudo command or unknown
+// PHENIX_ variable holds, neither the text nor the JSON report contains them,
+// with or without --report, nor does the root command's users file warning.
 func TestDoctorReportNeverShowsSecrets(t *testing.T) {
 	t.Parallel()
 
 	dir := newDoctorTestDir(t)
+	usersDir := t.TempDir()
 
 	rapid.Check(t, func(t *rapid.T) {
 		secret := rapid.StringMatching(`[A-Za-z0-9|_-]{12,32}`).Draw(t, "secret")
@@ -427,8 +546,30 @@ func TestDoctorReportNeverShowsSecrets(t *testing.T) {
 			user, user + " bob:" + secret, "bob:pw:" + secret + "," + user, secret,
 		}).Draw(t, "users")
 
+		// a users file that does not parse, with a password where yaml quotes it
+		password := rapid.StringMatching(`[A-Za-z0-9]{12,32}`).Draw(t, "password")
+		usersFile := filepath.Join(usersDir, "users.yaml")
+		if err := os.WriteFile(usersFile, []byte(password+":pw:global-admin\n"), 0o600); err != nil {
+			t.Fatalf("os.WriteFile() error = %v", err)
+		}
+
+		var warn bytes.Buffer
+
+		mergeUsersConfig(viper.New(), []string{usersDir}, &warn, nil)
+
 		in := fakeDoctorInput(dir, map[string]string{"ui.jwt-signing-key": secret})
 		in.settings["ui.users"] = resolvedSetting{value: []any{user}, text: user, source: sourceFile}
+		in.config.checks["users"] = doctorConfigFiles([]string{usersDir}).checks["users"]
+		in.config.values["ui.jwt-signing-key"] = fileSetting{file: "/etc/phenix/config.yaml", value: secret + "x"}
+		in.settings["ui.jwt-signing-key"] = resolvedSetting{value: secret, text: secret, source: sourceEnv}
+
+		if in.config.checks["users"].Status != doctorFail || warn.Len() == 0 {
+			t.Fatalf("users file %q parsed: check %+v, warning %q", password, in.config.checks["users"], warn.String())
+		}
+
+		if strings.Contains(warn.String(), password[:7]) {
+			t.Fatalf("users file warning %q contains part of the password %q", warn.String(), password)
+		}
 		in.env = fakeDoctorEnv(map[string]string{
 			"PHENIX_UI_JWT_SIGNING_KEY": secret,
 			"PHENIX_UI_USERS":           envUsers,
@@ -445,8 +586,8 @@ func TestDoctorReportNeverShowsSecrets(t *testing.T) {
 				t.Fatalf("writeDoctorReport() error = %v", err)
 			}
 
-			if strings.Contains(out.String(), secret) {
-				t.Fatalf("%s report contains the secret %q:\n%s", output, secret, out.String())
+			if strings.Contains(out.String(), secret) || strings.Contains(out.String(), password[:7]) {
+				t.Fatalf("%s report contains the secret %q or password %q:\n%s", output, secret, password, out.String())
 			}
 		}
 	})

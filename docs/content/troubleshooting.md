@@ -40,12 +40,20 @@ When phēnix cannot read its config file, it runs on environment variables
 and defaults and prints a warning on stderr at startup, such as:
 
 ```text
-phenix: warning: ignoring config file /etc/phenix/config.yaml: While parsing config: yaml: line 3: did not find expected key
+phenix: warning: ignoring config file /etc/phenix/config.yaml: it does not parse at line 3
 ```
 
-The same warning names a `users.yaml` that does not parse, or a config
-directory or file that could not be created on first run. Fix the file it
-names; the warning appears in `docker logs phenix` for the Docker deployment.
+The warning gives only the line of the error, since the parser's message can
+quote a password or key. The same warning names a `users.yaml` that does not
+parse:
+
+```text
+phenix: warning: ignoring config file /etc/phenix/users.yaml: it does not parse at line 1
+```
+
+It also names a config directory or file that could not be created on first
+run. Fix the file it names; the warning appears in `docker logs phenix` for
+the Docker deployment.
 `phenix doctor` reports the same problems, misspelled keys, and where each
 setting's value comes from, then a summary naming each failed check with a
 hint; see
@@ -70,6 +78,15 @@ phēnix ignores or reads as `0`.
 If you delete the `config.yaml` file while phēnix is running, the internal file watcher will break, and dynamic configuration changes will no longer apply.
 
 To reset your configuration, use the command `phenix settings unset --all` instead of deleting the file.
+
+### `phenix settings set` Has No Effect
+
+A flag or a `PHENIX_*` environment variable overrides the config file, so a
+value that `phenix settings set` writes is hidden while one is set, as in a
+Docker deployment that sets `PHENIX_LOG_LEVEL`. `phenix doctor` shows each
+setting's source and warns in its `env-overrides` check about each variable
+that overrides a different config file value. Drop the flag or unset the
+variable to use the file's value.
 
 ### Upgrading the BoltDB Store
 
