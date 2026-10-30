@@ -12,7 +12,8 @@ vi.mock('@/utils/errorNotif.js', modules.errorNotif);
 vi.mock('@/store.js', modules.store);
 
 import NetflowCaptures from '@/components/experiment/NetflowCaptures.vue';
-import { componentDeclarations } from './helpers/css.js';
+import { never } from './helpers/async.js';
+import { componentDeclarations, declarations } from './helpers/css.js';
 import { httpError } from './helpers/fixtures.js';
 import { mountComponent, textOf } from './helpers/mount.js';
 
@@ -291,7 +292,7 @@ describe('focus', () => {
     await wrapper.find('button').trigger('click');
     await flushPromises();
 
-    axios.get.mockReturnValue(new Promise(() => {}));
+    axios.get.mockReturnValue(never());
     const refresh = buttonNamed(wrapper, 'Refresh');
     refresh.element.focus();
     await refresh.trigger('click');
@@ -341,9 +342,12 @@ describe('the dialog styles', () => {
     });
   });
 
-  it('gives the Recording tag a blue white text reads on', () => {
-    expect(style('.netflow-captures-table .tag.is-info')).toEqual({
-      'background-color': '#296fa8',
+  // the theme's is-info fill gives white text 7.3:1
+  it('gives the Recording tag the theme blue, which white text reads on', () => {
+    expect(style('.netflow-captures-table .tag.is-info')).toEqual({});
+    expect(declarations('.tag:not(body).is-info')).toMatchObject({
+      'background-color': 'hsl(207, 61%, 33%)',
+      color: 'hsl(0, 0%, 100%)',
     });
   });
 

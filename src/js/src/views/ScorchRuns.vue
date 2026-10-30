@@ -107,6 +107,7 @@
     <b-modal
       v-model="terminal.modal"
       :can-cancel="terminal.ro"
+      :aria-label="terminalName()"
       @close="resetTerminal"
       has-modal-card>
       <div class="modal-card" style="width: 60em">
@@ -140,7 +141,11 @@
         </footer>
       </div>
     </b-modal>
-    <b-modal v-model="output.modal" @close="exitOutput" has-modal-card>
+    <b-modal
+      v-model="output.modal"
+      :aria-label="output.title"
+      @close="exitOutput"
+      has-modal-card>
       <div class="modal-card" style="width: 50em">
         <header class="modal-card-head x-modal-dark output-head">
           <h2 class="modal-card-title">{{ output.title }}</h2>
@@ -266,7 +271,7 @@
           return this.loader.load();
         },
         fetch: async (signal) => {
-          const resp = await scorchApi.listScorchPipelines(exp, signal);
+          const resp = await scorchApi.listScorchPipelines(exp, { signal });
           return resp.data;
         },
         apply: (pipelines) => {
@@ -668,7 +673,7 @@
           this.output.msg +=
             wsCloseCause(event) === 'shutdown' || serverShuttingDown()
               ? '\n[output stream ended: phēnix server shutting down]'
-              : '\n[lost the connection to the phēnix server; close and reopen to retry]';
+              : '\n[lost the connection to the phēnix server. Close and reopen to retry]';
         };
       },
 

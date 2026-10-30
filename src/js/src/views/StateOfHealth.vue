@@ -823,6 +823,22 @@
   import { plural, pluralWord } from '@/utils/plural.js';
   import { roomInWindow } from '@/utils/viewportFit.js';
 
+  const STATUS_TEXT = {
+    running: 'running',
+    notrunning: 'not running',
+    notboot: 'not booted',
+    notdeploy: 'not deployed',
+    external: 'external',
+  };
+
+  function prefersReducedMotion() {
+    return (
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    );
+  }
+
   export default {
     components: { BColorpicker, SohDownloadMenu, SohLayoutSelect },
     setup() {
@@ -1133,6 +1149,7 @@
         const { width, height } = this.viewSize();
         const previous = this.graph;
         const prevPositions = this.currentPositions();
+        const reduceMotion = prefersReducedMotion();
         this.stopGraph();
 
         // copies inherit from the /soh nodes, so the status the websocket
@@ -1149,7 +1166,6 @@
           .select(this.$refs.graph)
           .append('svg')
           .attr('viewBox', [0, 0, width, height])
-        const reduceMotion = prefersReducedMotion();
           .attr('role', 'group')
           .attr(
             'aria-label',
@@ -1256,6 +1272,21 @@
           .on('mouseleave', this.exited)
           .on('click', this.clicked);
 
+        // Keyboard users reach each VM node and open its details (WCAG 2.1.1).
+        node
+          .filter((n) => this.isVmNode(n))
+          .attr('tabindex', 0)
+          .attr('role', 'button')
+          .attr('aria-label', (n) => this.nodeLabel(n))
+          .on('focus', this.entered)
+          .on('blur', this.exited)
+          .on('keydown', (e, n) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              this.clicked(e, n);
+            }
+          });
+
         const label = g
           .append('g')
           .selectAll('text')
@@ -1331,6 +1362,8 @@
           // same layout on a reload: keep the user's zoom and pan
           if (previous?.layoutId === id && previous.svg.node()) {
             svg.call(zoom.transform, d3.zoomTransform(previous.svg.node()));
+          } else if (reduceMotion) {
+            this.fitGraph();
           } else {
             // fit the graph in view once it has mostly settled, unless the
             // user has zoomed or panned it by then
@@ -1362,8 +1395,6 @@
         let moves = false;
         for (const n of nodes) {
           const t = targets.get(n.id) ?? { x: cx, y: cy };
-          } else if (reduceMotion) {
-            this.fitGraph();
           const p = prevPositions.get(n.id) ?? t;
           n.tx = t.x;
           n.ty = t.y;
@@ -1464,6 +1495,27 @@
         } else {
           graph.svg.call(graph.zoom.transform, t);
         }
+      },
+
+      isVmNode(n) {
+        return !!n.image && n.image.toLowerCase() != 'switch';
+      },
+
+      refreshNodeStatus() {
+        d3.select(this.$refs?.graph ?? '#graph')
+          .selectAll('circle.circle')
+          .attr('fill', this.updateNodeColor)
+          .filter((n) => this.isVmNode(n))
+          .attr('aria-label', (n) => this.nodeLabel(n));
+      },
+
+      nodeLabel(n) {
+        const status = STATUS_TEXT[n.status] || n.status;
+        return `${n.label}, status ${status}`;
+      },
+
+      transitionFor(selection) {
+        return prefersReducedMotion() ? selection : selection.transition();
       },
 
       entered(e, n) {
@@ -1753,9 +1805,11 @@
       },
 
       execSoH() {
-        experimentsApi.triggerSoh(this.$route.params.id).catch((err) => {
-          useErrorNotification(err);
-        });
+        experimentsApi
+          .triggerApps(this.$route.params.id, 'soh')
+          .catch((err) => {
+            useErrorNotification(err);
+          });
       },
 
       vncLoc(vm) {
@@ -1920,6 +1974,7 @@
         return Object.entries(STATUS_COLORS).map(([status, color]) => ({
           label: STATUS_LABELS[status],
           color,
+          ring: color === 'black',
         }));
       },
 
@@ -1972,7 +2027,6 @@
   /* legend left of the graph; counts, filters and links above it */
   .soh-topology {
     display: grid;
-          ring: color === 'black',
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas:
       '. head'

@@ -62,14 +62,9 @@ const NOT_LAUNCHED =
 // a do-not-boot VM that minimega has not launched has no state
 const notLaunched = (vm) => Boolean(vm.dnb) && !vm.state;
 
-// Each action: its label, what it does (its tooltip), its icon, the Bulma
-// color type of its button, the RBAC permissions it needs (all of them), and
-// why the VM's state rules it out (null when it is allowed). These rules gate
-// the buttons for one VM, and partitionVMsForAction applies them to a
-// selection. A reason reads after "Can't <verb>: " in a button's tooltip,
-// where the verb is the label in lowercase unless the action gives one; the
-// reasons of the actions the page takes on a selection start "the VM is" or
-// "the VM does", so skippedVMsText can say them of several VMs.
+// Each action's label, tooltip (description), icon, Bulma color, the RBAC
+// permissions it needs (all of them), and why the VM's state rules it out
+// (null when allowed), which reads after "Can't <verb>: " in its tooltip.
 export const VM_ACTIONS = {
   start: {
     label: (vm) => (paused(vm) ? 'Resume' : 'Start'),
@@ -370,9 +365,9 @@ export function partitionVMsForAction(name, names, vms) {
   );
 }
 
-// One sentence for each reason partitionVMsForAction skipped VMs for, turning
-// a reason about "the VM" into one about all of them: "The VMs a and b are
-// not running."
+// One sentence for each reason partitionVMsForAction skipped VMs for. The
+// reasons start "the VM is" or "the VM does", so each can be said of them all:
+// "The VMs a and b are not running."
 export function skippedVMsText(skipped) {
   return skippedText(skipped, 'VM');
 }

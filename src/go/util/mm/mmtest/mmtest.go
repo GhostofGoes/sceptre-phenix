@@ -63,12 +63,10 @@ var (
 	)
 )
 
-// Use points mmcli at the fake minimega, which answers with handle until the
-// test ends, and returns a function listing the commands received since. A
-// nil handle answers every command with an empty success.
-//
-// The fake is started once per process, and mmcli's shared connection to it
-// outlives a test, so tests using it must not run in parallel.
+// Use points mmcli at the fake minimega, which answers with handle (nil answers every command with an empty success)
+// until the test ends, and returns a function listing the commands received since. The fake and mmcli's connection to it
+// outlive a test, so tests using it must not run in parallel: Use fails a test while a test that is not it or its parent
+// uses the fake.
 func Use(tb testing.TB, handle Handler) func() []Command {
 	tb.Helper()
 
@@ -78,10 +76,9 @@ func Use(tb testing.TB, handle Handler) func() []Command {
 		tb.Fatalf("starting fake minimega: %v", errStart)
 	}
 
-	current.mu.Lock()
 	name := tb.Name()
 
-	current.handle, current.received = handle, nil
+	current.mu.Lock()
 
 	for _, user := range current.users {
 		if user != name && !strings.HasPrefix(name, user+"/") {
@@ -92,17 +89,18 @@ func Use(tb testing.TB, handle Handler) func() []Command {
 	}
 
 	current.users = append(current.users, name)
+	current.handle, current.received = handle, nil
 	current.mu.Unlock()
 
 	tb.Cleanup(func() {
 		current.mu.Lock()
 		current.handle = nil
-		current.mu.Unlock()
 
 		if i := slices.Index(current.users, name); i >= 0 {
 			current.users = slices.Delete(current.users, i, i+1)
 		}
 
+		current.mu.Unlock()
 	})
 
 	return func() []Command {

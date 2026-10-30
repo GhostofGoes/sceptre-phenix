@@ -5,15 +5,10 @@ import (
 	"strconv"
 )
 
-// FileETag is a strong validator for a regular file, built from its inode,
-// size and modification time (in nanoseconds) rather than its contents, so it
-// costs nothing to compute however large the file is. It changes whenever the
-// file is rewritten, appended to, truncated or replaced (a renamed-in file
-// has a new inode).
-//
-// It is strong on purpose: net/http only honors an If-Range ETag with a
-// strong comparison, so a weak one would make every resumed download start
-// over.
+// FileETag is a strong validator for a regular file built from its inode, size, modification time and inode change
+// time, so it costs nothing however large the file is. It changes whenever the file is rewritten or replaced, also
+// after a same-size rewrite that sets the modification time back, because a program cannot set the change time. It is
+// strong because net/http honors only a strong If-Range ETag, which resumed downloads need.
 func FileETag(info fs.FileInfo) string {
 	return `"` + strconv.FormatUint(fileInode(info), 16) +
 		"-" + strconv.FormatInt(info.Size(), 16) +
