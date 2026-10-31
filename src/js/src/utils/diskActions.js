@@ -1,5 +1,7 @@
 import { baseName, findDisk, minimegaSafe } from '@/utils/diskChain.js';
+import { escapeHTML } from '@/utils/escapeHTML.js';
 import { actionState } from '@/utils/operations.js';
+import { pluralWord } from '@/utils/plural.js';
 
 // Which disk actions a role may take on a disk in its current state, and why
 // not. The Disks page's details window and each row's buttons share these.
@@ -103,4 +105,58 @@ export function diskActionState(action, disk, opts) {
     permitted: reason !== NO_PERMISSION,
     blocked: reason === NO_PERMISSION ? null : reason,
   });
+}
+
+// the code of a delete the server refused because other images or
+// experiments use the disk
+const DISK_IN_USE_CODE = 'disk_in_use';
+
+// the most images and experiments the delete dialog names
+export const SHOWN_DISK_USERS = 10;
+
+// The images and experiments that use a disk, from the JSON body of a refused
+// delete, or null when it is not a disk_in_use error. hidden counts the ones
+// the role may not see.
+export function diskUsers(body) {
+  if (body?.code !== DISK_IN_USE_CODE) return null;
+  const details = body.details ?? {};
+  return {
+    images: Array.isArray(details.images) ? details.images : [],
+    experiments: Array.isArray(details.experiments) ? details.experiments : [],
+    hidden: Number.isInteger(details.hidden) ? details.hidden : 0,
+  };
+}
+
+// The HTML of the dialog that asks to delete a disk in use: what uses the
+// disk, at most SHOWN_DISK_USERS of them. label gives an image's name from its
+// path. Every name is escaped.
+export function diskUsersHTML(name, users, label = (path) => path) {
+  const items = [
+    ...users.images.map((path) => `image <b>${escapeHTML(label(path))}</b>`),
+    ...users.experiments.map(
+      (exp) =>
+        `experiment <b>${escapeHTML(exp.name)}</b>${exp.running ? ' (running)' : ''}`,
+    ),
+  ];
+  const shown = items.slice(0, SHOWN_DISK_USERS);
+  const more = users.hidden + items.length - shown.length;
+  if (more) {
+    const what = pluralWord(
+      more,
+      'image or experiment',
+      'images or experiments',
+    );
+    shown.push(
+      shown.length ? `and ${more} more` : `${more} ${what} that you cannot see`,
+    );
+  }
+  const running = users.experiments.some((exp) => exp.running)
+    ? '<p>minimega can hold the disk open while an experiment runs.</p>'
+    : '';
+  return (
+    `<p>These images and experiments use <b>${escapeHTML(name)}</b>. ` +
+    'If you delete it, they stop working.</p>' +
+    `<div class="content"><ul>${shown.map((item) => `<li>${item}</li>`).join('')}</ul></div>` +
+    running
+  );
 }

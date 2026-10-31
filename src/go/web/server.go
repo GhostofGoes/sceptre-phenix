@@ -135,6 +135,8 @@ func ConfigureUsers(users []string) error {
 
 // Start runs the UI server until ctx is done, then shuts it down within the
 // shutdown grace period and returns nil. It returns early if a server fails.
+// It opens its listeners before it changes users, experiments, jobs or
+// capture spools, so that it stops first when its ports are in use.
 func Start(ctx context.Context, opts ...ServerOption) error {
 	o = newServerOptions(opts...)
 
@@ -159,8 +161,6 @@ func Start(ctx context.Context, opts ...ServerOption) error {
 		return err
 	}
 
-	_ = ConfigureUsers(o.users)
-
 	var assets http.FileSystem
 
 	if o.unbundled {
@@ -175,14 +175,25 @@ func Start(ctx context.Context, opts ...ServerOption) error {
 		}
 	}
 
+	// the uptime check of the router reads the start time
 	markStarted()
-
-	recoverExperiments()
 
 	router := newRouter(assets)
 
 	// background loops run until shutdown, not until ctx is done
 	background, stopBackground := context.WithCancel(context.WithoutCancel(ctx))
+
+	server := &uiServer{grace: o.shutdownGrace, servers: nil, socket: "", stopBackground: stopBackground}
+
+	if err := server.listen(ctx, fileServerEndpoint, router); err != nil {
+		server.closeListeners()
+
+		return err
+	}
+
+	_ = ConfigureUsers(o.users)
+
+	recoverExperiments()
 
 	plog.Info(plog.TypeSystem, "starting websockets broker")
 
@@ -209,19 +220,13 @@ func Start(ctx context.Context, opts ...ServerOption) error {
 	plog.Info(plog.TypeSystem, "using base path", "path", o.basePath)
 	plog.Info(plog.TypeSystem, "using JWT lifetime", "lifetime", o.jwtLifetime)
 
-	server := &uiServer{grace: o.shutdownGrace, servers: nil, socket: "", stopBackground: stopBackground}
-
-	if err := server.listen(ctx, fileServerEndpoint, router); err != nil {
-		server.closeListeners()
-
-		return err
-	}
-
 	return server.run(ctx)
 }
 
-// listen opens the listeners of the file server, the Unix socket and the main
-// server, as the options ask for them.
+// listen opens the listeners of the file server, the main server and the Unix
+// socket, as the options ask for them. It opens the main server before it
+// removes an old socket file, so that it does not remove the socket of a
+// phenix ui that runs on the same port.
 func (s *uiServer) listen(ctx context.Context, fileServerEndpoint string, router http.Handler) error {
 	lc := &net.ListenConfig{} //nolint:exhaustruct // defaults
 
@@ -242,37 +247,6 @@ func (s *uiServer) listen(ctx context.Context, fileServerEndpoint string, router
 			ln:    ln,
 			serve: (*http.Server).Serve,
 		})
-	}
-
-	if common.UnixSocket != "" {
-		_ = os.Remove(common.UnixSocket)
-
-		plog.Info(plog.TypeSystem, "starting Unix socket server", "path", common.UnixSocket)
-
-		ln, err := lc.Listen(ctx, "unix", common.UnixSocket)
-		if err != nil {
-			return fmt.Errorf("listening on the Unix socket: %w", err)
-		}
-
-		s.socket = common.UnixSocket
-		s.servers = append(s.servers, servedHTTP{
-			name:  "Unix socket server",
-			srv:   newHTTPServer("", newSocketRouter()),
-			ln:    ln,
-			serve: (*http.Server).Serve,
-		})
-
-		if o.unixSocketGID != -1 {
-			plog.Info(plog.TypeSystem, "setting Unix socket group permissions", "gid", o.unixSocketGID)
-
-			if err := os.Chown(common.UnixSocket, -1, o.unixSocketGID); err != nil {
-				return err
-			}
-
-			if err := os.Chmod(common.UnixSocket, 0o770); err != nil { //nolint:gosec // G302 the group may use the socket
-				return err
-			}
-		}
 	}
 
 	plog.Info(plog.TypeSecurity, "starting server", "tls_enabled", o.tlsEnabled())
@@ -307,6 +281,37 @@ func (s *uiServer) listen(ctx context.Context, fileServerEndpoint string, router
 
 	primary.ln = ln
 	s.servers = append(s.servers, primary)
+
+	if common.UnixSocket != "" {
+		_ = os.Remove(common.UnixSocket)
+
+		plog.Info(plog.TypeSystem, "starting Unix socket server", "path", common.UnixSocket)
+
+		ln, err := lc.Listen(ctx, "unix", common.UnixSocket)
+		if err != nil {
+			return fmt.Errorf("listening on the Unix socket: %w", err)
+		}
+
+		s.socket = common.UnixSocket
+		s.servers = append(s.servers, servedHTTP{
+			name:  "Unix socket server",
+			srv:   newHTTPServer("", newSocketRouter()),
+			ln:    ln,
+			serve: (*http.Server).Serve,
+		})
+
+		if o.unixSocketGID != -1 {
+			plog.Info(plog.TypeSystem, "setting Unix socket group permissions", "gid", o.unixSocketGID)
+
+			if err := os.Chown(common.UnixSocket, -1, o.unixSocketGID); err != nil {
+				return err
+			}
+
+			if err := os.Chmod(common.UnixSocket, 0o770); err != nil { //nolint:gosec // G302 the group may use the socket
+				return err
+			}
+		}
+	}
 
 	return nil
 }
@@ -583,6 +588,9 @@ func newRouter(assets http.FileSystem) *mux.Router {
 		Methods("GET", "HEAD", "OPTIONS").
 		Queries("disk", "{disk}")
 	api.Handle("/disks/checksum", weberror.ErrorHandler(GetDiskChecksum)).
+		Methods("GET", "OPTIONS").
+		Queries("disk", "{disk}")
+	api.Handle("/disks/details", weberror.ErrorHandler(GetDiskDetails)).
 		Methods("GET", "OPTIONS").
 		Queries("disk", "{disk}")
 

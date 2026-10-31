@@ -186,21 +186,92 @@ func GetDisks(w http.ResponseWriter, r *http.Request) error {
 		return weberror.New(http.StatusInternalServerError, err.Error())
 	}
 
-	filtered := []disk.Details{}
-
-	for _, disk := range disks {
-		if disk.Kind&defaultDiskType != 0 && role.Allowed("disks", "list", disk.Name) {
-			filtered = append(filtered, disk)
-		}
-	}
-
-	allowed := visibleDisks(role, filtered)
+	allowed := listedDisks(role, disks, defaultDiskType)
 
 	slices.SortFunc(allowed, func(a, b disk.Details) int {
 		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.FullPath, b.FullPath))
 	})
 
 	body, err := json.Marshal(diskList{Disks: util.Page(allowed, page, pageSize), Total: len(allowed)})
+	if err != nil {
+		return weberror.New(http.StatusInternalServerError, err.Error())
+	}
+
+	w.Header().Set("Content-Type", mimeJSON)
+	_, _ = w.Write(body)
+
+	return nil
+}
+
+// listedDisks returns the disks of the kinds that GET /disks shows the role: those it may list and see (see
+// visibleDisks).
+func listedDisks(role rbac.Role, disks []disk.Details, kinds disk.Kind) []disk.Details {
+	filtered := []disk.Details{}
+
+	for _, d := range disks {
+		if d.Kind&kinds != 0 && role.Allowed("disks", "list", d.Name) {
+			filtered = append(filtered, d)
+		}
+	}
+
+	return visibleDisks(role, filtered)
+}
+
+// GetDiskDetails - GET /disks/details?disk=.
+//
+// Answers what phenix reads from one image of the disk list for its details card (see disk.Inspect). The role must
+// see the image in GET /disks, and the VMs are cut to the experiments it may get.
+func GetDiskDetails(w http.ResponseWriter, r *http.Request) error {
+	var (
+		ctx     = r.Context()
+		role, _ = ctx.Value(middleware.ContextKeyRole).(rbac.Role)
+		name    = mux.Vars(r)["disk"]
+	)
+
+	if name == "" {
+		return diskError(fmt.Errorf("%w: no disk given", disk.ErrNotManaged))
+	}
+
+	path := mm.GetMMFullPath(name)
+
+	if !role.Allowed("disks", "list", filepath.Base(path)) {
+		user, _ := ctx.Value(middleware.ContextKeyUser).(string)
+		plog.Warn(plog.TypeSecurity, "getting disk details not allowed", "user", user, "disk", path)
+
+		return weberror.New(http.StatusForbidden, "forbidden")
+	}
+
+	disks, err := disk.GetImages("")
+	if err != nil {
+		return weberror.New(http.StatusInternalServerError, err.Error())
+	}
+
+	listed := listedDisks(role, disks, disk.VMImage|disk.ContainerImage|disk.ISOImage|disk.UNKNOWN)
+
+	i := slices.IndexFunc(listed, func(d disk.Details) bool { return d.FullPath == path })
+	if i < 0 {
+		// a path the disk list cannot hold gets the error of the other disk routes
+		if _, err := disk.Resolve(name); err != nil {
+			return diskError(err)
+		}
+
+		return weberror.New(http.StatusNotFound, "disk image not found: "+path)
+	}
+
+	found := disk.Inspect(ctx, listed[i], listed)
+
+	uses, err := disk.VMUses(path)
+	if err != nil {
+		plog.Warn(plog.TypeSystem, "cannot tell which VMs use a disk", "disk", path, "err", err)
+	}
+
+	for _, use := range uses {
+		if role.Allowed("experiments", "get", use.Experiment) {
+			found.VMs = append(found.VMs, use)
+		}
+	}
+
+	body, err := json.Marshal(found)
 	if err != nil {
 		return weberror.New(http.StatusInternalServerError, err.Error())
 	}
@@ -551,10 +622,10 @@ func RenameDisk(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// DeleteDisk - DELETE /disks?disk={disk}
+// DeleteDisk - DELETE /disks?disk={disk}&force={force}
 //
-// disk is relative to the minimega files directory, or absolute, and must be
-// inside it.
+// disk is relative to the minimega files directory, or absolute, and must be inside it. Unless force is true, an image
+// that other images or experiments use is kept, and the answer is 409 with the code disk_in_use (see diskInUse).
 func DeleteDisk(w http.ResponseWriter, r *http.Request) error {
 	role, _ := r.Context().Value(middleware.ContextKeyRole).(rbac.Role)
 
@@ -563,18 +634,77 @@ func DeleteDisk(w http.ResponseWriter, r *http.Request) error {
 		return diskError(err)
 	}
 
+	force, err := parseForce(r.URL.Query())
+	if err != nil {
+		return err
+	}
+
+	deleted := audit.Fields{File: path}
+	if force {
+		deleted.Extra = []any{"phenix.disk.force", true}
+	}
+
 	if !role.Allowed("disks", "delete", filepath.Base(path)) {
-		return diskForbidden(r, audit.DiskDelete, "deleting disk not allowed", audit.Fields{File: path})
+		return diskForbidden(r, audit.DiskDelete, "deleting disk not allowed", deleted)
 	}
 
-	if err := disk.DeleteDisk(path); err != nil {
-		return diskFailed(r, audit.DiskDelete, "deleting disk failed", audit.Fields{File: path}, err)
+	if err := disk.DeleteDisk(path, force); err != nil {
+		var inUse *disk.InUseError
+		if errors.As(err, &inUse) {
+			deleted.Reason = "in use"
+			audit.Failure(r, audit.DiskDelete, "deleting disk refused: other images or experiments use it", deleted, err)
+
+			return diskInUse(role, inUse)
+		}
+
+		return diskFailed(r, audit.DiskDelete, "deleting disk failed", deleted, err)
 	}
 
-	audit.Success(r, audit.DiskDelete, "deleted disk", audit.Fields{File: path})
+	audit.Success(r, audit.DiskDelete, "deleted disk", deleted)
 	w.WriteHeader(http.StatusOK)
 
 	return nil
+}
+
+// diskInUse is the 409 of a delete that err refused: the code disk_in_use, the metadata retry=force, and the images
+// and experiments that the role may see in the message, details.images and details.experiments. details.hidden counts
+// the others: an image the role may not list, or outside the files directory and used by no experiment it may get, and
+// an experiment it may not list.
+func diskInUse(role rbac.Role, err *disk.InUseError) error {
+	var (
+		images      = []string{}
+		experiments = []disk.ExperimentUse{}
+		hidden      int
+	)
+
+	for _, image := range err.Images {
+		readable := slices.ContainsFunc(image.Experiments, func(use disk.ExperimentUse) bool {
+			return role.Allowed("experiments", "get", use.Name)
+		})
+
+		if role.Allowed("disks", "list", image.Name) && (!image.OutsideFilesDir || readable) {
+			images = append(images, image.FullPath)
+		} else {
+			hidden++
+		}
+	}
+
+	for _, use := range err.Experiments {
+		if role.Allowed("experiments", "list", use.Name) {
+			experiments = append(experiments, use)
+		} else {
+			hidden++
+		}
+	}
+
+	msg := fmt.Sprintf("disk image %s is in use by %s", err.Path, disk.UsersText(images, experiments, hidden))
+
+	return weberror.New(http.StatusConflict, msg).
+		WithCode(weberror.CodeDiskInUse).
+		WithMetadata(retryKey, retryForce, true).
+		WithDetail("images", images).
+		WithDetail("experiments", experiments).
+		WithDetail("hidden", hidden)
 }
 
 // diskAndNew resolves an action's disk and new query values (see

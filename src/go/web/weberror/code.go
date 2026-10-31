@@ -27,6 +27,9 @@ const (
 	// CodeBrokenDisks is a start refused because a VM's disk image or CD-ROM image is missing or its backing chain
 	// is broken; details.disks lists them.
 	CodeBrokenDisks Code = "broken_disks"
+	// CodeDiskInUse is a disk delete refused because other images or experiments use the image; details.images and
+	// details.experiments list them.
+	CodeDiskInUse Code = "disk_in_use"
 )
 
 // CodeFor is the code of an error answered with status.

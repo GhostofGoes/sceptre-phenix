@@ -9,6 +9,12 @@ export function listDisks(params, config) {
   return axiosInstance.get('disks', { params, ...config });
 }
 
+// GET /disks/details?disk=: what the server reads from one listed image, such
+// as its qcow header and partitions; config carries the request's signal
+export function getDiskDetails(disk, config) {
+  return axiosInstance.get('disks/details', { params: { disk }, ...config });
+}
+
 // POST /disks, with an uploaded file as FormData; onUploadProgress receives
 // axios's progress events
 export function uploadDisk(formData, onUploadProgress) {
@@ -18,12 +24,13 @@ export function uploadDisk(formData, onUploadProgress) {
   });
 }
 
-// DELETE /disks?disk=
-export function deleteDisk(disk) {
+// DELETE /disks?disk=: the server refuses with 409 disk_in_use while other
+// images or experiments use the disk, unless force is set
+export function deleteDisk(disk, { force = false } = {}) {
   return axiosInstance.request({
     method: 'delete',
     url: 'disks',
-    params: { disk },
+    params: force ? { disk, force: true } : { disk },
   });
 }
 

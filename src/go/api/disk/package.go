@@ -42,7 +42,7 @@ type DiskFiles interface {
 	// renames `src` to `dst`, which must not exist.
 	// Note that if this image backs others, they will need to be rebased to the new name (can use unsafe)
 	RenameDisk(src, dst string) error
-	// deletes `src`.
+	// deletes `src`. It does not check what uses the image: the package's DeleteDisk does.
 	// Note that if this image backs others, they will become invalid
 	DeleteDisk(src string) error
 }
@@ -224,10 +224,23 @@ func RenameDisk(src, dst string) error {
 	return DefaultDiskFiles.RenameDisk(src, dst)
 }
 
-func DeleteDisk(src string) error {
+// DeleteDisk deletes the image at src. Unless force is set, it first finds the images and experiments that use the
+// image (see Users), and refuses with an *InUseError when there are any.
+func DeleteDisk(src string, force bool) error {
 	src, err := existingFile(src)
 	if err != nil {
 		return err
+	}
+
+	if !force {
+		images, experiments, err := Users(src)
+		if err != nil {
+			return fmt.Errorf("finding what uses disk image %s: %w", src, err)
+		}
+
+		if len(images) > 0 || len(experiments) > 0 {
+			return &InUseError{Path: src, Images: images, Experiments: experiments}
+		}
 	}
 
 	return DefaultDiskFiles.DeleteDisk(src)

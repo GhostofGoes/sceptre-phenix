@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	// the error metadata of a stop that left the experiment's VMs running.
-	stopRetryKey   = "retry"
-	stopRetryForce = "force"
+	// the error metadata of a refusal that the request with force=true overrides:
+	// a stop that left the VMs running, or a delete of a disk in use.
+	retryKey   = "retry"
+	retryForce = "force"
 
 	statusKeyPercent             = "percent"
 	percentMultiplier            = 100.0
@@ -390,7 +391,7 @@ func stopExperiment(name string, force bool) ([]byte, error) {
 		if errors.Is(err, experiment.ErrTeardownFailed) {
 			rearmAfterFailedStop(name)
 
-			return nil, werr.WithMetadata(stopRetryKey, stopRetryForce, true).SetStatus(http.StatusBadGateway)
+			return nil, werr.WithMetadata(retryKey, retryForce, true).SetStatus(http.StatusBadGateway)
 		}
 
 		return nil, werr.SetStatus(http.StatusBadRequest)

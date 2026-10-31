@@ -46,174 +46,15 @@
       v-model="detailsModal.active"
       @close="() => (detailsModal.active = false)"
       has-modal-card
-      aria-role="dialog"
-      aria-modal
-      :aria-label="detailsModal.disk.name"
-      close-button-aria-label="Close">
-      <div class="modal-card">
-        <header class="modal-card-head">
-          <p class="modal-card-title">{{ diskLabel(detailsModal.disk) }}</p>
-        </header>
-        <section class="modal-card-body">
-          <h3 class="title is-5">Details</h3>
-          <dl>
-            <div>
-              <dt>Full Path:</dt>
-              <dd>{{ detailsModal.disk.fullPath }}</dd>
-            </div>
-            <div>
-              <dt>Location:</dt>
-              <dd>
-                {{ locationText(detailsModal.disk) }}
-                <DiskWarning
-                  v-if="detailsModal.disk.outsideFilesDir"
-                  :reasons="['outside']"
-                  :files-dir="filesDir" />
-              </dd>
-            </div>
-            <div>
-              <dt>Kind:</dt>
-              <dd>{{ detailsModal.disk.kind }}</dd>
-            </div>
-            <div>
-              <dt>Type:</dt>
-              <dd><DiskFormat :disk="detailsModal.disk" /></dd>
-            </div>
-            <div>
-              <dt>Size on Disk:</dt>
-              <dd>{{ detailsModal.disk.size }}</dd>
-            </div>
-            <div>
-              <dt>Virtual Size:</dt>
-              <dd>{{ detailsModal.disk.virtualSize }}</dd>
-            </div>
-            <div>
-              <dt>Experiments:</dt>
-              <dd>{{ experimentsText(detailsModal.disk) }}</dd>
-            </div>
-            <div>
-              <dt>In Use:</dt>
-              <dd>{{ detailsModal.disk.inUse }}</dd>
-            </div>
-          </dl>
-          <div
-            v-if="
-              detailsModal.disk.brokenChain ||
-              detailsModal.disk.backingImages?.length > 0
-            ">
-            <hr />
-            <p class="title is-5">Backing Chain</p>
-            <p v-if="detailsModal.disk.brokenChain" class="chain-problem">
-              <b-icon
-                icon="times-circle"
-                size="is-small"
-                class="broken-chain-icon" />
-              A VM cannot start from this image:
-              {{ chainProblem(detailsModal.disk) }}.
-            </p>
-            <div style="text-align: center">
-              <b>{{ diskLabel(detailsModal.disk) }}</b>
-              <div
-                v-for="image in detailsModal.disk.backingImages"
-                :key="image">
-                &darr;<br />
-                <button
-                  v-if="findDisk(disks, image)"
-                  type="button"
-                  class="button is-ghost backing-link"
-                  @click="openBacking(image)">
-                  {{ diskLabel(findDisk(disks, image)) }}
-                </button>
-                <span v-else>{{ image }}</span>
-              </div>
-              <div v-if="detailsModal.disk.missingBacking">
-                &darr;<br />
-                <span class="missing-backing">
-                  <b-icon
-                    icon="times-circle"
-                    size="is-small"
-                    class="broken-chain-icon" />
-                  {{ detailsModal.disk.missingBacking }} (missing)
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="formatIssueLevel(detailsModal.disk)" class="format-issue">
-            <hr />
-            <p class="title is-5">Image Format</p>
-            <p class="format-problem">
-              <b-icon
-                :icon="
-                  formatIssueLevel(detailsModal.disk) === 'error'
-                    ? 'times-circle'
-                    : 'exclamation-triangle'
-                "
-                size="is-small"
-                :class="
-                  formatIssueLevel(detailsModal.disk) === 'error'
-                    ? 'broken-chain-icon'
-                    : 'has-text-warning'
-                " />
-              <b>{{ formatIssueName(detailsModal.disk) }}:</b>
-              {{ detailsModal.disk.formatIssue.problem }}.
-            </p>
-            <p class="format-fix">
-              {{ detailsModal.disk.formatIssue.fix
-              }}{{ detailsModal.disk.formatIssue.command ? ':' : '.' }}
-            </p>
-            <code
-              v-if="detailsModal.disk.formatIssue.command"
-              class="format-command"
-              >{{ detailsModal.disk.formatIssue.command }}</code
-            >
-            <p>
-              <a
-                class="format-docs"
-                :href="FORMATS_DOCS"
-                target="_blank"
-                rel="noopener noreferrer"
-                >The fix for each image format (phēnix docs)</a
-              >
-            </p>
-          </div>
-
-          <div v-if="cloneJobsOf(detailsModal.disk).length" class="clones">
-            <hr />
-            <p class="title is-5">Clones</p>
-            <job-progress
-              v-for="job in cloneJobsOf(detailsModal.disk)"
-              :key="job.id"
-              :job="job"
-              class="mb-2"></job-progress>
-          </div>
-
-          <div class="actions">
-            <hr />
-            <p class="title is-5">Actions</p>
-            <template v-for="(action, index) in diskActions" :key="action.name">
-              <hr v-if="index > 0" class="action-separator" />
-              <b-tooltip
-                class="action-tooltip"
-                :label="actionTooltip(action, detailsModal.disk)"
-                :active="shouldDisableAction(action.name)"
-                type="is-dark"
-                multilined>
-                <b-button
-                  type="is-text"
-                  expanded
-                  @click="action.run(detailsModal.disk.fullPath)"
-                  :disabled="shouldDisableAction(action.name)">
-                  <b>{{ action.label }}</b>
-                  <span v-if="action.description">
-                    - {{ action.description }}</span
-                  >
-                </b-button>
-              </b-tooltip>
-            </template>
-          </div>
-        </section>
-      </div>
+      width="min(1280px, 95vw)">
+      <DiskDetailsCard
+        :disk="detailsDisk"
+        :disks="disks"
+        :files-dir="filesDir"
+        :actions="cardActions"
+        :clone-jobs="cloneJobsOf(detailsDisk)"
+        @action="runCardAction"
+        @open="openBacking" />
     </b-modal>
     <!-- REBASE MODAL -->
     <b-modal
@@ -261,7 +102,7 @@
             @click="
               () =>
                 rebaseDisk(
-                  detailsModal.disk.fullPath,
+                  detailsDisk.fullPath,
                   rebaseModal.dst,
                   rebaseModal.unsafe,
                 )
@@ -299,7 +140,7 @@
             type="is-primary"
             :loading="commitModal.isWaiting"
             @click="
-              () => commitDisk(detailsModal.disk.fullPath, commitModal.delete)
+              () => commitDisk(detailsDisk.fullPath, commitModal.delete)
             " />
         </footer>
       </div>
@@ -509,9 +350,9 @@
 </template>
 
 <script>
+  import DiskDetailsCard from '@/components/DiskDetailsCard.vue';
   import DiskFormat from '@/components/DiskFormat.vue';
   import DiskWarning from '@/components/DiskWarning.vue';
-  import JobProgress from '@/components/jobs/JobProgress.vue';
   import StatStrip from '@/components/StatStrip.vue';
   import { useJobStore } from '@/utils/jobs.js';
   import { bytesText, parseBytes } from '@/utils/bytes.js';
@@ -529,16 +370,13 @@
     findDisk,
     minimegaSafe,
   } from '@/utils/diskChain.js';
-  import {
-    FORMATS_DOCS,
-    compareDiskTypes,
-    formatIssueLevel,
-    formatIssueName,
-  } from '@/utils/diskFormat.js';
+  import { compareDiskTypes } from '@/utils/diskFormat.js';
   import {
     diskActionState,
     diskDisabledReason,
     diskRunningText,
+    diskUsers,
+    diskUsersHTML,
   } from '@/utils/diskActions.js';
   import { showError, useErrorNotification } from '@/utils/errorNotif';
   import { usePhenixStore } from '@/store.js';
@@ -557,17 +395,13 @@
   let rescanPending = false;
 
   export default {
-    components: { DiskFormat, DiskWarning, JobProgress, StatStrip },
+    components: { DiskDetailsCard, DiskFormat, DiskWarning, StatStrip },
     setup() {
       return {
         ...useTable({ name: 'disks' }),
         roleAllowed,
         chainProblem,
         diskLabel,
-        findDisk,
-        formatIssueLevel,
-        formatIssueName,
-        FORMATS_DOCS,
       };
     },
     async created() {
@@ -599,9 +433,26 @@
     },
 
     computed: {
-      // the details window's actions with an icon, offered on each row too
+      // the details window's actions that each row offers too
       rowActions() {
-        return this.diskActions.filter((action) => action.icon);
+        return this.diskActions.filter((action) => action.row);
+      },
+      // the disk the details window shows, as the list has it now
+      detailsDisk() {
+        const shown = this.detailsModal.disk;
+        return findDisk(this.disks, shown.fullPath) ?? shown;
+      },
+      // the details window's actions, each disabled with the reason when it
+      // cannot be used on the disk
+      cardActions() {
+        return this.diskActions.map((action) => ({
+          name: action.name,
+          label: action.label,
+          description: action.description,
+          icon: action.icon,
+          disabled: this.shouldDisableAction(action.name, this.detailsDisk),
+          tooltip: this.actionTooltip(action, this.detailsDisk),
+        }));
       },
       // file pickers match extensions only, so rootfs archives show as .tgz
       uploadAccept() {
@@ -650,7 +501,7 @@
       // the disks the open disk can be rebased onto, by label: the others
       // phēnix can act on and minimega can take
       rebaseTargets() {
-        const current = this.detailsModal.disk.fullPath;
+        const current = this.detailsDisk.fullPath;
         return this.disks
           .filter(
             (disk) =>
@@ -692,9 +543,15 @@
         this.detailsModal.disk = row;
         this.detailsModal.active = true;
       },
-      // shows the details of an image in the open disk's backing chain
+      // shows the details of another listed image, from the open disk's
+      // backing chain or the images built on it
       openBacking(path) {
-        this.detailsModal.disk = findDisk(this.disks, path);
+        const disk = findDisk(this.disks, path);
+        if (disk) this.detailsModal.disk = disk;
+      },
+      runCardAction(name) {
+        const action = this.diskActions.find((a) => a.name === name);
+        action?.run(this.detailsDisk.fullPath);
       },
       // why an action can't be used on a disk, or null when it can
       disabledReason(action, disk) {
@@ -706,12 +563,13 @@
               : roleAllowed('disks', verb, name),
         });
       },
-      shouldDisableAction(action, disk = this.detailsModal.disk) {
+      shouldDisableAction(action, disk = this.detailsDisk) {
         return this.disabledReason(action, disk) !== null;
       },
       // Sends an action's request (send returns it), then reloads the list
-      // and closes the dialog, or reports the error.
-      actionWrapper(send, dialog = null) {
+      // and closes the dialog, or reports the error. onStatus maps an error
+      // status to a handler, which returns true when it handled the error.
+      actionWrapper(send, dialog = null, onStatus = {}) {
         if (dialog != null) {
           dialog.startLoading();
         }
@@ -724,6 +582,7 @@
             }
           })
           .catch((err) => {
+            if (onStatus[err?.response?.status]?.(err)) return;
             useErrorNotification(err);
             if (dialog != null) {
               dialog.cancelLoading();
@@ -852,14 +711,51 @@
             this.actionWrapper(() => disksApi.renameDisk(path, value), dialog),
         });
       },
+      // Asks to delete the disk. When the server refuses because other images
+      // or experiments use it, a second dialog lists them and can force it.
       deleteDisk(path) {
+        const opener = document.activeElement;
         this.$buefy.dialog.confirm({
           message:
-            'Are you sure you want to delete this disk? <b class="has-text-danger">If this disk backs others, they will become invalid.</b>',
+            'Are you sure you want to delete this disk? phēnix first checks for images and experiments that use it.',
           canCancel: ['button'],
           closeOnConfirm: false,
           onConfirm: (_, dialog) =>
-            this.actionWrapper(() => disksApi.deleteDisk(path), dialog),
+            this.actionWrapper(() => disksApi.deleteDisk(path), dialog, {
+              409: (err) => {
+                const users = diskUsers(err.response.data);
+                if (!users) return false;
+                dialog.close();
+                this.forceDeleteDisk(path, users, opener);
+                return true;
+              },
+            }),
+        });
+      },
+      // Lists what uses the disk, and deletes it anyway when asked. Focus goes
+      // back to opener, as a canceled dialog unmounts before returnFocus runs.
+      forceDeleteDisk(path, users, opener) {
+        const label = (image) =>
+          diskLabel(findDisk(this.disks, image)) || image;
+        const refocus = () => opener?.isConnected && opener.focus();
+        refocus();
+        this.$buefy.dialog.confirm({
+          title: 'Disk In Use',
+          message: diskUsersHTML(label(path), users, label),
+          cancelText: 'Cancel',
+          confirmText: 'Delete anyway',
+          type: 'is-danger',
+          hasIcon: true,
+          canCancel: ['button'],
+          closeOnConfirm: false,
+          onCancel: () => {
+            this.$nextTick(refocus);
+          },
+          onConfirm: (_, dialog) =>
+            this.actionWrapper(
+              () => disksApi.deleteDisk(path, { force: true }),
+              dialog,
+            ),
         });
       },
       downloadDisk(path) {
@@ -922,18 +818,6 @@
       sortByType(diskA, diskB, isAsc) {
         return compareDiskTypes(diskA, diskB) * (isAsc ? 1 : -1);
       },
-      // where a disk is, for its details
-      locationText(disk) {
-        if (disk.outsideFilesDir) {
-          return 'Outside the standard images directory';
-        }
-        const where = this.filesDir
-          ? `The standard images directory (${this.filesDir})`
-          : 'The standard images directory';
-        return disk.readOnly
-          ? `${where}, at a path the disk list leaves out`
-          : where;
-      },
       // the running experiments using a disk, which hold it in use
       runningText(disk) {
         return diskRunningText(disk);
@@ -950,13 +834,6 @@
           }).reason ?? action.label
         );
       },
-      // the experiments using a disk, noting the stopped ones
-      experimentsText(disk) {
-        if (!disk.experiments?.length) return 'None';
-        return disk.experiments
-          .map((exp) => (exp.running ? exp.name : `${exp.name} (stopped)`))
-          .join(', ');
-      },
     },
 
     data() {
@@ -964,19 +841,22 @@
         currentUploadProgress: null,
         uploader: { active: false, name: null },
         disks: [],
-        // the details window's actions, each run with the disk's full path
+        // the details window's actions, each run with the disk's full path;
+        // row marks the ones each row offers too
         diskActions: [
           {
             name: 'snapshot',
             label: 'Snapshot',
             description: 'Creates a new image backed by this image',
             icon: 'camera',
+            row: true,
             run: this.snapshotDisk,
           },
           {
             name: 'commit',
             label: 'Commit',
             description: 'Commits change in this image to its backing image',
+            icon: 'save',
             run: () => (this.commitModal.active = true),
           },
           {
@@ -984,6 +864,7 @@
             label: 'Rebase',
             description:
               'Updates image and rebases onto a different backing image',
+            icon: 'route',
             run: () => (this.rebaseModal.active = true),
           },
           {
@@ -991,25 +872,38 @@
             label: 'Clone',
             description: 'Creates a copy of the disk file',
             icon: 'copy',
+            row: true,
             run: this.cloneDisk,
           },
-          { name: 'resize', label: 'Resize', run: this.resizeDisk },
+          {
+            name: 'resize',
+            label: 'Resize',
+            description: 'Changes the virtual size of the disk',
+            icon: 'expand',
+            run: this.resizeDisk,
+          },
           {
             name: 'download',
             label: 'Download',
+            description: 'Saves the image file to this computer',
             icon: 'download',
+            row: true,
             run: this.downloadDisk,
           },
           {
             name: 'rename',
             label: 'Rename',
+            description: 'Gives the image a new name',
             icon: 'pencil',
+            row: true,
             run: this.renameDisk,
           },
           {
             name: 'delete',
             label: 'Delete',
+            description: 'Removes the image file',
             icon: 'trash',
+            row: true,
             run: this.deleteDisk,
           },
         ],
@@ -1038,29 +932,6 @@
 <style scoped>
   .b-tooltip:after {
     white-space: pre !important;
-  }
-
-  dl {
-    display: table;
-  }
-
-  dl > div {
-    display: table-row;
-  }
-
-  dl > div > dt,
-  dl > div > dd {
-    display: table-cell;
-    padding: 0.25em;
-  }
-
-  dl > div > dt {
-    font-weight: bold;
-    width: 20%;
-  }
-
-  hr {
-    margin: 4px 0px;
   }
 
   .row-actions {
@@ -1095,56 +966,5 @@
 
   .name-warning {
     flex: none;
-  }
-
-  .chain-problem {
-    margin-bottom: 0.5rem;
-  }
-
-  .button.backing-link {
-    height: auto;
-    padding: 0;
-    white-space: normal;
-  }
-
-  /* $link (#62c0d7) is 3.3:1 on the details window's background
-     ($background-ter); this lighter tint of it is 4.7:1 */
-  .button.backing-link,
-  .button.backing-link:hover,
-  .button.backing-link:focus,
-  .format-docs,
-  .format-docs:hover,
-  .format-docs:focus {
-    color: #abddea;
-  }
-
-  .format-docs {
-    text-decoration: underline;
-  }
-
-  .format-issue p {
-    margin-bottom: 0.5rem;
-  }
-
-  .format-command {
-    display: block;
-    margin-bottom: 0.5rem;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .action-separator {
-    margin: 0 8px;
-  }
-
-  .action-tooltip {
-    display: flex;
-  }
-
-  .actions button {
-    text-align: start;
-    /* color: blue; */
-    text-decoration: none;
-    display: inline;
   }
 </style>

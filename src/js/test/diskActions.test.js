@@ -10,9 +10,12 @@ vi.mock('@/store.js', modules.store);
 
 import {
   DISK_ACTION_RULES,
+  SHOWN_DISK_USERS,
   diskActionState,
   diskDisabledReason,
   diskRunningText,
+  diskUsers,
+  diskUsersHTML,
 } from '@/utils/diskActions.js';
 import { diskListArb } from './helpers/arbitraries.js';
 import { disk } from './helpers/fixtures.js';
@@ -274,5 +277,95 @@ describe('diskRunningText', () => {
       }),
     ).toBe('a, c');
     expect(diskRunningText({})).toBe('a running experiment');
+  });
+});
+
+describe('the images and experiments that use a disk', () => {
+  // the dialog's HTML, rendered: its list items' text and its whole text
+  const rendered = (html) => {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    return {
+      items: [...div.querySelectorAll('li')].map((li) => li.textContent),
+      text: div.textContent,
+      elements: div.querySelectorAll('*').length,
+    };
+  };
+
+  it('reads them from a disk_in_use error body only', () => {
+    expect(diskUsers({ code: 'conflict', details: { images: ['/a'] } })).toBe(
+      null,
+    );
+    expect(diskUsers(undefined)).toBe(null);
+    expect(
+      diskUsers({
+        code: 'disk_in_use',
+        details: { images: ['/a'], experiments: [{ name: 'e' }], hidden: 2 },
+      }),
+    ).toEqual({ images: ['/a'], experiments: [{ name: 'e' }], hidden: 2 });
+    expect(diskUsers({ code: 'disk_in_use' })).toEqual({
+      images: [],
+      experiments: [],
+      hidden: 0,
+    });
+  });
+
+  it('names images, then experiments, marking a running one', () => {
+    const { items, text } = rendered(
+      diskUsersHTML('base.qc2', {
+        images: ['/phenix/images/win/child.qc2'],
+        experiments: [
+          { name: 'exp-a', running: true },
+          { name: 'exp-b', running: false },
+        ],
+        hidden: 1,
+      }),
+    );
+    expect(items).toEqual([
+      'image /phenix/images/win/child.qc2',
+      'experiment exp-a (running)',
+      'experiment exp-b',
+      'and 1 more',
+    ]);
+    expect(text).toContain('These images and experiments use base.qc2.');
+    expect(text).toContain('minimega can hold the disk open');
+  });
+
+  it('counts the ones the role cannot see when it may see none', () => {
+    const { items, text } = rendered(
+      diskUsersHTML('a.qc2', { images: [], experiments: [], hidden: 2 }),
+    );
+    expect(items).toEqual(['2 images or experiments that you cannot see']);
+    expect(text).not.toContain('minimega');
+  });
+
+  it('shows names as text, at most SHOWN_DISK_USERS of them, and counts the rest', () => {
+    const name = fc.string({ minLength: 1, maxLength: 12 });
+    fc.assert(
+      fc.property(
+        name,
+        fc.array(name, { maxLength: 14 }),
+        fc.array(fc.record({ name, running: fc.boolean() }), {
+          maxLength: 14,
+        }),
+        fc.nat(5),
+        (disk, images, experiments, hidden) => {
+          const html = diskUsersHTML(disk, { images, experiments, hidden });
+          const { items, text, elements } = rendered(html);
+          const total = images.length + experiments.length;
+          const shown = Math.min(total, SHOWN_DISK_USERS);
+          const more = hidden + total - shown;
+
+          expect(items).toHaveLength(shown + (more ? 1 : 0));
+          images
+            .slice(0, shown)
+            .forEach((image, i) => expect(items[i]).toBe(`image ${image}`));
+          expect(text).toContain(disk);
+          // only the elements the dialog adds: names never add any
+          const running = experiments.some((exp) => exp.running) ? 1 : 0;
+          expect(elements).toBe(4 + items.length + shown + running);
+        },
+      ),
+    );
   });
 });
