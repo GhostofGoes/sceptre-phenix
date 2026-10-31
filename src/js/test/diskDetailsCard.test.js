@@ -699,13 +699,13 @@ describe('the experiments using the image', () => {
     [
       'may get both experiments',
       allowAll,
-      ['/experiment/bennu', '/experiment/demo'],
+      ['/experiment/bennu', '/experiment/bennu?vm=kali', '/experiment/demo'],
       'demo Stopped Through an image built on this image',
     ],
     [
       'may not get demo',
       denyOnly(['experiments', 'get', 'demo']),
-      ['/experiment/bennu'],
+      ['/experiment/bennu', '/experiment/bennu?vm=kali'],
       'demo Stopped Your role cannot see the VMs of this experiment',
     ],
   ])(
@@ -717,7 +717,7 @@ describe('the experiments using the image', () => {
 
       expect(used.findAll('a').map((a) => a.attributes('href'))).toEqual(links);
       expect(used.findAll('.disk-use').map(spaced)).toEqual([
-        'bennu Running VM kali, drive 0, inject partition 1',
+        'bennu Running VM kali , drive 0, inject partition 1',
         demo,
       ]);
     },
@@ -733,7 +733,7 @@ describe('the experiments using the image', () => {
 });
 
 describe('the actions', () => {
-  it('offer each action with its icon, label and description', async () => {
+  it('show each action as an icon and a label, its description in a tooltip', async () => {
     const wrapper = await card();
     const buttons = wrapper.findAll('.disk-action');
 
@@ -741,11 +741,23 @@ describe('the actions', () => {
       buttons.map((b) => [
         b.attributes('aria-label'),
         b.find('[data-icon]').attributes('data-icon'),
-        textOf(b.find('.disk-action-description')),
+        textOf(b.find('span:not(.icon):not(.is-sr-only)')).split(' ')[0],
+        textOf(wrapper.find(`[id="${b.attributes('aria-describedby')}"]`)),
       ]),
-    ).toEqual(ACTIONS.map((a) => [a.label, a.icon, a.description]));
+    ).toEqual(ACTIONS.map((a) => [a.label, a.icon, a.label, a.description]));
+    const tips = tooltipButtons(wrapper.find('.disk-action-buttons'));
+    expect(tips.map((t) => t.tooltip)).toEqual(
+      ACTIONS.map((a) => a.description),
+    );
     await buttons[3].trigger('click');
     expect(wrapper.emitted('action')).toEqual([['clone']]);
+  });
+
+  it('sit at the bottom of the left column, as on the VM card', async () => {
+    const wrapper = await card();
+    const [left] = wrapper.findAll('.disk-columns > .column');
+    const sections = left.findAll('.disk-section');
+    expect(sections.at(-1).classes()).toContain('actions');
   });
 
   it('keep a disabled action focusable, saying why and sending nothing', async () => {
@@ -957,8 +969,8 @@ describe('accessible names', () => {
     expect(named).toEqual([
       'Copy the full path',
       'Disks documentation',
-      'Copy the qemu-img info command',
       'Copy the fix command',
+      'Copy the qemu-img info command',
     ]);
     // every button has a name
     for (const button of wrapper.findAll('button')) {
@@ -971,7 +983,7 @@ describe('the colors', () => {
   // the card's surfaces: the head, the body, a section, a box in a section
   const HEAD = '#4f4f4f';
   const SECTION = '#484848';
-  const BOX = '#545454';
+  const BOX = '#3d3d3d';
   const fg = (selector) => componentDeclarations(FILE, selector).color;
   const bg = (selector) =>
     componentDeclarations(FILE, selector)['background-color'];
@@ -984,29 +996,48 @@ describe('the colors', () => {
     ['stat labels', fg('.disk-stat-label'), SECTION],
     ['empty notes', fg('.disk-empty'), SECTION],
     ['unavailable reasons', fg('.disk-unavailable'), SECTION],
-    ['links on a section', '#8fd8ea', SECTION],
-    ['links on a box', '#8fd8ea', BOX],
-    ['chain box text', fg('.disk-chain-meta'), BOX],
+    ['links on a section', fg('.disk-use-link'), SECTION],
+    ['links on an issue box', fg('.disk-use-link'), bg('.format-issue')],
+    ['links on a chain box', fg('.disk-use-link'), bg('.disk-chain-item')],
+    ['chain box text', fg('.disk-chain-meta'), bg('.disk-chain-item')],
+    [
+      'chain box text on a missing image',
+      fg('.disk-chain-meta'),
+      bg('.disk-chain-item.is-missing'),
+    ],
+    ['command names on an issue box', fg('.disk-command-name'), BOX],
     [
       'partition IDs on an inject row',
-      '#d0d0d0',
+      fg('.disk-part-name'),
       bg('.disk-partitions tr.is-inject td'),
     ],
+    ['partition headings', fg('.disk-partitions th'), SECTION],
     ['problem text on a danger box', '#f5f5f5', bg('.disk-problems.is-danger')],
     ['problem text on a warning box', '#f5f5f5', bg('.disk-problems')],
-    ['danger icons on a danger box', '#ffc8cf', bg('.disk-problems.is-danger')],
-    ['warning icons on a warning box', '#ffe08a', bg('.disk-problems')],
-    ['action descriptions', fg('.disk-action-description'), '#686868'],
+  ])('keep %s at 7:1 or more', (_, text, surface) => {
+    expect(contrast(text, surface)).toBeGreaterThanOrEqual(7);
+  });
+
+  // icons are not text: they need 3:1 (WCAG 1.4.11)
+  it.each([
     [
-      'disabled action text',
-      fg(
-        ".disk-action-buttons :deep(.button[aria-disabled='true']:not(.is-inverted))",
-      ),
-      bg(
-        ".disk-action-buttons :deep(.button[aria-disabled='true']:not(.is-inverted))",
-      ),
+      'danger icons on a danger box',
+      fg('.disk-problems li.is-danger .icon'),
+      bg('.disk-problems.is-danger'),
     ],
-  ])('keep %s at 4.5:1 or more', (_, text, surface) => {
-    expect(contrast(text, surface)).toBeGreaterThanOrEqual(4.5);
+    [
+      'warning icons on a warning box',
+      fg('.disk-problems li.is-warning .icon'),
+      bg('.disk-problems'),
+    ],
+  ])('keep %s at 3:1 or more', (_, icon, surface) => {
+    expect(contrast(icon, surface)).toBeGreaterThanOrEqual(3);
+  });
+
+  // a disabled control needs no contrast, but its text stays readable
+  it('keeps disabled action text at 4.5:1 or more', () => {
+    const disabled =
+      ".disk-action-buttons :deep(.button[aria-disabled='true']:not(.is-inverted))";
+    expect(contrast(fg(disabled), bg(disabled))).toBeGreaterThanOrEqual(4.5);
   });
 });

@@ -1,10 +1,16 @@
 <template>
   <div class="content">
     <!-- UPLOAD MODAL -->
-    <b-modal v-model="uploader.active" has-modal-card>
+    <b-modal
+      v-model="uploader.active"
+      has-modal-card
+      aria-role="dialog"
+      aria-modal
+      aria-label="Upload a Disk"
+      close-button-aria-label="Close">
       <div class="modal-card" style="width: auto">
         <header class="modal-card-head">
-          <p class="modal-card-title">Upload a Disk</p>
+          <h2 class="modal-card-title">Upload a Disk</h2>
         </header>
         <section class="modal-card-body">
           <b-field v-if="currentUploadProgress == null">
@@ -46,6 +52,10 @@
       v-model="detailsModal.active"
       @close="() => (detailsModal.active = false)"
       has-modal-card
+      aria-role="dialog"
+      aria-modal
+      :aria-label="detailsDisk?.name ?? 'Disk details'"
+      close-button-aria-label="Close"
       width="min(1280px, 95vw)">
       <DiskDetailsCard
         :disk="detailsDisk"
@@ -166,6 +176,7 @@
             <b-field :addons="false" class="has-addons">
               <b-autocomplete
                 v-model="filterString"
+                aria-label="Find a Disk"
                 placeholder="Find a Disk"
                 icon="search"
                 @select="(option) => (selected = option)"
@@ -241,7 +252,13 @@
         :custom-sort="sortByLabel"
         v-slot="props">
         <span class="disk-name">
-          <span class="disk-label">{{ diskLabel(props.row) }}</span>
+          <!-- the row opens on a click; the name button opens it with the keyboard too -->
+          <button
+            type="button"
+            class="plain-button disk-label"
+            @click.stop="rowClick(props.row)">
+            {{ diskLabel(props.row) }}
+          </button>
           <b-tooltip
             v-if="props.row.brokenChain"
             class="name-warning"
@@ -302,7 +319,9 @@
           type="is-dark"
           multilined>
           <b-icon icon="play-circle" size="is-small" />
+          <span class="is-sr-only">Yes</span>
         </b-tooltip>
+        <span v-else class="is-sr-only">No</span>
       </b-table-column>
 
       <b-table-column
@@ -422,6 +441,7 @@
         apply: (disks) => {
           this.disks = disks;
           this.loaded = true;
+          this.openLinkedDisk();
         },
         // the header button has the server inspect every image again, not
         // just the ones that changed
@@ -437,6 +457,21 @@
     beforeUnmount() {
       removeWsHandler(this.handleWs);
       this.loader.stop();
+    },
+
+    watch: {
+      '$route.query.disk'(path) {
+        if (!path) this.linkedDisk = '';
+        this.openLinkedDisk();
+      },
+      // a closed card takes its link out of the URL, so a reload does not
+      // open it again
+      'detailsModal.active'(open) {
+        const query = { ...this.$route.query };
+        if (open || this.$route.name !== 'disks' || !('disk' in query)) return;
+        delete query.disk;
+        this.$router.replace({ query });
+      },
     },
 
     computed: {
@@ -549,6 +584,16 @@
       rowClick(row) {
         this.detailsModal.disk = row;
         this.detailsModal.active = true;
+      },
+      // Opens the card of the image a link names (/disks?disk=<full path>),
+      // once the list holds it.
+      openLinkedDisk() {
+        const path = this.$route.query.disk;
+        if (typeof path !== 'string' || path === this.linkedDisk) return;
+        const disk = findDisk(this.disks, path);
+        if (!disk) return;
+        this.linkedDisk = path;
+        this.rowClick(disk);
       },
       // shows the details of another listed image, from the open disk's
       // backing chain or the images built on it
@@ -920,6 +965,8 @@
           active: false,
           disk: {},
         },
+        // the image of the link whose card the page opened
+        linkedDisk: '',
         rebaseModal: {
           active: false,
           isWaiting: false,

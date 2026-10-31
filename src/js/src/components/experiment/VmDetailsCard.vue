@@ -5,9 +5,9 @@
       :class="[stateClass, { 'has-description': vm.description }]">
       <div class="vm-card-heading">
         <div class="vm-card-title-row">
-          <p class="modal-card-title vm-card-title">
+          <h2 class="modal-card-title vm-card-title">
             {{ vm.name || 'unknown' }}
-          </p>
+          </h2>
           <b-tag :type="state.type" rounded class="vm-state-tag">
             <b-icon :icon="state.icon" size="is-small" />
             <span>{{ state.label }}</span>
@@ -99,7 +99,7 @@
       </div>
 
       <div v-if="power.length" class="vm-section">
-        <p class="vm-section-title">Power</p>
+        <h3 class="vm-section-title">Power</h3>
         <div class="vm-power-buttons">
           <b-tooltip
             v-for="action in power"
@@ -145,7 +145,7 @@
           </figure>
 
           <div v-if="tools.length" class="vm-section">
-            <p class="vm-section-title">More actions</p>
+            <h3 class="vm-section-title">More actions</h3>
             <div class="vm-tool-buttons">
               <b-tooltip
                 v-for="action in tools"
@@ -211,7 +211,7 @@
           </div>
 
           <div class="vm-section">
-            <p class="vm-section-title">
+            <h3 class="vm-section-title">
               Storage
               <b-tooltip
                 v-if="canListDisks"
@@ -226,10 +226,17 @@
                   <b-icon icon="hdd" size="is-small" />
                 </router-link>
               </b-tooltip>
-            </p>
+            </h3>
             <div class="vm-kv">
               <span class="vm-kv-key">Disk</span>
-              <span class="vm-kv-value vm-mono" :title="vm.disk">
+              <router-link
+                v-if="diskLink(disk)"
+                class="vm-kv-value vm-mono vm-disk-link"
+                :title="disk.fullPath"
+                :to="diskLink(disk)">
+                {{ diskLabel(disk) }}
+              </router-link>
+              <span v-else class="vm-kv-value vm-mono" :title="vm.disk">
                 {{
                   diskLabel(disk) || (vm.disk && baseName(vm.disk)) || 'None'
                 }}
@@ -260,16 +267,29 @@
               aria-label="Backing image chain">
               <li
                 v-for="image in backingChain"
-                :key="image"
+                :key="image.label"
                 class="vm-mono"
-                :title="`backed by ${image}`">
+                :title="`backed by ${image.label}`">
                 <span class="vm-chain-arrow" aria-hidden="true">&darr;</span>
-                <span class="vm-chain-name">{{ image }}</span>
+                <router-link
+                  v-if="diskLink(image)"
+                  class="vm-chain-name vm-disk-link"
+                  :to="diskLink(image)">
+                  {{ image.label }}
+                </router-link>
+                <span v-else class="vm-chain-name">{{ image.label }}</span>
               </li>
             </ol>
             <div v-if="vm.cdRom" class="vm-kv vm-cdrom">
               <span class="vm-kv-key">CD-ROM</span>
-              <span class="vm-kv-value vm-mono" :title="vm.cdRom">
+              <router-link
+                v-if="diskLink(cdRomDisk)"
+                class="vm-kv-value vm-mono vm-disk-link"
+                :title="cdRomDisk.fullPath"
+                :to="diskLink(cdRomDisk)">
+                {{ diskLabel(cdRomDisk) }}
+              </router-link>
+              <span v-else class="vm-kv-value vm-mono" :title="vm.cdRom">
                 {{ diskLabel(cdRomDisk) || baseName(vm.cdRom) }}
               </span>
               <DiskWarning
@@ -281,7 +301,7 @@
           </div>
 
           <div class="vm-section">
-            <p class="vm-section-title">
+            <h3 class="vm-section-title">
               Network
               <span v-if="captureCount" class="vm-capture-count">
                 <span class="vm-rec-dot"></span>
@@ -329,7 +349,7 @@
                     :aria-label="webSharkTab.label" />
                 </b-tooltip>
               </span>
-            </p>
+            </h3>
             <p v-if="!interfaces.length" class="vm-empty">No interfaces</p>
             <div
               v-for="iface in interfaces"
@@ -417,7 +437,7 @@
           </div>
 
           <div class="vm-section">
-            <p class="vm-section-title">
+            <h3 class="vm-section-title">
               Labels
               <button
                 type="button"
@@ -425,7 +445,7 @@
                 @click="$emit('edit-labels')">
                 <b-icon icon="edit" size="is-small" /> view/edit
               </button>
-            </p>
+            </h3>
             <b-taglist v-if="tags.length">
               <div
                 v-for="[key, value] in tags"
@@ -440,7 +460,7 @@
 
           <div v-if="annotationsLoaded" class="vm-section vm-annotations">
             <!-- while editing, the list's own label, with its help, heads it -->
-            <p v-if="!annotationRows" class="vm-section-title">
+            <h3 v-if="!annotationRows" class="vm-section-title">
               Annotations
               <button
                 v-if="canEditAnnotations"
@@ -449,7 +469,7 @@
                 @click="editAnnotations">
                 <b-icon icon="edit" size="is-small" /> edit
               </button>
-            </p>
+            </h3>
             <template v-if="annotationRows">
               <annotation-list
                 v-model="annotationRows"
@@ -501,7 +521,7 @@
 
           <div class="vm-lists">
             <div v-if="canListSnapshots" class="vm-section">
-              <p class="vm-section-title">Snapshots</p>
+              <h3 class="vm-section-title">Snapshots</h3>
               <p v-if="!snapshotList.length" class="vm-empty">None yet</p>
               <div v-for="snap in snapshotList" :key="snap" class="vm-list-row">
                 <b-icon icon="camera" size="is-small" />
@@ -527,7 +547,7 @@
             </div>
 
             <div v-if="canListForwards" class="vm-section">
-              <p class="vm-section-title">
+              <h3 class="vm-section-title">
                 Port forwards
                 <button
                   v-if="forwardAction.permitted && !forwardAction.disabled"
@@ -536,7 +556,7 @@
                   @click="$emit('action', 'portForward')">
                   <b-icon icon="plus" size="is-small" /> add
                 </button>
-              </p>
+              </h3>
               <p v-if="!forwards.length" class="vm-empty">None</p>
               <div
                 v-for="(forward, index) in forwards"
@@ -586,6 +606,7 @@
   import {
     baseName,
     chainProblem,
+    diskDetailsRoute,
     diskLabel,
     diskReasons,
   } from '@/utils/diskChain.js';
@@ -640,8 +661,8 @@
       captureAllPending: { type: Boolean, default: false },
       // the actions running in the background for the VM, whose buttons spin
       pendingActions: { type: Array, default: () => [] },
-      // the images backing the VM's disk, nearest first (see utils/diskChain.js);
-      // null while unknown
+      // the images backing the VM's disk, nearest first, as backingChain in
+      // utils/diskChain.js gives them; null while unknown
       backingChain: { type: Array, default: null },
       // the VM's disk and the ISO image in its CD-ROM drive in the disk list,
       // and the minimega files directory it shows; null and empty while
@@ -854,6 +875,13 @@
       can(resource, verb) {
         return roleAllowed(resource, verb, this.fullName);
       },
+      // the Disks page with a listed image's card open, or null for an image
+      // the list does not hold or a role that may not list disks
+      diskLink(image) {
+        return image?.fullPath && this.canListDisks
+          ? diskDetailsRoute(image.fullPath)
+          : null;
+      },
       isSecret(key) {
         return NODE_ANNOTATIONS.some(
           (entry) => entry.key == key && entry.type == 'password',
@@ -964,10 +992,11 @@
     gap: 0.5rem;
   }
 
+  /* !important: the heading reset in _general.scss sets weight 400 */
   .vm-card-title {
     margin: 0 !important;
     flex: 0 1 auto;
-    font-weight: 600;
+    font-weight: 600 !important;
     overflow-wrap: anywhere;
   }
 
@@ -993,7 +1022,7 @@
   }
 
   /* the OS tag, a squarer box than the state pill; each family's text is at
-     least 5.7:1 on its color */
+     least 7:1 on its color */
   .vm-os-tag {
     font-weight: 600;
     border-radius: 4px;
@@ -1017,11 +1046,11 @@
     color: #1a1a1a;
   }
   .vm-os-tag.is-os-windows {
-    background-color: #0067b8;
+    background-color: #005a9e;
     color: #fff;
   }
   .vm-os-tag.is-os-router {
-    background-color: #6f42c1;
+    background-color: #5e35b1;
     color: #fff;
   }
   .vm-os-tag.is-os-other {
@@ -1040,7 +1069,8 @@
     flex-wrap: wrap;
     gap: 0.25rem 1.25rem;
     margin-top: 0.4rem;
-    color: #e0e0e0;
+    /* 7.2:1 on the head */
+    color: #f0f0f0;
     font-size: 0.9rem;
   }
 
@@ -1075,17 +1105,19 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    margin-top: 0 !important;
     margin-bottom: 0.5rem !important;
     font-size: 0.75rem;
+    line-height: 1.5;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: #cfcfcf;
+    color: #e6e6e6;
   }
 
   .vm-section-link {
     margin-left: auto;
-    color: #8fd8ea;
+    color: #d0ecf3;
     font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: normal;
@@ -1132,7 +1164,7 @@
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: #cfcfcf;
+    color: #e6e6e6;
   }
 
   .vm-reveal {
@@ -1165,10 +1197,10 @@
     width: 100%;
   }
 
-  /* Bulma's outlined red text is too faint on the card's gray */
+  /* Bulma's outlined red text is too faint on the card's gray; 7.4:1 */
   .vm-power-buttons :deep(.button.is-danger.is-outlined:not(:hover)) {
-    border-color: #ff9eb0;
-    color: #ff9eb0;
+    border-color: #fde0e5;
+    color: #fde0e5;
   }
 
   .vm-power-buttons :deep(.button) {
@@ -1193,7 +1225,7 @@
     padding: 1.5rem 1rem;
     border-radius: 8px;
     border: 2px dashed #7a7a7a;
-    color: #e0e0e0;
+    color: #e6e6e6;
     text-align: center;
   }
 
@@ -1241,8 +1273,9 @@
     font-size: 0.8rem;
   }
 
+  /* the darker orange fill: white is 7.5:1 on it */
   .vm-screenshot a:hover .vm-screenshot-hint {
-    background-color: #da622d;
+    background-color: #8f3a15;
   }
 
   .vm-stats {
@@ -1288,7 +1321,7 @@
 
   .vm-stat-label {
     font-size: 0.75rem;
-    color: #cfcfcf;
+    color: #e6e6e6;
     margin: 0 !important;
   }
 
@@ -1306,7 +1339,7 @@
 
   .vm-kv-key {
     flex: 0 0 4.5rem;
-    color: #cfcfcf;
+    color: #e6e6e6;
     font-size: 0.85rem;
   }
 
@@ -1320,6 +1353,14 @@
   .vm-mono {
     font-family: monospace;
     font-size: 0.9rem;
+  }
+
+  /* the link text color, 7.4:1 on the section's gray */
+  .vm-disk-link,
+  .vm-disk-link:hover,
+  .vm-disk-link:focus {
+    color: #d0ecf3;
+    text-decoration: underline;
   }
 
   .vm-snapshot-tag {
@@ -1337,7 +1378,7 @@
     display: flex;
     gap: 0.4rem;
     min-width: 0;
-    color: #d8d8d8;
+    color: #e6e6e6;
   }
 
   .vm-chain-arrow {
@@ -1355,7 +1396,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
-    color: hsl(348, 86%, 80%);
+    color: #fde0e5;
     letter-spacing: normal;
     text-transform: none;
   }
@@ -1378,7 +1419,7 @@
     padding: 0.35rem 0.5rem;
     border-radius: 6px;
     border-left: 3px solid transparent;
-    background-color: #545454;
+    background-color: #3d3d3d;
   }
 
   .vm-iface + .vm-iface {
@@ -1402,11 +1443,12 @@
 
   .vm-iface.is-capturing {
     border-left-color: hsl(348, 86%, 61%);
-    background-color: rgba(241, 70, 104, 0.18);
+    background-color: #45363a;
   }
 
+  /* a dashed edge, not a fade, so the text keeps its contrast */
   .vm-iface.is-disconnected {
-    opacity: 0.6;
+    border-left: 3px dashed #8a8a8a;
   }
 
   .vm-iface-index {
@@ -1416,7 +1458,7 @@
     width: 1.5rem;
     height: 1.5rem;
     border-radius: 50%;
-    background-color: #686868;
+    background-color: #575757;
     font-size: 0.75rem;
     font-weight: 700;
   }
@@ -1429,13 +1471,9 @@
     min-width: 0;
   }
 
-  /* the lighter cyan and blue keep 4.5:1 contrast on the card's grays */
+  /* the link text color, 8.8:1 on the interface rows */
   button.vm-iface-name {
-    color: #8fd8ea;
-  }
-
-  .vm-iface .tag.is-info {
-    background-color: #1f6fb2;
+    color: #d0ecf3;
   }
 
   .vm-iface-name {
@@ -1469,7 +1507,7 @@
   }
 
   .vm-iface-tap {
-    color: #cfcfcf;
+    color: #e6e6e6;
   }
 
   /* has-addons drops the space between tags, so space the labels apart */
@@ -1483,7 +1521,7 @@
   }
 
   .vm-label .tag.is-primary {
-    background-color: #00796b;
+    background-color: #005f56;
   }
 
   .vm-lists {
@@ -1512,7 +1550,7 @@
   }
 
   .vm-empty {
-    color: #bdbdbd;
+    color: #e6e6e6;
     font-style: italic;
     margin: 0 !important;
   }
