@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -14,6 +15,7 @@ import (
 	"phenix/api/experiment"
 	"phenix/api/job"
 	"phenix/api/vm"
+	"phenix/util/common"
 	"phenix/util/mm"
 	"phenix/util/plog"
 	"phenix/web/audit"
@@ -98,9 +100,7 @@ var vmActions = map[string]*vmAction{
 		before:     "starting",
 		failed:     "errorStarting",
 		after:      "start",
-		do: func(ctx context.Context, exp, name string) error {
-			return mm.StartVM(mm.NS(exp), mm.VMName(name), mm.Context(ctx))
-		},
+		do:         startVM,
 		withVM:     true,
 		screenshot: defaultScreenshotSize,
 		done:       "vm started",
@@ -185,6 +185,38 @@ var vmActions = map[string]*vmAction{
 	},
 }
 
+// startVM starts the VM in minimega. When minimega does not know the VM and
+// the topology sets it to not boot, it fails with 409 and how to launch it.
+func startVM(ctx context.Context, exp, name string) error {
+	err := mm.StartVM(mm.NS(exp), mm.VMName(name), mm.Context(ctx))
+	if err == nil || !strings.Contains(err.Error(), "vm not found") || !doNotBoot(exp, name) {
+		return err //nolint:wrapcheck // the minimega error as it was
+	}
+
+	return &vmActionError{
+		status: http.StatusConflict,
+		err:    fmt.Errorf("VM %s is set to not boot, so minimega did not launch it. Redeploy the VM to launch it", name),
+	}
+}
+
+// doNotBoot reports whether the topology of the stored experiment exp sets
+// the VM name to not boot.
+func doNotBoot(exp, name string) bool {
+	stored, err := experiment.Get(exp)
+	if err != nil || stored.Spec == nil || stored.Spec.Topology() == nil {
+		return false
+	}
+
+	node := stored.Spec.Topology().FindNodeByName(name)
+	if node == nil || node.General() == nil {
+		return false
+	}
+
+	set := node.General().DoNotBoot()
+
+	return set != nil && *set
+}
+
 // vmActionError is why a VM action failed, with the HTTP status its
 // single-VM handler answers.
 type vmActionError struct {
@@ -225,8 +257,9 @@ func (req vmRequest) logArgs() []any {
 }
 
 // runVMAction takes the action on the VM with its single-VM handler's RBAC check, lock, broadcasts and logs, returning
-// the VM as JSON when the action ends with one. It fails with 403 (job.ErrForbidden) for a role that may not act and 409
-// (*cache.LockedError) for a locked VM; a job's VMs are audited when it finishes (see auditVMActionJob).
+// the VM as JSON when the action ends with one. It fails with 403 (job.ErrForbidden) for a role that may not act, 409
+// (*cache.LockedError) for a locked VM, and the status of a *vmActionError that the action gives; a job's VMs are
+// audited when it finishes (see auditVMActionJob).
 //
 //nolint:funlen // the action's steps in order
 func runVMAction(req vmRequest, a *vmAction) ([]byte, error) {
@@ -305,7 +338,15 @@ func runVMAction(req vmRequest, a *vmAction) ([]byte, error) {
 		if !endedWith(req.ctx, err) {
 			failed(err)
 
-			return nil, fail(http.StatusInternalServerError, err)
+			status := http.StatusInternalServerError
+
+			// the action can name its own status, such as 409 for a VM minimega did not launch
+			var actionErr *vmActionError
+			if errors.As(err, &actionErr) {
+				status = actionErr.status
+			}
+
+			return nil, fail(status, err)
 		}
 
 		// the VM was not touched: no failure, and the transition is withdrawn
@@ -472,13 +513,91 @@ func RunVMActions(w http.ResponseWriter, r *http.Request) error {
 		BytesTotal: 0,
 		Cancelable: true,
 		Run: func(ctx context.Context, run *job.Run) error {
+			todo := names
+			if req.Action == "start" || req.Action == "restart" {
+				todo = checkVMDisks(ctx, run, exp, names, func(name string) bool { return action.allowed(role, exp+"/"+name) })
+			}
+
 			runVMActions(ctx, run, vmRequest{
 				ctx: ctx, r: nil, role: role, user: user, exp: exp, name: "", jobID: run.ID(),
-			}, action, names)
+			}, action, todo)
 
 			return nil
 		},
 	})
+}
+
+// checkVMDisks checks the disk images and CD-ROM images of the VMs a bulk start or restart names that the role is
+// allowed to act on and that minimega launches again (see experiment.CheckDisks and relaunched), fails each VM with a
+// broken image with its problems, and returns the VMs left to act on, in order.
+func checkVMDisks(ctx context.Context, run *job.Run, exp string, names []string, allowed func(string) bool) []string {
+	if common.CurrentDiskCheck() == common.DiskCheckOff {
+		return names
+	}
+
+	stored, err := experiment.Get(exp)
+	if err != nil {
+		plog.Warn(plog.TypeSystem, "not checking the VM disks", "exp", exp, "job", run.ID(), "err", err)
+
+		return names
+	}
+
+	states, err := mm.GetVMStates(mm.NS(exp), mm.Context(ctx))
+	if err != nil {
+		plog.Warn(plog.TypeSystem, "checking the disks of every VM: cannot get the VM states", "exp", exp, "err", err)
+	}
+
+	checked := make([]string, 0, len(names))
+	for _, name := range names {
+		if allowed(name) && relaunched(states[name]) {
+			checked = append(checked, name)
+		}
+	}
+
+	if len(checked) == 0 {
+		return names
+	}
+
+	warnings, err := experiment.CheckDisks(ctx, stored.Spec, experiment.CheckVMs(checked...))
+	for _, w := range warnings {
+		plog.Warn(plog.TypeSystem, w.Error(), "exp", exp, "job", run.ID())
+	}
+
+	var broken *experiment.BrokenDisksError
+	if !errors.As(err, &broken) {
+		return names
+	}
+
+	problems := make(map[string][]string)
+	for _, p := range broken.Problems {
+		problems[p.VM] = append(problems[p.VM], p.String())
+	}
+
+	left := make([]string, 0, len(names))
+
+	for _, name := range names {
+		if len(problems[name]) > 0 {
+			run.ItemFailed(name, fmt.Errorf("%w: %s", experiment.ErrBrokenDisks, strings.Join(problems[name], ". ")))
+
+			continue
+		}
+
+		left = append(left, name)
+	}
+
+	return left
+}
+
+// relaunched reports whether a start or restart of a VM in minimega state state launches its qemu process again, which
+// opens its images: a VM that quit or failed, or one whose state is not known. A start of a VM that is building, paused
+// or running only resumes it, and a restart of a running VM resets it; qemu already holds its images open.
+func relaunched(state string) bool {
+	switch state {
+	case "BUILDING", "RUNNING", "PAUSED":
+		return false
+	}
+
+	return true
 }
 
 // auditVMActionJob audits, as the user who started it, the action a finished
