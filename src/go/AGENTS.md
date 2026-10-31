@@ -36,7 +36,7 @@ the root target does.
   embedded OpenAPI schema (`types/version/schemas/`, `types/schema.go`) changes.
 - Before you change Builder code (`api/builder/`, `types/builder/`,
   `web/builder*.go`) or `types/version/schemas/`, read
-  `../../skills/phenix/references/builder.md`
+  [`../../skills/phenix/references/builder.md`](../../skills/phenix/references/builder.md)
   and the reference that its routing table names. These changes need
   `make generate`, because CI checks the committed schema bundle.
 - Never manually edit `store/mock.go`, `web/proto/*.pb.go`,
