@@ -86,9 +86,54 @@ a.navbar-item:focus {
   color: $text-strong !important;
 }
 
-// $success is 4.3:1 on the table's $background-bis; this tint of it is 5:1
 div.is-success {
-  color: #5cd69c;
+  color: map.get($text-on-dark, 'success');
+}
+
+// The is-* hues as text on the dark surfaces. Bulma uses the $colors fills,
+// which have less than 7:1 there.
+@each $name, $color in $text-on-dark {
+  .has-text-#{$name} {
+    color: $color !important;
+  }
+
+  .help.is-#{$name} {
+    color: $color;
+  }
+}
+
+// Bulma's #dbdbdb is 6.4:1 on $background-ter; this gray is 7.1:1 there.
+.has-text-grey-lighter {
+  color: #e6e6e6 !important;
+}
+
+// Bulma draws the cross in $scheme-main, which is 2.6:1 on the modal
+// backdrop (WCAG 1.4.11).
+.modal-close::before,
+.modal-close::after,
+.delete::before,
+.delete::after {
+  background-color: $text-strong;
+}
+
+// A hovered row has the light $scheme-main-bis fill.
+.table.is-hoverable tbody tr:not(.is-selected):hover {
+  color: $dark-text;
+}
+
+// Bulma colors a hovered checkbox or radio label with $input-hover-color.
+.checkbox:hover,
+.radio:hover {
+  color: $link-text;
+}
+
+// A user can select days of the next and previous month, so they need the
+// contrast of the other days.
+.datepicker
+  .datepicker-table
+  .datepicker-body
+  .datepicker-cell.is-nearby:not(.is-selected) {
+  color: $text-strong;
 }
 
 .b-table {
@@ -155,7 +200,7 @@ div.is-success {
 
 // a plain-button that reads as a link
 .plain-button.link-button {
-  color: $link;
+  color: $link-text;
 }
 
 .plain-button.link-button:hover {
@@ -276,20 +321,18 @@ textarea:focus-visible,
 }
 
 // Buefy renders an unselected b-select placeholder as rgba($grey, 0.7)
-// (#a2a2a2 on white, 2.6:1); use a color with 4.5:1 on the white input.
+// (#a2a2a2 on white, 2.6:1); use a color with 7:1 on the white input.
 .select.is-empty select {
   color: #4f5862;
 }
 
-// Bulma's $danger (#f14668) gives only 3.6:1 against white text. Darken the
-// filled danger surfaces instead of $danger itself so has-text-danger keeps
-// its contrast on the dark page background.
-.notification.is-danger,
-.message.is-danger .message-header,
-.tag.is-danger:not(.is-light),
-.button.is-danger:not(.is-outlined):not(.is-inverted) {
-  background-color: #a91f3d;
-  border-color: #a91f3d;
+// A modal title that is a heading keeps the modal title look inside
+// `.content`, which styles headings.
+.content .modal-card-head .modal-card-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 400;
+  line-height: 1.25;
 }
 
 // A dialog wider than a narrow window would hide its sides (WCAG 1.4.10).
@@ -325,11 +368,17 @@ textarea:focus-visible,
   }
 }
 
-// $link (#62c0d7) is 4.4:1 on table rows ($table-background-color); lighten
-// links in table cells, such as the Users page's user names, to 4.75:1.
+// the icon of a disk image whose backing chain is broken, in the pale red of
+// a field error
+.broken-chain-icon {
+  color: map.get($text-on-dark, 'danger');
+}
+
+// $link (#62c0d7) is 4.4:1 on table rows ($table-background-color), so links
+// in table cells, such as the Users page's user names, use the link text color.
 .table td a:not(.button):not(.tag),
 .table td .plain-button.link-button {
-  color: lighten($link, 4);
+  color: $link-text;
 }
 
 // Tables: sort arrows sit next to their headings (header-class="sort-inline")
@@ -387,15 +436,27 @@ textarea:focus-visible,
   content: '↳ ';
 }
 
-// A viewer who asks for reduced motion gets still spinners and markers; each
-// one's state is also given in text or by its color.
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
+// the VMs and disk images of a start refused for broken disks, and the
+// details of a failed item; the disclosure's summary is underlined as a control
+.notification .broken-disk-list,
+.notification .error-details ul {
+  margin: 0.25rem 0 0.25rem 1.25rem;
+  list-style: disc;
+  columns: auto;
+}
+
+.notification .broken-disk-list ul {
+  margin-left: 1.25rem;
+  list-style: circle;
+  columns: auto;
+}
+
+.notification details > summary {
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.notification details > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }

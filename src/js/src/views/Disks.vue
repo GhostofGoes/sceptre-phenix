@@ -67,7 +67,7 @@
                 {{ locationText(detailsModal.disk) }}
                 <DiskWarning
                   v-if="detailsModal.disk.outsideFilesDir"
-                  reason="outside"
+                  :reasons="['outside']"
                   :files-dir="filesDir" />
               </dd>
             </div>
@@ -94,11 +94,19 @@
           </dl>
           <div
             v-if="
-              detailsModal.disk.backingImages &&
-              detailsModal.disk.backingImages.length > 0
+              detailsModal.disk.brokenChain ||
+              detailsModal.disk.backingImages?.length > 0
             ">
             <hr />
-            <h3 class="title is-5">Backing Chain</h3>
+            <p class="title is-5">Backing Chain</p>
+            <p v-if="detailsModal.disk.brokenChain" class="chain-problem">
+              <b-icon
+                icon="times-circle"
+                size="is-small"
+                class="broken-chain-icon" />
+              A VM cannot start from this image:
+              {{ chainProblem(detailsModal.disk) }}.
+            </p>
             <div style="text-align: center">
               <b>{{ diskLabel(detailsModal.disk) }}</b>
               <div
@@ -113,6 +121,16 @@
                   {{ diskLabel(findDisk(disks, image)) }}
                 </button>
                 <span v-else>{{ image }}</span>
+              </div>
+              <div v-if="detailsModal.disk.missingBacking">
+                &darr;<br />
+                <span class="missing-backing">
+                  <b-icon
+                    icon="times-circle"
+                    size="is-small"
+                    class="broken-chain-icon" />
+                  {{ detailsModal.disk.missingBacking }} (missing)
+                </span>
               </div>
             </div>
           </div>
@@ -340,11 +358,29 @@
         v-slot="props">
         <span class="disk-name">
           <span class="disk-label">{{ diskLabel(props.row) }}</span>
+          <b-tooltip
+            v-if="props.row.brokenChain"
+            class="name-warning"
+            :label="chainProblem(props.row)"
+            type="is-dark"
+            multilined
+            append-to-body
+            :triggers="['hover', 'focus']">
+            <!-- the problem is in the name too, for a screen reader -->
+            <button
+              type="button"
+              class="tag is-danger is-light broken-tag"
+              @click.stop="rowClick(props.row)">
+              Broken chain<span class="is-sr-only"
+                >: {{ chainProblem(props.row) }}</span
+              >
+            </button>
+          </b-tooltip>
           <span
             v-if="props.row.outsideFilesDir"
             class="name-warning"
             @click.stop>
-            <DiskWarning reason="outside" :files-dir="filesDir" />
+            <DiskWarning :reasons="['outside']" :files-dir="filesDir" />
           </span>
         </span>
       </b-table-column>
@@ -433,6 +469,7 @@
   } from '@/utils/operations.js';
   import * as disksApi from '@/api/disks.js';
   import {
+    chainProblem,
     diskLabel,
     filesDir,
     findDisk,
@@ -465,6 +502,7 @@
       return {
         ...useTable({ name: 'disks' }),
         roleAllowed,
+        chainProblem,
         diskLabel,
         findDisk,
       };
@@ -990,6 +1028,10 @@
 
   .name-warning {
     flex: none;
+  }
+
+  .chain-problem {
+    margin-bottom: 0.5rem;
   }
 
   .button.backing-link {
