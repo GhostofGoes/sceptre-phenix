@@ -88,11 +88,20 @@ func TestTopology(t *testing.T) {
 		t.Errorf("Topology(%q, [MGMT]) edge targets mismatch (-want +got):\n%s", testExp, diff)
 	}
 
-	// keyed by the experiment's revision
+	// node IDs change when VLANs are ignored, so a topology that ignores one leaves the index alone
+	if fake.sets != 0 {
+		t.Errorf("search index cache sets after Topology(%q, [MGMT]) = %d, want 0", testExp, fake.sets)
+	}
+
+	if _, err := vm.Topology(t.Context(), testExp, nil); err != nil {
+		t.Errorf("Topology(%q, nil) error = %v", testExp, err)
+	}
+
+	// keyed by the experiment's revision, with the node IDs of the whole topology
 	const key = "experiment|" + testExp + "|search|r7"
 
 	search, _ := fake.vals[key].(vm.TopologySearch)
-	if diff := cmp.Diff(map[string][]int{"EXP_1": {0, 2}}, search.VLAN); diff != "" {
+	if diff := cmp.Diff(map[string][]int{"EXP_1": {0, 3}, "MGMT": {0}}, search.VLAN); diff != "" {
 		t.Errorf("cached search index VLAN mismatch (-want +got):\n%s", diff)
 	}
 
@@ -102,21 +111,17 @@ func TestTopology(t *testing.T) {
 		t.Errorf("search index cache expiry = %v, want more than 0 and at most %v", ttl, time.Minute)
 	}
 
-	if _, err := vm.Topology(t.Context(), testExp, nil); err != nil {
-		t.Errorf("Topology(%q, nil) error = %v", testExp, err)
+	if _, err := vm.Topology(t.Context(), testExp, []string{"MGMT"}); err != nil {
+		t.Errorf("Topology(%q, [MGMT]) error = %v", testExp, err)
 	}
 
-	if fake.sets != 1 {
-		t.Errorf("search index cache sets after a second Topology() = %d, want 1", fake.sets)
-	}
-
-	search, err = vm.TopologySearchIndex(testExp)
+	got, err := vm.TopologySearchIndex(testExp)
 	if err != nil {
 		t.Errorf("TopologySearchIndex(%q) error = %v", testExp, err)
 	}
 
-	if a, ok := search.Hostname["a"]; !ok || a != 0 {
-		t.Errorf("TopologySearchIndex(%q).Hostname[a] = %d, %t; want 0, true", testExp, a, ok)
+	if diff := cmp.Diff(search, got); diff != "" {
+		t.Errorf("TopologySearchIndex(%q) after Topology(%q, [MGMT]) mismatch (-want +got):\n%s", testExp, testExp, diff)
 	}
 
 	if fake.sets != 1 {
@@ -154,7 +159,7 @@ func genTopologyVMs() *rapid.Generator[[]topologyVM] {
 }
 
 // The topology holds each VM in order, joined by one edge per interface not on an ignored VLAN to the one
-// switch of that VLAN, and the search index finds each VM by name and by VLAN.
+// switch of that VLAN. In either call order, the search index finds each VM of the whole topology by name and VLAN.
 func TestTopologyProperties(t *testing.T) {
 	stored := useExperiment(t, startTime)
 	fake := useMM(t, &fakeMM{})
@@ -183,16 +188,40 @@ func TestTopologyProperties(t *testing.T) {
 		}
 
 		stored.experiment.Spec["topology"] = map[string]any{"nodes": nodes}
-		cache.DefaultCache = &recordingCache{vals: map[string]any{}, ttls: map[string]time.Duration{}} //nolint:reassign // a fresh index
+		rc := &recordingCache{vals: map[string]any{}, ttls: map[string]time.Duration{}}
+		cache.DefaultCache = rc //nolint:reassign // a fresh index
+
+		var search vm.TopologySearch
+
+		indexFirst := rapid.Bool().Draw(t, "indexFirst")
+		if indexFirst {
+			var err error
+
+			search, err = vm.TopologySearchIndex(testExp)
+			if err != nil {
+				t.Fatalf("TopologySearchIndex(%q) error = %v", testExp, err)
+			}
+		}
 
 		topo, err := vm.Topology(t.Context(), testExp, ignore)
 		if err != nil {
 			t.Fatalf("Topology(%q, %q) error = %v", testExp, ignore, err)
 		}
 
-		search, err := vm.TopologySearchIndex(testExp)
+		if !indexFirst {
+			search, err = vm.TopologySearchIndex(testExp)
+			if err != nil {
+				t.Fatalf("TopologySearchIndex(%q) error = %v", testExp, err)
+			}
+		}
+
+		full, err := vm.Topology(t.Context(), testExp, nil)
 		if err != nil {
-			t.Fatalf("TopologySearchIndex(%q) error = %v", testExp, err)
+			t.Fatalf("Topology(%q, nil) error = %v", testExp, err)
+		}
+
+		if rc.sets != 1 {
+			t.Errorf("search index cache sets = %d, want 1", rc.sets)
 		}
 
 		var (
@@ -202,6 +231,8 @@ func TestTopologyProperties(t *testing.T) {
 			gotEdges  = make([]string, 0, len(topo.Edges))
 			switches  = map[string]int{}
 			wantVLANs = map[string][]int{}
+			// VLANs with an interface that is not ignored
+			switchVLANs = map[string]bool{}
 		)
 
 		for i, node := range topo.Nodes {
@@ -219,15 +250,17 @@ func TestTopologyProperties(t *testing.T) {
 		for _, v := range vms {
 			wantVMs = append(wantVMs, v.name)
 
-			id := slices.IndexFunc(topo.Nodes, func(n mm.VM) bool { return n.Name == v.name })
+			id := slices.IndexFunc(full.Nodes, func(n mm.VM) bool { return n.Name == v.name })
 			if got, ok := search.Hostname[v.name]; !ok || got != id {
 				t.Errorf("TopologySearchIndex(%q).Hostname[%s] = %d, %t; want %d, true", testExp, v.name, got, ok, id)
 			}
 
 			for _, vlan := range v.vlans {
+				wantVLANs[vlan] = append(wantVLANs[vlan], id)
+
 				if !slices.Contains(ignore, vlan) {
 					wantEdges = append(wantEdges, v.name+">"+vlan)
-					wantVLANs[vlan] = append(wantVLANs[vlan], id)
+					switchVLANs[vlan] = true
 				}
 			}
 		}
@@ -253,7 +286,7 @@ func TestTopologyProperties(t *testing.T) {
 		}
 
 		for vlan, n := range switches {
-			if n != 1 || len(wantVLANs[vlan]) == 0 {
+			if n != 1 || !switchVLANs[vlan] {
 				t.Errorf("Topology(%q, %q) has %d switches for VLAN %s with %d interfaces, want 1",
 					testExp, ignore, n, vlan, len(wantVLANs[vlan]))
 			}

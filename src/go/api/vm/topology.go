@@ -75,6 +75,8 @@ func Topology(ctx context.Context, exp string, ignore []string) (topology, error
 // topologyFor is Topology for an experiment read from the store, also
 // returning its search index, which is cached unless ctx is done. It uses the
 // cached index, or builds the index anew when the cached value is not an index.
+// The index is of the whole topology, so with an ignore list it returns an
+// empty index and does not read or write the cache.
 func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string) (topology, TopologySearch, error) {
 	vms := ListFor(ctx, stored)
 	if err := ctx.Err(); err != nil {
@@ -86,7 +88,8 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 		search   TopologySearch
 
 		cacheKey = topologySearchKey(stored)
-		cached   bool
+		// node IDs change when VLANs are ignored, so only the whole topology gives the index
+		skip = len(ignore) > 0
 
 		// empty lists, never null
 		nodes  = []mm.VM{}
@@ -96,8 +99,8 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 	)
 
 	// a cached value of another type is not trusted, so the index is built and cached anew
-	if val, ok := cache.Get(cacheKey); ok {
-		search, cached = val.(TopologySearch)
+	if val, ok := cache.Get(cacheKey); ok && !skip {
+		search, skip = val.(TopologySearch)
 	}
 
 	for _, vm := range vms {
@@ -107,7 +110,7 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 		nodes = append(nodes, node)
 		nodeID++
 
-		if !cached {
+		if !skip {
 			search.AddHostname(node.Name, node.ID)
 			search.AddDisk(node.Disk, node.ID)
 			search.AddType(node.Type, node.ID)
@@ -134,7 +137,7 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 				continue
 			}
 
-			if !cached {
+			if !skip {
 				// TODO: what if these change during an experiment (e.g., via user updates)?
 				search.AddVLAN(iface, node.ID)
 				search.AddIP(vm.IPv4[i], node.ID)
@@ -158,7 +161,7 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 		}
 	}
 
-	if !cached {
+	if !skip {
 		_ = cache.SetWithExpire(cacheKey, search, topologySearchTTL)
 	}
 
