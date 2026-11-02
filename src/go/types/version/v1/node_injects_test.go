@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"pgregory.net/rapid"
 )
 
@@ -131,6 +132,64 @@ func TestNodeInjectsCommandArgs(t *testing.T) {
 			node := Node{InjectionsF: tt.injects}
 			if got := node.FileInjects("/base"); got != tt.want {
 				t.Errorf("FileInjects(/base) = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNodeInjectsRelativeSourcePermissions checks that FileInjects applies the
+// permissions of a relative inject to baseDir/src, the path in the minimega
+// inject command, and not to src under the working directory.
+func TestNodeInjectsRelativeSourcePermissions(t *testing.T) {
+	t.Parallel()
+
+	const rel = "phenix-relative-inject-test/inject"
+
+	if _, err := os.Stat(rel); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("relative path %s must not exist in the working directory: %v", rel, err)
+	}
+
+	tests := []struct {
+		name  string
+		perms string
+		want  fs.FileMode
+	}{
+		{name: "three digits", perms: "755", want: 0o755},
+		{name: "plus sign", perms: "+750", want: 0o750},
+		{name: "four digits", perms: "0444", want: 0o444},
+		{name: "empty", perms: "", want: 0o600},
+		{name: "not octal", perms: "999", want: 0o600},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseDir := t.TempDir()
+			src := filepath.Join(baseDir, rel)
+
+			if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := os.WriteFile(src, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			node := Node{InjectionsF: []*Injection{{SrcF: rel, DstF: "/inject", PermissionsF: tt.perms}}}
+
+			wantArgs := fmt.Sprintf(`"%s":"/inject"`, src)
+			if diff := cmp.Diff(wantArgs, node.FileInjects(baseDir)); diff != "" {
+				t.Errorf("FileInjects() mismatch (-want +got):\n%s", diff)
+			}
+
+			info, err := os.Stat(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if diff := cmp.Diff(tt.want, info.Mode().Perm()); diff != "" {
+				t.Errorf("mode of %s mismatch (-want +got):\n%s", src, diff)
 			}
 		})
 	}

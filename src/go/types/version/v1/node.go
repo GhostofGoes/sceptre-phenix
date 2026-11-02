@@ -765,17 +765,18 @@ func (n Node) FileInjects(baseDir string) string {
 	injects := make([]string, len(n.InjectionsF))
 
 	for i, inject := range n.InjectionsF {
-		if strings.HasPrefix(inject.SrcF, "/") {
-			injects[i] = fmt.Sprintf(`"%s":"%s"`, inject.SrcF, inject.DstF)
-		} else {
-			injects[i] = fmt.Sprintf(`"%s/%s":"%s"`, baseDir, inject.SrcF, inject.DstF)
+		src := inject.SrcF
+		if !strings.HasPrefix(src, "/") {
+			src = baseDir + "/" + src
 		}
+
+		injects[i] = fmt.Sprintf(`"%s":"%s"`, src, inject.DstF)
 
 		if inject.PermissionsF != "" && len(inject.PermissionsF) <= 4 {
 			if perms, err := strconv.ParseUint(strings.TrimPrefix(inject.PermissionsF, "+"), 8, 32); err == nil {
 				// Update file permissions on local disk before it gets injected into
 				// disk image.
-				_ = os.Chmod(inject.SrcF, os.FileMode(perms))
+				_ = os.Chmod(src, os.FileMode(perms))
 			}
 		}
 	}
