@@ -1317,8 +1317,8 @@ func TestGetDiskChecksum(t *testing.T) {
 	}
 }
 
-// An upload with no file, or one phenix cannot write, is answered with the
-// error and writes nothing, and the server goes on serving uploads.
+// An upload with no file answers 400, and one phenix cannot write answers 500.
+// Each gives the error and writes nothing, and the server goes on serving uploads.
 func TestUploadDiskRefusesWhatItCannotSave(t *testing.T) {
 	dir := useDiskFilesDir(t).dir
 
@@ -1336,9 +1336,12 @@ func TestUploadDiskRefusesWhatItCannotSave(t *testing.T) {
 
 	before := tree(t, dir)
 
-	for name, tc := range map[string]struct{ field, filename string }{
-		"no file":         {field: "image", filename: "x.qc2"},
-		"a folder's name": {field: "file", filename: "win"},
+	for name, tc := range map[string]struct {
+		field, filename string
+		want            int
+	}{
+		"no file":         {field: "image", filename: "x.qc2", want: http.StatusBadRequest},
+		"a folder's name": {field: "file", filename: "win", want: http.StatusInternalServerError},
 	} {
 		t.Run(name, func(t *testing.T) {
 			events := captureAudit(t)
@@ -1347,9 +1350,9 @@ func TestUploadDiskRefusesWhatItCannotSave(t *testing.T) {
 			resp := upload(t, tc.field, tc.filename)
 
 			body := readBody(t, resp)
-			if resp.StatusCode != http.StatusInternalServerError {
+			if resp.StatusCode != tc.want {
 				t.Errorf("POST /api/v1/disks of %s in field %s = %d, want %d: %s",
-					tc.filename, tc.field, resp.StatusCode, http.StatusInternalServerError, body)
+					tc.filename, tc.field, resp.StatusCode, tc.want, body)
 			}
 
 			if !strings.HasPrefix(errorMessage(t, resp.StatusCode, body), "Error uploading") {

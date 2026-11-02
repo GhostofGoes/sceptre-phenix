@@ -787,7 +787,15 @@ func UploadDisk(w http.ResponseWriter, r *http.Request) error {
 		plog.Error(plog.TypeSystem, err.Error())
 		audit.Failure(r, audit.DiskUpload, "uploading disk failed", audit.Fields{}, err)
 
-		return weberror.New(http.StatusInternalServerError, "Error uploading: "+err.Error())
+		// only a file error, such as a full temporary folder, is the server's fault
+		status := http.StatusBadRequest
+
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			status = http.StatusInternalServerError
+		}
+
+		return weberror.New(status, "Error uploading: "+err.Error())
 	}
 
 	defer func() { _ = clientFile.Close() }()
