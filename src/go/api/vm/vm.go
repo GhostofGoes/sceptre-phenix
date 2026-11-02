@@ -1465,7 +1465,7 @@ func MemorySnapshot( //nolint:funlen // complex logic
 	defer file.InvalidateExperimentFiles(expName)
 
 	if out == "" {
-		out = fmt.Sprintf("%s_%s.elf", vmName, getTimestamp())
+		out = fmt.Sprintf("%s_%s.elf", vmName, getTimestamp(time.Now()))
 	}
 
 	// Make all output files have a .elf extension
@@ -1674,7 +1674,7 @@ func CaptureSubnet(ctx context.Context, expName, subnet string, vmList []string)
 				continue
 			}
 
-			filename := fmt.Sprintf("%s_%d_%s.pcap", vm.Name, iface, getTimestamp())
+			filename := fmt.Sprintf("%s_%d_%s.pcap", vm.Name, iface, getTimestamp(time.Now()))
 
 			// once one is started, start the rest
 			run := ctx

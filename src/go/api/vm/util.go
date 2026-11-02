@@ -24,7 +24,8 @@ type qemuBackingChain struct {
 	BackingFile string `json:"backing-filename"`
 }
 
-var diskNameWithTstampRegex = regexp.MustCompile(`(.*)_\d{14}`)
+// diskNameWithTstampRegex matches a file name with an earlier time: the text before and after the time.
+var diskNameWithTstampRegex = regexp.MustCompile(`(?s)^(.*)_\d{14}(\D.*)?$`)
 
 func GetNewDiskName(expName, vmName string) (string, error) {
 	base, err := getVMImage(expName, vmName)
@@ -35,19 +36,22 @@ func GetNewDiskName(expName, vmName string) (string, error) {
 	return newDiskName(base, time.Now()), nil
 }
 
-// newDiskName is the name of a new image made from the VM image base at now: base with the time in place of any
-// earlier one. It keeps a .qcow2, .qc2 or .qcow extension, since CommitToDisk writes into a copy of the image's
-// base, which keeps its format, and adds .qc2 to any other.
+// newDiskName is the name of a new image made from the VM image base at now: base with the time in place of the
+// last earlier one in its file name, or added to the end of the file name. It keeps the folder, a .qcow2, .qc2 or
+// .qcow extension, since CommitToDisk writes into a copy of the image's base, which keeps its format, and adds .qc2
+// to any other.
 func newDiskName(base string, now time.Time) string {
-	name := strings.TrimSuffix(base, filepath.Ext(base))
+	dir, file := filepath.Split(strings.TrimSuffix(base, filepath.Ext(base)))
+	stamp := "_" + now.Format("20060102150405")
 
-	// For example, if name = ubuntu_server_20191117102805, then this
-	// will match and match[1] will be `ubuntu_server`.
-	if match := diskNameWithTstampRegex.FindStringSubmatch(name); match != nil {
-		name = match[1]
+	// For example, web_20191117102805_v2 gives web_<now>_v2.
+	if match := diskNameWithTstampRegex.FindStringSubmatch(file); match != nil {
+		file = match[1] + stamp + match[2]
+	} else {
+		file += stamp
 	}
 
-	name = name + "_" + now.Format("20060102150405") + filepath.Ext(base)
+	name := dir + file + filepath.Ext(base)
 
 	if ext := filepath.Ext(name); ext != ".qcow2" && ext != ".qc2" && ext != ".qcow" {
 		name += ".qc2"
@@ -71,6 +75,8 @@ func getVMImage(expName, vmName string) (string, error) {
 	return vm.Hardware().Drives()[0].Image(), nil
 }
 
+// getBackingImage returns the base image of the disk path's backing chain, or the file a base that is a symlink
+// names. A path without a folder is one of phenix's images. An empty backing chain is an error.
 func getBackingImage(ctx context.Context, path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		path = common.PhenixBase + "/images/" + path
@@ -79,6 +85,10 @@ func getBackingImage(ctx context.Context, path string) (string, error) {
 	chain, err := getImageBackingChain(ctx, path)
 	if err != nil {
 		return "", fmt.Errorf("getting image backing chain for %s: %w", path, err)
+	}
+
+	if len(chain) == 0 {
+		return "", fmt.Errorf("getting image backing chain for %s: qemu-img returned no images", path)
 	}
 
 	// backing image should always be last image in chain
@@ -281,6 +291,7 @@ func (c cancelableReader) Read(p []byte) (int, error) {
 	}
 }
 
-func getTimestamp() string {
-	return time.Now().Format("20060102_1500")
+// getTimestamp is the date, hour and minute of now, for the names of memory dumps and captures.
+func getTimestamp(now time.Time) string {
+	return now.Format("20060102_1504")
 }

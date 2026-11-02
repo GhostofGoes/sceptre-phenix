@@ -92,7 +92,6 @@ func TestNewDiskName(t *testing.T) {
 // A new image keeps the folder and the text around an earlier time; only the time itself is replaced.
 func TestNewDiskNameKeepsTextAroundEarlierTime(t *testing.T) {
 	t.Parallel()
-	t.Skip("bug: diskNameWithTstampRegex is not anchored, so newDiskName drops all text after the first _<14 digits>")
 
 	now := time.Date(2026, 10, 31, 12, 30, 45, 0, time.UTC)
 
@@ -102,6 +101,8 @@ func TestNewDiskNameKeepsTextAroundEarlierTime(t *testing.T) {
 	}{
 		"text after the time": {base: "web_20191117102805_v2.qc2", want: "web_20261031123045_v2.qc2"},
 		"time in the folder":  {base: "bak_20191117102805/kali.qc2", want: "bak_20191117102805/kali_20261031123045.qc2"},
+		"two earlier times":   {base: "a_20191117102805_20201117102805.qc2", want: "a_20191117102805_20261031123045.qc2"},
+		"15 digits":           {base: "kali_201911171028059.qc2", want: "kali_201911171028059_20261031123045.qc2"},
 	}
 
 	for name, tt := range tests {
@@ -319,8 +320,6 @@ func TestGetBackingImage(t *testing.T) {
 //
 //nolint:paralleltest // replaces minimega
 func TestGetBackingImageEmptyChain(t *testing.T) {
-	t.Skip("bug: getBackingImage indexes chain[len(chain)-1] without a length check and panics on an empty chain")
-
 	utilUseShell(t, &utilShellMM{resp: "[]"})
 
 	if _, err := getBackingImage(t.Context(), "/data/snap.qc2"); err == nil {
@@ -644,29 +643,27 @@ func TestCancelableReader(t *testing.T) {
 	}
 }
 
-// A timestamp is the local date and hour; getTimestamp's layout ends in a literal "00".
-func TestGetTimestamp(t *testing.T) {
+// A timestamp is the date, hour and minute, so the memory dumps and captures it names a minute apart do not
+// overwrite each other.
+func TestGetTimestampHasMinutes(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
-	before := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
-	got := getTimestamp()
-	after := time.Now()
-
-	stamp, err := time.ParseInLocation("20060102_1500", got, time.Now().Location())
-	if err != nil || stamp.Before(before) || stamp.After(after) {
-		t.Errorf("getTimestamp() = %q (parse error %v), want the hour between %s and %s", got, err, before, after)
+	tests := map[string]struct {
+		now  time.Time
+		want string
+	}{
+		"minute 50":   {now: time.Date(2026, 10, 31, 11, 50, 59, 0, time.UTC), want: "20261031_1150"},
+		"minute 5":    {now: time.Date(2026, 1, 2, 23, 5, 0, 0, time.UTC), want: "20260102_2305"},
+		"on the hour": {now: time.Date(2026, 10, 31, 9, 0, 30, 0, time.UTC), want: "20261031_0900"},
 	}
-}
 
-// Two timestamps a minute apart differ, so the memory dumps and captures they name do not overwrite each other.
-func TestGetTimestampHasMinutes(t *testing.T) {
-	t.Skip(`bug: getTimestamp formats "20060102_1500", whose "00" is literal, so names made in the same hour collide`)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	before := time.Now().Truncate(time.Minute)
-
-	stamp, err := time.ParseInLocation("20060102_1504", getTimestamp(), time.Now().Location())
-	if err != nil || stamp.Before(before) {
-		t.Errorf("getTimestamp() = %s (parse error %v), want the minute of %s", stamp, err, before)
+			if diff := cmp.Diff(tt.want, getTimestamp(tt.now)); diff != "" {
+				t.Errorf("getTimestamp(%s) mismatch (-want +got):\n%s", tt.now, diff)
+			}
+		})
 	}
 }
