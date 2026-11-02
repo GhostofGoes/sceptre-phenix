@@ -18,9 +18,13 @@ of the phēnix UI.
 
 ![The Tunneler page, opened from the Tunneler button in the banner, with the Tunneler Downloads table above the Quick Start and its Tunneler Documentation button](images/tunneler_page.png)
 
-This page lists the `phenix-tunneler` binaries built for the phēnix
-instance's version, along with a download link for each supported OS and
-architecture:
+The page starts with a `Tunneler Downloads` table of the `phenix-tunneler`
+builds installed on the phēnix server, with an `OS` and an `Architecture`
+column and a `Download` link for each build. Below that is a `Quick Start`
+summary of the steps described below, with a `Tunneler Documentation` button
+beside its heading that links back to this page.
+
+phēnix ships these builds:
 
 | OS      | Architecture |
 | ------- | ------------ |
@@ -28,6 +32,13 @@ architecture:
 | macOS   | arm64        |
 | macOS   | amd64        |
 | Windows | amd64        |
+
+The table lists the builds the server has, which can be fewer than these,
+and names an unrecognized build by its file name. If the server's downloads directory holds no builds, the table reads
+`No tunneler builds are installed on this server`. If the server does not
+serve tunneler binaries at all, the page reads
+`Tunneler downloads are not installed on this phēnix server` in place of
+the table.
 
 Download the binary that matches your local machine and make it
 executable (on Linux/macOS, `chmod +x phenix-tunneler-<os>-<arch>`).

@@ -39,6 +39,10 @@ during every lifecycle stage. User apps configured in a scenario are
 unaffected. Omit the annotation, or set it to `true`, to retain the default
 behavior.
 
+To set the annotation on every VM of one experiment without editing its
+topology, add it when you create the experiment; see
+[Adding Annotations](experiments.md#adding-annotations).
+
 ### startup App
 
 The `startup` app generates scripts that configure supported guest operating
@@ -175,6 +179,10 @@ spec:
         drives:
           - image: ubuntu.qc2
 ```
+
+To set the annotation on every VM of one experiment without editing its
+topology, add it when you create the experiment; see
+[Adding Annotations](experiments.md#adding-annotations).
 
 For a disk layout that cannot be injected into, such as an LVM-based image, set
 the injection partition on the first drive to `0`:
@@ -789,6 +797,13 @@ phēnix centralized logging system.
     In the case of user apps, `phenix` will send a `SIGTERM` to the user app
     process and wait a maximum of 10 seconds for the process to exit gracefully
     before killin the process with a `SIGKILL`.
+
+!!! note
+    While an app runs a stage, phēnix marks it running in the experiment's
+    `status.appRunningStageStatus`, and refuses to start that app's `running`
+    stage, such as a Scorch run, again until it finishes. If phēnix stops in
+    the middle, `phenix ui` clears these marks for every running experiment
+    when it starts again, so the app can run without restarting the experiment.
 
 ### Available User Apps
 

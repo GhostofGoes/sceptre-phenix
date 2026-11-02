@@ -45,6 +45,26 @@ begin with a capital letter.
     When we say this, we mean passing a YAML or JSON configuration file of any
     type to the `phenix config create` command.
 
+## Revisions
+
+phenix stamps every stored config with `metadata.created`, `metadata.updated`
+and `metadata.revision`. The revision is a number that changes on every write
+to the config and only increases; it is ignored in files and requests, like
+the timestamps. A config with no revision gets one on its next write.
+
+```yaml
+metadata:
+  name: foobar
+  created: "2026-10-14T09:12:44-06:00"
+  updated: "2026-10-14T09:30:02-06:00"
+  revision: 42
+```
+
+`phenix config edit` remembers the revision it opened. If someone else saves
+the config before you close the editor, it refuses to save your edits with
+`<kind/name> changed while you edited it, so run phenix config edit again`,
+so their change is not silently overwritten.
+
 ## Topology
 
 The `Topology` configuration is one of the core configuration types for
@@ -151,6 +171,21 @@ three options available to set, but on only one option can be set:
     tag in the Delay column next to the Screenshot column. The tag will indicate
     what type of dealy was set. Once all the delayed VMs have started, the Delay
     column will no longer be visible.
+
+!!! note
+    An experiment started from the web UI or the API counts as running while
+    its `timer` and `c2` delayed VMs, and the post-start apps that wait on
+    them, are still pending, and phēnix records them in the experiment's
+    status. If `phenix ui` restarts before they are done, it resumes them when
+    it starts again, with each timer keeping its original due time; a stop
+    that leaves the experiment running because minimega could not kill its
+    VMs resumes them too. A delayed
+    VM that minimega no longer holds, or a `c2` VM waiting on one, cannot
+    start, and minimega must answer for phēnix to tell; the experiment is then
+    marked interrupted, which the Experiments table shows beside its status, the
+    experiment page explains, and `phenix experiment list` shows beside its
+    start time. Its post-start apps do not run; restart the experiment to run
+    them. `user` delays wait for a start request and need nothing resumed.
 
 #### Network Address Translation (NAT)
 
@@ -689,6 +724,18 @@ available configuration files. It is possible to filter in two ways:
 
 Clicking on the `X` next to the `Find a Config` field will reset both filters.
 
+At the top left, level with the filters, the page counts the configs:
+`Configs` and the total, then one count for each kind that has any, in the
+order the kind filter lists them (`Topology`, `Scenario`, `Experiment`,
+`Image`, `User`, `Role`). The counts cover every config, whatever the filters
+and the table's page.
+
+The table can also be sorted by `Name`, `Kind`, or `Last Updated` by clicking
+the column heading. `Last Updated` shows when the config last changed,
+followed by how long ago that was, for example
+`2026-10-28T14:03:22Z (3 hours ago)` (see
+[Timestamps](web-ui.md#timestamps)).
+
 ### View a Config
 
 There are two ways to view a specific config:
@@ -743,6 +790,24 @@ The editor window allows direct editing of an existing or new config file.
 - It is also possible to set keybindings to the Vim editor by enabling them with
   the sliding selector under `Vim Mode`.
   ![Editor settings with the File Format radio buttons set to YAML and the Vim Mode toggle disabled.](images/edit_settings.png){: width=150 .center}
+
+Leaving the editor asks whether to discard your edits only when you have changed
+something. An unchanged config closes straight away, as does a new config you
+have not yet typed into.
+
+When a save fails, phēnix says why. A config the server rejects as invalid opens
+the editor's `Validation Error` dialog, which keeps the config open so you can
+correct it. Any other failure, such as a missing permission or a network
+problem, is reported in the usual error notification instead. An invalid upload
+reports its error the same way.
+
+A save only overwrites the config if nobody saved it since you opened it (see
+[Revisions](#revisions)). Otherwise the `Config Changed` dialog names the
+revision you opened and the current one, and offers to `Reload it (your edits
+are lost)`, to `Overwrite anyway`, which saves your version over the newer one,
+or to `Cancel` and keep editing.
+
+  ![The Config Changed dialog naming the revision opened and the current one, with Reload it (your edits are lost), Overwrite anyway and Cancel buttons](images/config_conflict.png){: width=500 .center}
 
 #### New Config
 

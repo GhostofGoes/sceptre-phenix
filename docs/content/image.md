@@ -1,9 +1,10 @@
 # Virtual Disk Images Management
 
 Disk images are built only with the command line binary. The
-Disks page of the web UI lists the images the phēnix server has,
-and can snapshot, clone, rename, download, upload and delete the ones in the
-minimega files directory.
+[Disks](disks.md) page of the web UI lists the images the phēnix server has, in the minimega files directory and its folders and
+wherever a topology names them, and can snapshot, clone, rename, download,
+upload and delete the ones in the files directory; images outside it are listed
+but not changed.
 
 Before it deletes an image, phēnix checks for images that it backs and for
 experiments that use it. If it finds any, the Disks page lists them, and you can
