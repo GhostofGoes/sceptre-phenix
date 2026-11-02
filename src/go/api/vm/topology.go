@@ -73,7 +73,8 @@ func Topology(ctx context.Context, exp string, ignore []string) (topology, error
 }
 
 // topologyFor is Topology for an experiment read from the store, also
-// returning its search index, which is cached unless ctx is done.
+// returning its search index, which is cached unless ctx is done. It uses the
+// cached index, or builds the index anew when the cached value is not an index.
 func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string) (topology, TopologySearch, error) {
 	vms := ListFor(ctx, stored)
 	if err := ctx.Err(); err != nil {
@@ -94,9 +95,9 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 		edgeID int
 	)
 
+	// a cached value of another type is not trusted, so the index is built and cached anew
 	if val, ok := cache.Get(cacheKey); ok {
-		search, _ = val.(TopologySearch)
-		cached = true
+		search, cached = val.(TopologySearch)
 	}
 
 	for _, vm := range vms {
@@ -112,12 +113,15 @@ func topologyFor(ctx context.Context, stored *types.Experiment, ignore []string)
 			search.AddType(node.Type, node.ID)
 			search.AddOSType(node.OSType, node.ID)
 
-			for k, v := range node.Labels {
-				search.AddLabel(k, v, node.ID)
-			}
+			// ListFor does not set Labels or Annotations, so read them from the topology node.
+			if spec := stored.Spec.Topology().FindNodeByName(node.Name); spec != nil {
+				for k, v := range spec.Labels() {
+					search.AddLabel(k, v, node.ID)
+				}
 
-			for k := range node.Annotations {
-				search.AddAnnotation(k, node.ID)
+				for k := range spec.Annotations() {
+					search.AddAnnotation(k, node.ID)
+				}
 			}
 		}
 

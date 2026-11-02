@@ -350,19 +350,22 @@ func TestTopologySearchIndexFields(t *testing.T) {
 
 // A cached value that is not a search index is replaced by one built anew.
 func TestTopologySearchIndexReplacesOtherCachedValue(t *testing.T) {
-	t.Skip("bug: topologyFor treats any cached value as an index, so a value of another type gives an empty index")
+	key := "experiment|" + testExp + "|search|r3"
+	cached := map[string]any{key: "not an index"}
 
-	search := topologyIndexOf(t, map[string]any{"experiment|" + testExp + "|search|r3": "not an index"})
+	search := topologyIndexOf(t, cached)
 
 	if diff := cmp.Diff(topologyWantIndex(), search); diff != "" {
 		t.Errorf("TopologySearchIndex(%q) mismatch (-want +got):\n%s", testExp, diff)
+	}
+
+	if diff := cmp.Diff(any(topologyWantIndex()), cached[key]); diff != "" {
+		t.Errorf("cached search index after TopologySearchIndex(%q) mismatch (-want +got):\n%s", testExp, diff)
 	}
 }
 
 // The search index finds a VM by each of its topology labels and annotations.
 func TestTopologySearchIndexFindsLabels(t *testing.T) {
-	t.Skip("bug: ListFor leaves mm.VM Labels and Annotations empty (only Tags), so topologyFor never indexes them")
-
 	node := vmNode("a")
 	node["labels"] = map[string]string{"role": "edge"}
 	node["annotations"] = map[string]any{"vncBanner": "x"}
