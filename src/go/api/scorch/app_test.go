@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
+	"gopkg.in/yaml.v3"
 
 	"phenix/api/scorch/scorchexe"
 	"phenix/api/scorch/scorchmd"
@@ -691,28 +692,52 @@ func TestRunningWithFilebeatButNoInputs(t *testing.T) { //nolint:paralleltest //
 	}
 }
 
-// A run with Filebeat on and no Filebeat config key panics before any stage
-// runs, because mergeFilebeatConfig writes to the nil config map. This pins
-// that bug: when it is fixed, change the test to want a nil error.
+// A run with Filebeat on and no Filebeat config, or an empty one, writes a
+// config with only the Scorch settings and runs every stage.
 func TestRunningWithFilebeatAndNoConfig(t *testing.T) { //nolint:paralleltest // replaces package state
-	useMinimega(t, nil)
-	exp, calls := scorchExperiment(t)
-	appFilebeat(exp, nil)
-
-	var got any
-
-	func() {
-		defer func() { got = recover() }()
-
-		_ = newScorch(scorchweb.UpdatePipeline).Running(scorchexe.SetRunID(context.Background(), 0), exp)
-	}()
-
-	if msg := fmt.Sprint(got); !strings.Contains(msg, "assignment to entry in nil map") {
-		t.Errorf("Running() panic = %v, want the nil map panic", got)
+	tests := []struct {
+		name   string
+		config map[string]any
+	}{
+		{"no config key", nil},
+		{"empty config", map[string]any{}},
 	}
 
-	if len(*calls) != 0 {
-		t.Errorf("Running() ran stages %v before the panic, want none", *calls)
+	for _, tt := range tests { //nolint:paralleltest // replaces package state
+		t.Run(tt.name, func(t *testing.T) {
+			useMinimega(t, nil)
+			exp, calls := scorchExperiment(t)
+			appFilebeat(exp, tt.config)
+
+			if err := newScorch(scorchweb.UpdatePipeline).Running(scorchexe.SetRunID(context.Background(), 0), exp); err != nil {
+				t.Fatalf("Running() error = %v", err)
+			}
+
+			if diff := cmp.Diff([]Action{ActionConfigure, ActionStart, ActionStop, ActionCleanup}, *calls); diff != "" {
+				t.Errorf("Running() stages mismatch (-want +got):\n%s", diff)
+			}
+
+			body, err := os.ReadFile(filepath.Join(exp.FilesDir(), "scorch", "run-0", "filebeat", "filebeat.yml"))
+			if err != nil {
+				t.Fatalf("reading the Filebeat config: %v", err)
+			}
+
+			var cfg map[string]any
+			if err := yaml.Unmarshal(body, &cfg); err != nil {
+				t.Fatalf("decoding the Filebeat config: %v", err)
+			}
+
+			got := map[string]any{
+				"fields_under_root": cfg["fields_under_root"],
+				"logging.level":     cfg["logging.level"],
+				"logging.to_files":  cfg["logging.to_files"],
+			}
+			want := map[string]any{"fields_under_root": true, "logging.level": "warning", "logging.to_files": true}
+
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("Filebeat config mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
