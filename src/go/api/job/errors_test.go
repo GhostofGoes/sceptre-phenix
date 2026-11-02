@@ -26,6 +26,8 @@ func TestRetryable(t *testing.T) {
 		"deadline":                {fmt.Errorf("waiting: %w", context.DeadlineExceeded), true},
 		"canceled":                {context.Canceled, false},
 		"network timeout":         {&net.OpError{Op: "dial", Err: &net.DNSError{IsTimeout: true}}, true},
+		"network error":           {&net.OpError{Op: "dial", Err: &net.DNSError{IsNotFound: true}}, false},
+		"deadline and forbidden":  {errors.Join(context.DeadlineExceeded, ErrForbidden), false},
 		"temporary":               {fmt.Errorf("wrapped: %w", temporaryError{temporary: true}), true},
 		"says it is not":          {temporaryError{temporary: false}, false},
 		"forbidden":               {ErrForbidden, false},

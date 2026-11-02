@@ -2,10 +2,12 @@ package forward
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,7 +28,9 @@ func TestTunnelerDownloads(t *testing.T) {
 	tests := map[string]struct {
 		path        string
 		noDownloads bool
-		status      int
+		// the downloads directory is a file
+		downloadsFile bool
+		status        int
 		// files is the listing a list route answers; body is a file's contents
 		files       []string
 		body        string
@@ -53,6 +57,12 @@ func TestTunnelerDownloads(t *testing.T) {
 		"answers 404 for a directory":   {path: "/downloads/tunneler/subdir", status: http.StatusNotFound},
 		"answers 404 for a broken link": {path: "/downloads/tunneler/phenix-tunneler-broken", status: http.StatusNotFound},
 		"rejects a hidden file":         {path: "/downloads/tunneler/.hidden", status: http.StatusBadRequest},
+		"answers 500 for a downloads directory that is a file": {
+			path: "/downloads/tunneler", downloadsFile: true, status: http.StatusInternalServerError,
+		},
+		"answers 500 for a name the system refuses": {
+			path: "/downloads/tunneler/" + strings.Repeat("x", 300), status: http.StatusInternalServerError,
+		},
 	}
 
 	for name, tc := range tests {
@@ -60,7 +70,16 @@ func TestTunnelerDownloads(t *testing.T) {
 			dir := t.TempDir()
 			t.Chdir(dir)
 
-			if !tc.noDownloads {
+			switch {
+			case tc.downloadsFile:
+				if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(tunnelerDir)), 0o700); err != nil {
+					t.Fatal(err)
+				}
+
+				if err := os.WriteFile(filepath.Join(dir, tunnelerDir), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case !tc.noDownloads:
 				installTunnelers(t, filepath.Join(dir, tunnelerDir))
 			}
 
@@ -167,5 +186,26 @@ func TestTunnelerDownloadResumes(t *testing.T) {
 	resumed := serve(http.MethodGet, "Range", "bytes=2-", "If-Range", etag)
 	if resumed.Code != http.StatusPartialContent || resumed.Body.String() != "nux" {
 		t.Errorf("GET %s (Range bytes=2-, If-Range %s) = %d %q, want 206 nux", path, etag, resumed.Code, resumed.Body)
+	}
+}
+
+// GetTunneler refuses, before it looks for a file, a name that is empty,
+// hidden or not directly in the downloads directory.
+func TestGetTunnelerRejectsNames(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"", ".", "..", ".hidden", "../phenix", "a/b", "/etc/passwd"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			req := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/downloads/tunneler/x", nil), map[string]string{"name": name})
+
+			var webErr *weberror.WebError
+
+			err := GetTunneler(httptest.NewRecorder(), req)
+			if !errors.As(err, &webErr) || webErr.Status != http.StatusBadRequest {
+				t.Errorf("GetTunneler(name %q) error = %v, want a 400 error", name, err)
+			}
+		})
 	}
 }

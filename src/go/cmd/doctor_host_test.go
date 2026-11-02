@@ -919,3 +919,331 @@ func TestHostParsersProperty(t *testing.T) {
 		}
 	})
 }
+
+// runDoctorCommand gives what a program writes to stdout and stderr with its exit error, the error of a program that
+// is not on PATH, and stops a program when the context ends.
+func TestRunDoctorCommand(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh on PATH to run")
+	}
+
+	t.Run("output and exit status", func(t *testing.T) {
+		t.Parallel()
+
+		out, err := runDoctorCommand(t.Context(), "sh", "-c", "printf out; printf err >&2; exit 3")
+
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+			t.Errorf("runDoctorCommand() error = %v, want exit status 3", err)
+		}
+
+		if got := string(out); got != "outerr" {
+			t.Errorf("runDoctorCommand() output = %q, want %q", got, "outerr")
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		if out, err := runDoctorCommand(t.Context(), "sh", "-c", "echo ok"); err != nil || string(out) != "ok\n" {
+			t.Errorf("runDoctorCommand() = %q, %v, want %q, nil", out, err, "ok\n")
+		}
+	})
+
+	t.Run("not on PATH", func(t *testing.T) {
+		t.Parallel()
+
+		if _, err := runDoctorCommand(t.Context(), "phenix-doctor-no-such-program"); !errors.Is(err, exec.ErrNotFound) {
+			t.Errorf("runDoctorCommand(no such program) error = %v, want %v", err, exec.ErrNotFound)
+		}
+	})
+
+	t.Run("context ends", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+
+		if _, err := runDoctorCommand(ctx, "sh", "-c", "sleep 30"); err == nil {
+			t.Error("runDoctorCommand(sleep 30) with an ending context error = nil, want one")
+		}
+
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Errorf("runDoctorCommand(sleep 30) took %s, want it stopped with the context", elapsed)
+		}
+	})
+}
+
+// kernelModule finds a module in /sys/module, loaded when /proc/modules lists it or cannot be read, and part of the
+// kernel otherwise.
+func TestKernelModule(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		modify func(doctorHostFS)
+		module string
+		want   moduleState
+	}{
+		"loaded":  {module: "nbd", want: moduleLoaded},
+		"missing": {module: "kvm", want: moduleMissing},
+		"built in": {
+			module: "nbd", modify: func(h doctorHostFS) { h[procModules] = "openvswitch 1 0 - Live 0x0\n" }, want: moduleBuiltIn,
+		},
+		"prefix only": {
+			module: "nbd", modify: func(h doctorHostFS) { h[procModules] = "nbd_extra 1 0 - Live 0x0\n" }, want: moduleBuiltIn,
+		},
+		"no /proc/modules": {
+			module: "openvswitch", modify: func(h doctorHostFS) { delete(h, procModules) }, want: moduleLoaded,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := doctorGoodHost()
+			if tc.modify != nil {
+				tc.modify(host)
+			}
+
+			in := hostInput(t, host, doctorHostTools)
+			if got := in.env.kernelModule(tc.module); got != tc.want {
+				t.Errorf("kernelModule(%s) = %d, want %d", tc.module, got, tc.want)
+			}
+		})
+	}
+}
+
+// readPid reads a pid with spaces around it and fails for other text or a missing file; procRunning looks in /proc.
+func TestReadPidAndProcRunning(t *testing.T) {
+	t.Parallel()
+
+	host := doctorGoodHost()
+	host["/run/a.pid"] = " 42\n"
+	host["/run/b.pid"] = "forty-two\n"
+	host["/run/c.pid"] = ""
+	in := hostInput(t, host, doctorHostTools)
+
+	tests := map[string]struct {
+		path    string
+		want    int
+		wantErr bool
+	}{
+		"pid":     {path: "/run/a.pid", want: 42},
+		"text":    {path: "/run/b.pid", wantErr: true},
+		"empty":   {path: "/run/c.pid", wantErr: true},
+		"missing": {path: "/run/d.pid", wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := in.env.readPid(tc.path)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("readPid(%s) = %d, %v, want %d and an error %t", tc.path, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+
+	if !in.env.procRunning(42) || in.env.procRunning(43) {
+		t.Errorf("procRunning(42), procRunning(43) = %t, %t, want true, false", in.env.procRunning(42), in.env.procRunning(43))
+	}
+}
+
+// Without /dev there are no nbd devices, and a device whose pid file does not hold a pid is in use but not named as
+// one a failed inject leaves.
+func TestNBDDevicesEdges(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no /dev", func(t *testing.T) {
+		t.Parallel()
+
+		host := doctorGoodHost()
+		for path := range host {
+			if strings.HasPrefix(path, "/dev/") {
+				delete(host, path)
+			}
+		}
+
+		devices, free, left := hostInput(t, host, doctorHostTools).nbdDevices()
+		if devices != nil || free != 0 || left != nil {
+			t.Errorf("nbdDevices() = %v, %d, %v, want nothing", devices, free, left)
+		}
+	})
+
+	t.Run("pid that is not a number", func(t *testing.T) {
+		t.Parallel()
+
+		host := doctorGoodHost()
+		host["/sys/block/nbd0/pid"] = "x\n"
+		in := hostInput(t, host, doctorHostTools)
+
+		devices, free, left := in.nbdDevices()
+		if diff := cmp.Diff([]string{"nbd0", "nbd1"}, devices); diff != "" || free != 1 || left != nil {
+			t.Errorf("nbdDevices() = %v, %d, %v, want both devices, 1 free, none left (-want +got devices):\n%s",
+				devices, free, left, diff)
+		}
+	})
+}
+
+// ovsShowFailure names the first line of what ovs-vsctl printed, a timeout as no answer in time, and the error when
+// it printed nothing.
+func TestOVSShowFailure(t *testing.T) {
+	t.Parallel()
+
+	const noAnswer = "start Open vSwitch"
+
+	tests := map[string]struct {
+		show doctorOVSRun
+		want doctorCheck
+	}{
+		"first line": {
+			show: doctorOVSRun{out: []byte("ovs-vsctl: no db\nsecond line\n"), err: errors.New("exit status 1")},
+			want: row("", doctorFail, "ovsdb-server does not answer ovs-vsctl show: ovs-vsctl: no db"),
+		},
+		"timeout in the output": {
+			show: doctorOVSRun{out: []byte("ovs-vsctl: Timeout waiting for the database\n"), err: errors.New("exit status 1")},
+			want: row("", doctorFail, "ovsdb-server did not answer ovs-vsctl show within 2s"),
+		},
+		"timed out": {
+			show: doctorOVSRun{err: errors.New("signal: killed"), timedOut: true},
+			want: row("", doctorFail, "ovsdb-server did not answer ovs-vsctl show within 2s"),
+		},
+		"denied on a later line": {
+			show: doctorOVSRun{out: []byte("x\ndb.sock: Permission denied\n"), err: errors.New("exit status 1")},
+			want: row("", doctorWarn, "this user cannot connect to ovsdb-server (Permission denied). minimega runs ovs-vsctl as root"),
+		},
+		"spaces only": {
+			show: doctorOVSRun{out: []byte(" \n"), err: errors.New("exit status 1")},
+			want: row("", doctorFail, "ovsdb-server does not answer ovs-vsctl show: exit status 1"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ovsShowFailure(&tc.show, 2*time.Second)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("ovsShowFailure() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got.Status == doctorFail && !strings.HasPrefix(openvswitchHint(got), noAnswer) {
+				t.Errorf("openvswitchHint() = %q, want prefix %q", openvswitchHint(got), noAnswer)
+			}
+		})
+	}
+}
+
+// ovsTimeoutArg rounds the doctor timeout up to whole seconds, and is at least one second.
+func TestOVSTimeoutArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		timeout time.Duration
+		want    string
+	}{
+		{0, "--timeout=1"},
+		{-time.Second, "--timeout=1"},
+		{200 * time.Millisecond, "--timeout=1"},
+		{time.Second, "--timeout=1"},
+		{1500 * time.Millisecond, "--timeout=2"},
+		{10 * time.Second, "--timeout=10"},
+	}
+
+	for _, tc := range tests {
+		if got := ovsTimeoutArg(tc.timeout); got != tc.want {
+			t.Errorf("ovsTimeoutArg(%s) = %q, want %q", tc.timeout, got, tc.want)
+		}
+	}
+}
+
+// ovs-vswitchd runs when the pid in its pid file runs, under OVS_RUNDIR when set, or in a container that cannot see
+// the process; without a pid file, it does not.
+func TestOVSSwitchdRuns(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		modify func(doctorHostFS)
+		vars   map[string]string
+		want   bool
+	}{
+		"running": {want: true},
+		"stopped": {modify: func(h doctorHostFS) { delete(h, "/proc/42/") }, want: false},
+		"stopped, in a container": {
+			modify: func(h doctorHostFS) {
+				delete(h, "/proc/42/")
+				h["/.dockerenv"] = ""
+			},
+			want: true,
+		},
+		"no pid file": {modify: func(h doctorHostFS) { delete(h, "/var/run/openvswitch/ovs-vswitchd.pid") }, want: false},
+		"OVS_RUNDIR": {
+			modify: func(h doctorHostFS) {
+				delete(h, "/var/run/openvswitch/ovs-vswitchd.pid")
+				h["/run/ovs/ovs-vswitchd.pid"] = "42\n"
+			},
+			vars: map[string]string{"OVS_RUNDIR": "/run/ovs"}, want: true,
+		},
+		"empty OVS_RUNDIR": {vars: map[string]string{"OVS_RUNDIR": ""}, want: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := doctorGoodHost()
+			if tc.modify != nil {
+				tc.modify(host)
+			}
+
+			in := hostInput(t, host, doctorHostTools)
+			in.env.lookup = fakeDoctorEnv(tc.vars, false).lookup
+
+			if got := in.ovsSwitchdRuns(); got != tc.want {
+				t.Errorf("ovsSwitchdRuns() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// capSysAdmin reads bit 21 of CapEff, and does not know without a CapEff line it can parse.
+func TestCapSysAdmin(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		status         string // the content of /proc/self/status, or none when "-"
+		capable, known bool
+	}{
+		"all":           {status: "CapEff:\t000001ffffffffff\n", capable: true, known: true},
+		"only the bit":  {status: "Name:\tx\nCapEff:\t0000000000200000\n", capable: true, known: true},
+		"without":       {status: "CapEff:\t00000000a80425fb\n", known: true},
+		"not hex":       {status: "CapEff:\tzz\n"},
+		"no CapEff":     {status: "Name:\tphenix\nCapPrm:\t0\n"},
+		"no status":     {status: "-"},
+		"CapEff spaces": {status: "CapEff:   0000000000200000  \n", capable: true, known: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := doctorGoodHost()
+			if tc.status == "-" {
+				delete(host, "/proc/self/status")
+			} else {
+				host["/proc/self/status"] = tc.status
+			}
+
+			capable, known := hostInput(t, host, doctorHostTools).env.capSysAdmin()
+			if capable != tc.capable || known != tc.known {
+				t.Errorf("capSysAdmin() = %t, %t, want %t, %t", capable, known, tc.capable, tc.known)
+			}
+		})
+	}
+}

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -367,6 +369,42 @@ func TestUILimitsCheck(t *testing.T) {
 			want: "not checked, because this user cannot count the open files in /proc/7/fd, such as when phenix ui " +
 				"runs as another user",
 		},
+		"limits without open files": {
+			peer: 7, status: doctorSkip,
+			host: func(h doctorHostFS) {
+				h["/proc/7/cmdline"] = phenixCmdline("phenix", "ui")
+				h["/proc/7/limits"] = "Max cpu time              unlimited            unlimited            seconds   \n"
+			},
+			want: "not checked, because /proc/7/limits gives no limit of open files",
+		},
+		"no hard limit": {
+			peer: 7, status: doctorPass,
+			host: func(h doctorHostFS) {
+				h["/proc/7/cmdline"] = phenixCmdline("phenix", "ui")
+				h["/proc/7/limits"] = "Max open files            1024                 unlimited            files     \n"
+				withFiles(h, "7", 2)
+			},
+			want: "phenix ui (pid 7) can open 1024 files (soft limit, hard limit unlimited). 2 files are open now",
+		},
+		"just at the limit": {
+			peer: 7, status: doctorPass,
+			host: func(h doctorHostFS) {
+				h["/proc/7/cmdline"] = phenixCmdline("phenix", "ui")
+				h["/proc/7/limits"] = "Max open files            10                   10                   files     \n"
+				withFiles(h, "7", 8)
+			},
+			want: "phenix ui (pid 7) can open 10 files (soft limit, hard limit 10). 8 files are open now",
+		},
+		"over the limit": {
+			peer: 7, status: doctorWarn,
+			host: func(h doctorHostFS) {
+				h["/proc/7/cmdline"] = phenixCmdline("phenix", "ui")
+				h["/proc/7/limits"] = "Max open files            10                   10                   files     \n"
+				withFiles(h, "7", 9)
+			},
+			want: "phenix ui (pid 7) can open 10 files (soft limit, hard limit 10). 9 files are open now, so more than 80 " +
+				"percent of the limit are open",
+		},
 		"limits not readable": {
 			peer: 7, status: doctorSkip,
 			host: func(h doctorHostFS) { h["/proc/7/cmdline"] = phenixCmdline("phenix", "ui") },
@@ -410,6 +448,190 @@ func TestUILimitsCheck(t *testing.T) {
 
 			if hint := doctorHintOf(got, uiLimitsHint); hint != wantHint {
 				t.Errorf("uiLimitsHint() = %q, want %q", hint, wantHint)
+			}
+		})
+	}
+}
+
+// phenixUI asks phenix ui on unix-socket once in a run, and says why none answered; an empty unix-socket asks nothing.
+func TestDoctorPhenixUI(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		socket  string // "" keeps the socket of the input
+		noUI    bool
+		noFound bool
+		want    func(socket string) *doctorUI
+	}{
+		"answers": {want: func(string) *doctorUI { return &doctorUI{answered: true} }},
+		"no answer": {
+			noUI: true,
+			want: func(socket string) *doctorUI {
+				return &doctorUI{why: "no phenix ui on " + socket + ": phenix ui is not running, or serves another unix socket"}
+			},
+		},
+		"empty socket": {
+			socket: "-", want: func(string) *doctorUI { return &doctorUI{why: "unix-socket is empty"} },
+		},
+		"no run": {noFound: true, want: func(string) *doctorUI { return &doctorUI{answered: true} }},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := hostInput(t, doctorGoodHost(), doctorHostTools)
+			in.found = &doctorFound{}
+
+			if tc.noFound {
+				in.found = nil
+			}
+
+			if tc.socket == "-" {
+				in.settings["unix-socket"] = resolvedSetting{value: "", text: "", source: sourceDefault}
+			}
+
+			asked := 0
+			answer := in.server
+			in.server = func(socket string, timeout time.Duration) *http.Client {
+				asked++
+
+				if tc.noUI {
+					return doctorServerDialError(syscall.ENOENT)(socket, timeout)
+				}
+
+				return answer(socket, timeout)
+			}
+
+			got := in.phenixUI(t.Context())
+			if diff := cmp.Diff(tc.want(in.text("unix-socket")), got, cmp.AllowUnexported(doctorUI{})); diff != "" {
+				t.Errorf("phenixUI() mismatch (-want +got):\n%s", diff)
+			}
+
+			again := in.phenixUI(t.Context())
+
+			switch {
+			case tc.noFound && again == got:
+				t.Errorf("phenixUI() without a run shared its answer")
+			case !tc.noFound && again != got:
+				t.Errorf("phenixUI() asked phenix ui again in one run")
+			case tc.socket == "-" && asked != 0:
+				t.Errorf("phenixUI() asked phenix ui %d times with an empty unix-socket, want 0", asked)
+			}
+		})
+	}
+}
+
+// phenixProcesses lists the phenix processes in /proc but phenix doctor, once in a run, and says why it listed none.
+func TestDoctorPhenixProcesses(t *testing.T) {
+	t.Parallel()
+
+	procs := map[string]string{
+		"/proc/10/cmdline": phenixCmdline("/usr/bin/phenix", "ui"),
+		"/proc/11/cmdline": phenixCmdline("phenix", "doctor", "-p"),
+		"/proc/12/cmdline": phenixCmdline("bash", "-c", "phenix ui"),
+		"/proc/13/cmdline": "",
+		"/proc/14/cmdline": phenixCmdline("phenix", "experiment", "start", "e1"),
+		"/proc/self/":      "",
+	}
+
+	tests := map[string]struct {
+		os       string
+		noProc   bool
+		canceled bool
+		noFound  bool
+		want     *doctorProcs
+	}{
+		"listed": {want: &doctorProcs{list: []doctorProc{
+			{pid: 10, args: []string{"/usr/bin/phenix", "ui"}}, {pid: 14, args: []string{"phenix", "experiment", "start", "e1"}},
+		}}},
+		"no run": {noFound: true, want: &doctorProcs{list: []doctorProc{
+			{pid: 10, args: []string{"/usr/bin/phenix", "ui"}}, {pid: 14, args: []string{"phenix", "experiment", "start", "e1"}},
+		}}},
+		"not linux":   {os: "darwin", want: &doctorProcs{why: "only Linux has /proc"}},
+		"no /proc":    {noProc: true, want: &doctorProcs{why: "this host has no /proc to read"}},
+		"out of time": {canceled: true, want: &doctorProcs{why: "the time ran out"}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := doctorGoodHost()
+			maps.Copy(host, procs)
+
+			in := hostInput(t, host, doctorHostTools)
+			in.found = &doctorFound{}
+
+			if tc.noFound {
+				in.found = nil
+			}
+
+			if tc.os != "" {
+				in.system.os = tc.os
+			}
+
+			if tc.noProc {
+				in.env.readDir = func(string) ([]os.DirEntry, error) { return nil, os.ErrPermission }
+			}
+
+			ctx := t.Context()
+			if tc.canceled {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+
+				ctx = canceled
+			}
+
+			got := in.phenixProcesses(ctx)
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(doctorProcs{}, doctorProc{})); diff != "" {
+				t.Errorf("phenixProcesses() mismatch (-want +got):\n%s", diff)
+			}
+
+			if again := in.phenixProcesses(ctx); (again == got) == tc.noFound {
+				t.Errorf("phenixProcesses() shared its list %t, want %t", again == got, !tc.noFound)
+			}
+		})
+	}
+}
+
+// A phenix ui that answers or runs, or a phenix process that names the experiment or all experiments, can own the
+// operations of an experiment; the program name does not name it.
+func TestDoctorProcsOwner(t *testing.T) {
+	t.Parallel()
+
+	proc := func(pid int, args ...string) doctorProc { return doctorProc{pid: pid, args: args} }
+
+	tests := map[string]struct {
+		answered bool
+		list     []doctorProc
+		want     string
+	}{
+		"ui answers": {answered: true, list: []doctorProc{proc(1, "phenix", "ui")}, want: "phenix ui answers"},
+		"ui runs": {
+			list: []doctorProc{proc(2, "phenix", "version"), proc(3, "phenix", "ui")},
+			want: "phenix ui runs as process 3",
+		},
+		"names it": {
+			list: []doctorProc{proc(4, "phenix", "experiment", "stop", "e1")},
+			want: "phenix process 4 names the experiment",
+		},
+		"names all": {
+			list: []doctorProc{proc(5, "phenix", "experiment", "stop", "all")},
+			want: "phenix process 5 names the experiment",
+		},
+		"another":          {list: []doctorProc{proc(6, "phenix", "experiment", "stop", "e2")}},
+		"program named e1": {list: []doctorProc{proc(7, "e1")}},
+		"none":             {},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			procs := &doctorProcs{list: tc.list}
+			if got := procs.owner(&doctorUI{answered: tc.answered}, "e1"); got != tc.want {
+				t.Errorf("owner() = %q, want %q", got, tc.want)
 			}
 		})
 	}

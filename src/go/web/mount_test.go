@@ -2,8 +2,12 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,11 +18,14 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/gorilla/mux"
 
 	"phenix/util/common"
 	"phenix/util/mm"
 	"phenix/util/polltest"
+	"phenix/web/middleware"
 	"phenix/web/rbac"
+	"phenix/web/weberror"
 )
 
 // useTestMount turns vm-mount on and mounts test-vm of test-experiment with files,
@@ -246,6 +253,14 @@ func mountServer(t *testing.T) string {
 	)
 
 	return serveAs(t, "alice", role).URL + "/api/v1/experiments/test-experiment/vms/"
+}
+
+// mountServerRole may use every test-experiment VM's mount, as mountServer's user may.
+func mountServerRole() rbac.Role {
+	return combinedRole(
+		testRole("vms/mount", "*", "test-experiment/*"),
+		testRole("experiments/files", "get", "test-experiment"),
+	)
 }
 
 // mountStatus sends a request without failing the test, so it can run on
@@ -698,5 +713,645 @@ func TestMountPathsOutsideTellNothing(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(base, "..", "test-vm2")); err != nil {
 		t.Errorf("os.Stat(test-vm2) after refused uploads error = %v, want the mount kept", err)
+	}
+}
+
+// mountServe serves a request for VM name of test-experiment, with query, to
+// the handler directly, as alice with role, in ctx.
+func mountServe(
+	ctx context.Context, h func(http.ResponseWriter, *http.Request) error, role rbac.Role, name, query string,
+) *httptest.ResponseRecorder {
+	ctx = context.WithValue(ctx, middleware.ContextKeyRole, role)
+	ctx = context.WithValue(ctx, middleware.ContextKeyUser, "alice")
+
+	values, _ := url.ParseQuery(query)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/experiments/test-experiment/vms/"+name+"?"+query, nil)
+	req = mux.SetURLVars(req, map[string]string{"exp": "test-experiment", "name": name, "path": values.Get("path")})
+
+	rec := httptest.NewRecorder()
+	weberror.ErrorHandler(h).ServeHTTP(rec, req)
+
+	return rec
+}
+
+// useFailingMount makes mounting and unmounting fail with err for one test,
+// mounting only once gate is closed (nil: at once).
+func useFailingMount(t *testing.T, err error, gate chan struct{}) {
+	t.Helper()
+
+	originalMount, originalUnmount := mountFilesystem, unmountFilesystem
+
+	mountFilesystem = func(string, string) error {
+		if gate != nil {
+			<-gate
+		}
+
+		return err
+	}
+
+	unmountFilesystem = func(string, string) error { return err }
+
+	t.Cleanup(func() { mountFilesystem, unmountFilesystem = originalMount, originalUnmount })
+}
+
+// A mount that fails answers 500 to its request and to one waiting for it,
+// is audited as failed, and leaves no mount behind.
+func TestMountVMFails(t *testing.T) {
+	useTestMount(t)
+
+	gate := make(chan struct{})
+	useFailingMount(t, errors.New("guestmount: no such disk"), gate)
+
+	key := mm.GetLocalMountPath("test-experiment", "test-vm2")
+	role := testRole("vms/mount", "*", "test-experiment/*")
+	events := captureAudit(t)
+
+	first, second := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+
+	go func() { first <- mountServe(context.Background(), MountVM, role, "test-vm2", "") }()
+
+	polltest.Until(t, "the first mount starting", func() bool {
+		state, _, ok := mountStateOf(key)
+
+		return ok && state == mountMounting
+	})
+
+	go func() { second <- mountServe(context.Background(), MountVM, role, "test-vm2", "") }()
+
+	polltest.Until(t, "the second request joining the mount", func() bool {
+		_, users, _ := mountStateOf(key)
+
+		return users == 2
+	})
+
+	close(gate)
+
+	for name, ch := range map[string]chan *httptest.ResponseRecorder{"first": first, "second": second} {
+		var rec *httptest.ResponseRecorder
+
+		polltest.Within(t, name+" mount answering", func() { rec = <-ch })
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s POST test-vm2/mount of a failing mount = %d, want %d", name, rec.Code, http.StatusInternalServerError)
+		}
+
+		if got, want := errorMessage(t, rec.Code, rec.Body.String()), "Error mounting: guestmount: no such disk"; got != want {
+			t.Errorf("%s POST test-vm2/mount of a failing mount = %q, want %q", name, got, want)
+		}
+	}
+
+	if n := countAudit(events(), "vm-mount", "failure", map[string]any{"phenix.vm.name": "test-vm2"}); n != 2 {
+		t.Errorf("vm-mount failure audit events of test-vm2 = %d, want 2", n)
+	}
+
+	if _, _, ok := mountStateOf(key); ok {
+		t.Error("test-vm2 mount is listed after it failed, want it gone")
+	}
+}
+
+// A request waiting for another's mount whose client leaves stops counting as
+// a user of the mount and writes nothing.
+func TestMountVMWaiterLeaves(t *testing.T) {
+	useTestMount(t)
+
+	g := useGatedMount(t)
+	key := mm.GetLocalMountPath("test-experiment", "test-vm2")
+	role := testRole("vms/mount", "*", "test-experiment/*")
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+
+	go func() { first <- mountServe(context.Background(), MountVM, role, "test-vm2", "") }()
+
+	polltest.Within(t, "the mount starting", func() { <-g.entered })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	left := make(chan *httptest.ResponseRecorder, 1)
+
+	go func() { left <- mountServe(ctx, MountVM, role, "test-vm2", "") }()
+
+	polltest.Until(t, "the second request joining the mount", func() bool {
+		_, users, _ := mountStateOf(key)
+
+		return users == 2
+	})
+
+	cancel()
+
+	var rec *httptest.ResponseRecorder
+
+	polltest.Within(t, "the request whose client left returning", func() { rec = <-left })
+
+	if rec.Body.Len() != 0 {
+		t.Errorf("POST test-vm2/mount whose client left wrote %q, want nothing", rec.Body.String())
+	}
+
+	if _, users, _ := mountStateOf(key); users != 1 {
+		t.Errorf("test-vm2 mount users after a waiting client left = %d, want 1", users)
+	}
+
+	g.release()
+
+	polltest.Within(t, "the first mount answering", func() { rec = <-first })
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("POST test-vm2/mount = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+// An unmount of a VM that is not mounted succeeds, one of a mount in
+// progress is refused, one of a mount others still use only drops the user,
+// and one that fails keeps the mount.
+func TestUnmountVMStates(t *testing.T) {
+	base := useTestMount(t)
+	role := testRole("vms/mount", "*", "test-experiment/*")
+
+	useFailingMount(t, errors.New("fusermount: device busy"), nil)
+
+	setMount := func(state mountState, users int) {
+		activeMountsMu.Lock()
+		activeMounts[base].state, activeMounts[base].users = state, users
+		activeMountsMu.Unlock()
+	}
+
+	tests := []struct {
+		name      string
+		vm        string
+		state     mountState
+		users     int
+		wantCode  int
+		wantState mountState
+		wantUsers int
+		wantAudit string
+	}{
+		{"not mounted", "test-vm2", mountMounted, 1, http.StatusOK, mountMounted, 1, ""},
+		{"mounting", "test-vm", mountMounting, 1, http.StatusConflict, mountMounting, 1, ""},
+		{"unmounting", "test-vm", mountUnmounting, 1, http.StatusConflict, mountUnmounting, 1, ""},
+		{"other users", "test-vm", mountMounted, 3, http.StatusOK, mountMounted, 2, "success"},
+		{"unmount fails", "test-vm", mountMounted, 1, http.StatusInternalServerError, mountMounted, 0, "failure"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setMount(tc.state, tc.users)
+
+			events := captureAudit(t)
+
+			rec := mountServe(t.Context(), UnmountVM, role, tc.vm, "")
+			if rec.Code != tc.wantCode {
+				t.Errorf("DELETE %s/unmount = %d, want %d: %s", tc.vm, rec.Code, tc.wantCode, rec.Body.String())
+			}
+
+			state, users, ok := mountStateOf(base)
+			if !ok {
+				t.Fatal("test-vm mount is not listed, want it kept")
+			}
+
+			if state != tc.wantState || users != tc.wantUsers {
+				t.Errorf("test-vm mount after DELETE %s/unmount = state %d, %d users, want state %d, %d users",
+					tc.vm, state, users, tc.wantState, tc.wantUsers)
+			}
+
+			got := countAudit(events(), "vm-unmount", tc.wantAudit, map[string]any{"phenix.vm.name": tc.vm})
+			if want := map[bool]int{true: 1, false: 0}[tc.wantAudit != ""]; got != want {
+				t.Errorf("vm-unmount %q audit events = %d, want %d", tc.wantAudit, got, want)
+			}
+		})
+	}
+
+	activeMountsMu.RLock()
+	lock := activeMounts[base].lock
+	activeMountsMu.RUnlock()
+
+	// a failed unmount let its lock go
+	if !lock.TryLock() {
+		t.Fatal("test-vm mount lock is held after a failed unmount, want it free")
+	}
+
+	lock.Unlock()
+}
+
+// Listing a mounted folder answers its entries, paths relative to the mount;
+// other requests are refused.
+func TestGetMountFiles(t *testing.T) {
+	useTestMount(t)
+
+	rec := mountServe(t.Context(), GetMountFiles, mountRole(), "test-vm", "path=etc")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET test-vm/files?path=etc = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var listing struct {
+		Error string `json:"error"`
+		Files []struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			Size  int64  `json:"size"`
+			IsDir bool   `json:"isDir"`
+		} `json:"files"`
+	}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &listing); err != nil {
+		t.Fatalf("GET test-vm/files?path=etc = %s, not a listing: %v", rec.Body.String(), err)
+	}
+
+	want := listing
+	want.Error = ""
+	want.Files = append(want.Files[:0:0], struct {
+		Name  string `json:"name"`
+		Path  string `json:"path"`
+		Size  int64  `json:"size"`
+		IsDir bool   `json:"isDir"`
+	}{"hostname", "/etc/hostname", int64(len("test-vm")), false})
+
+	if diff := cmp.Diff(want, listing); diff != "" {
+		t.Errorf("GET test-vm/files?path=etc mismatch (-want +got):\n%s", diff)
+	}
+
+	for name, tc := range map[string]struct {
+		role        rbac.Role
+		vm, query   string
+		wantCode    int
+		wantMessage string
+	}{
+		"forbidden": {testRole("vms/mount", "get", "test-experiment/test-vm"), "test-vm", "path=etc",
+			http.StatusForbidden, "forbidden"},
+		"not mounted": {mountServerRole(), "test-vm2", "path=etc", http.StatusBadRequest, "No existing mount for "},
+		"a file":      {mountRole(), "test-vm", "path=etc/hostname", http.StatusBadRequest, "Expected directory not file: "},
+		"missing":     {mountRole(), "test-vm", "path=gone", http.StatusInternalServerError, "Error getting path "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := mountServe(t.Context(), GetMountFiles, tc.role, tc.vm, tc.query)
+			if rec.Code != tc.wantCode {
+				t.Errorf("GET %s/files?%s = %d, want %d", tc.vm, tc.query, rec.Code, tc.wantCode)
+			}
+
+			if got := errorMessage(t, rec.Code, rec.Body.String()); !strings.HasPrefix(got, tc.wantMessage) {
+				t.Errorf("GET %s/files?%s = %q, want it to start with %q", tc.vm, tc.query, got, tc.wantMessage)
+			}
+		})
+	}
+}
+
+// Downloads, uploads and copies are refused without permission, audited, and
+// refused for a VM that is not mounted.
+func TestMountFileRequestsRefused(t *testing.T) {
+	useTestMount(t)
+
+	handlers := map[string]struct {
+		h      func(http.ResponseWriter, *http.Request) error
+		action string
+	}{
+		"download": {DownloadMountFile, "file-download"},
+		"upload":   {UploadMountFile, "vm-file-upload"},
+		"copy":     {CopyExperimentFileToMount, "vm-file-copy"},
+	}
+
+	for name, tc := range handlers {
+		t.Run(name, func(t *testing.T) {
+			events := captureAudit(t)
+
+			rec := mountServe(t.Context(), tc.h, testRole("vms/mount", "list", "test-experiment/test-vm"), "test-vm", "path=etc")
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s test-vm path=etc without permission = %d, want %d", name, rec.Code, http.StatusForbidden)
+			}
+
+			wantDenied(t, events(), tc.action)
+
+			rec = mountServe(t.Context(), tc.h, mountServerRole(), "test-vm2", "path=etc")
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s test-vm2 path=etc, not mounted = %d, want %d", name, rec.Code, http.StatusBadRequest)
+			}
+
+			if got := errorMessage(t, rec.Code, rec.Body.String()); !strings.HasPrefix(got, "No existing mount for ") {
+				t.Errorf("%s test-vm2 path=etc, not mounted = %q, want No existing mount", name, got)
+			}
+		})
+	}
+}
+
+// A copy into a folder the mount does not have, or onto a folder of the
+// source's name, fails, audited.
+func TestCopyExperimentFileToMountFails(t *testing.T) {
+	base := useTestMount(t)
+
+	if err := os.MkdirAll(filepath.Join(base, "etc", "a.txt"), 0o750); err != nil {
+		t.Fatalf("making the folder etc/a.txt: %v", err)
+	}
+
+	for name, tc := range map[string]struct{ query, wantMessage string }{
+		"missing folder":            {"source=a.txt&path=gone", "Error getting path "},
+		"a folder of the same name": {"source=a.txt&path=etc", "Error creating destination file: "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			events := captureAudit(t)
+
+			rec := mountServe(t.Context(), CopyExperimentFileToMount, mountRole(), "test-vm", tc.query)
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("POST files/copy?%s = %d, want %d", tc.query, rec.Code, http.StatusInternalServerError)
+			}
+
+			if got := errorMessage(t, rec.Code, rec.Body.String()); !strings.HasPrefix(got, tc.wantMessage) {
+				t.Errorf("POST files/copy?%s = %q, want it to start with %q", tc.query, got, tc.wantMessage)
+			}
+
+			wantAudit(t, events(), "vm-file-copy", "failure", map[string]any{"phenix.vm.name": "test-vm"})
+		})
+	}
+}
+
+// Mounting a VM that is mounted already adds a user and succeeds at once.
+func TestMountVMJoinsAMountedVM(t *testing.T) {
+	base := useTestMount(t)
+	useFailingMount(t, errors.New("mounted again"), nil)
+
+	events := captureAudit(t)
+
+	if rec := mountServe(t.Context(), MountVM, mountRole(), "test-vm", ""); rec.Code != http.StatusOK {
+		t.Errorf("POST test-vm/mount of a mounted VM = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	if state, users, _ := mountStateOf(base); state != mountMounted || users != 2 {
+		t.Errorf("test-vm mount after a second mount = state %d, %d users, want state %d, 2 users", state, users, mountMounted)
+	}
+
+	wantAudit(t, events(), "vm-mount", "success", map[string]any{"user.name": "alice", "phenix.vm.name": "test-vm"})
+}
+
+// A download from the first byte is audited with the range it asked for.
+func TestDownloadMountFileAuditsRange(t *testing.T) {
+	useTestMount(t)
+
+	server := serveAs(t, "alice", mountRole()).URL
+	events := captureAudit(t)
+
+	resp := do(t, http.MethodGet, server+"/api/v1/experiments/test-experiment/vms/test-vm/files/download?path=etc/hostname", "",
+		"Range", "bytes=0-3")
+	if got := readBody(t, resp); resp.StatusCode != http.StatusPartialContent || got != "test" {
+		t.Errorf("GET files/download?path=etc/hostname Range bytes=0-3 = %d %q, want %d %q",
+			resp.StatusCode, got, http.StatusPartialContent, "test")
+	}
+
+	wantAudit(t, events(), "file-download", "success", map[string]any{"http.request.range": "bytes=0-3"})
+}
+
+func TestLockMountForFiles(t *testing.T) {
+	const key = "/lock-mount-for-files-test"
+
+	for name, tc := range map[string]struct {
+		info *MountInfo
+		// whether an unmount holds the lock
+		locked bool
+		want   bool
+	}{
+		"no mount": {nil, false, false},
+		"mounting": {&MountInfo{state: mountMounting, lock: &sync.RWMutex{}}, false, false},
+		"unmounting": {
+			&MountInfo{state: mountUnmounting, lock: &sync.RWMutex{}}, false, false,
+		},
+		"mounted":                {&MountInfo{state: mountMounted, lock: &sync.RWMutex{}}, false, true},
+		"mounted, unmount holds": {&MountInfo{state: mountMounted, lock: &sync.RWMutex{}}, true, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.info != nil {
+				if tc.locked {
+					tc.info.lock.Lock()
+					defer tc.info.lock.Unlock()
+				}
+
+				activeMountsMu.Lock()
+				activeMounts[key] = tc.info
+				activeMountsMu.Unlock()
+
+				t.Cleanup(func() {
+					activeMountsMu.Lock()
+					delete(activeMounts, key)
+					activeMountsMu.Unlock()
+				})
+			}
+
+			info, ok := lockMountForFiles(key)
+			if ok != tc.want || (ok && info != tc.info) {
+				t.Fatalf("lockMountForFiles(%s mount) = %v, %t, want the mount: %t", name, info, ok, tc.want)
+			}
+
+			if !ok {
+				return
+			}
+
+			// read-locked: an unmount cannot take it, another file request can
+			if info.lock.TryLock() {
+				t.Error("lockMountForFiles() left the mount unlocked, want it read-locked")
+			}
+
+			if !info.lock.TryRLock() {
+				t.Error("lockMountForFiles() locked the mount for writing, want it read-locked")
+			} else {
+				info.lock.RUnlock()
+			}
+
+			info.lock.RUnlock()
+		})
+	}
+}
+
+func TestLockMountForUnmount(t *testing.T) {
+	original := unmountWaitTimeout
+	t.Cleanup(func() { unmountWaitTimeout = original })
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tests := map[string]struct {
+		ctx     context.Context //nolint:containedctx // a table of contexts
+		timeout time.Duration
+		// how long a file request holds the mount, 0 for none, -1 for ever
+		held time.Duration
+		want bool
+	}{
+		"free":                    {t.Context(), time.Minute, 0, true},
+		"freed while waiting":     {t.Context(), time.Minute, 120 * time.Millisecond, true},
+		"busy past the timeout":   {t.Context(), 100 * time.Millisecond, -1, false},
+		"busy, client left":       {canceled, time.Minute, -1, false},
+		"free, client left first": {canceled, time.Minute, 0, true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			unmountWaitTimeout = tc.timeout
+
+			info := &MountInfo{state: mountUnmounting, lock: &sync.RWMutex{}}
+
+			if tc.held != 0 {
+				info.lock.RLock()
+
+				if tc.held > 0 {
+					time.AfterFunc(tc.held, info.lock.RUnlock)
+				} else {
+					defer info.lock.RUnlock()
+				}
+			}
+
+			var got bool
+
+			polltest.Within(t, "lockMountForUnmount returning", func() { got = lockMountForUnmount(tc.ctx, info) })
+
+			if got != tc.want {
+				t.Fatalf("lockMountForUnmount(%s) = %t, want %t", name, got, tc.want)
+			}
+
+			if got {
+				// it holds the lock: no file request can take it
+				if info.lock.TryRLock() {
+					t.Error("lockMountForUnmount() = true without holding the lock")
+				}
+
+				info.lock.Unlock()
+			}
+		})
+	}
+}
+
+// mountTree is a mount holding etc/hostname, beside a folder outside it
+// holding secret, which the mount's escape symlink names.
+func mountTree(tb testing.TB) string {
+	tb.Helper()
+
+	dir := tb.TempDir()
+	base := filepath.Join(dir, "mount")
+
+	for p, contents := range map[string]string{
+		filepath.Join(base, "etc", "hostname"):  "test-vm",
+		filepath.Join(dir, "outside", "secret"): "not yours",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			tb.Fatalf("making the folder of %s: %v", p, err)
+		}
+
+		if err := os.WriteFile(p, []byte(contents), 0o600); err != nil {
+			tb.Fatalf("writing %s: %v", p, err)
+		}
+	}
+
+	if err := os.Symlink(filepath.Join(dir, "outside"), filepath.Join(base, "escape")); err != nil {
+		tb.Fatalf("os.Symlink(outside, escape) error = %v", err)
+	}
+
+	return base
+}
+
+// openInMount and statInMount reach the mount's own files, and not those a
+// symlink leads out to or a mount that is not there; a missing file is
+// [fs.ErrNotExist], as the download handler needs.
+func TestOpenAndStatInMount(t *testing.T) {
+	t.Parallel()
+
+	base := mountTree(t)
+
+	tests := map[string]struct {
+		base, path string
+		wantErr    bool
+		notExist   bool
+		wantDir    bool
+		contents   string
+	}{
+		"file":            {base: base, path: filepath.Join(base, "etc", "hostname"), contents: "test-vm"},
+		"folder":          {base: base, path: filepath.Join(base, "etc"), wantDir: true},
+		"missing":         {base: base, path: filepath.Join(base, "gone"), wantErr: true, notExist: true},
+		"through symlink": {base: base, path: filepath.Join(base, "escape", "secret"), wantErr: true},
+		"no mount": {
+			base: filepath.Join(base, "none"), path: filepath.Join(base, "none", "etc"), wantErr: true, notExist: true,
+		},
+		"relative path": {base: base, path: "etc/hostname", wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			info, err := statInMount(tc.base, tc.path)
+			if (err != nil) != tc.wantErr || errors.Is(err, fs.ErrNotExist) != tc.notExist {
+				t.Fatalf("statInMount(%s) error = %v, want error: %t, not exist: %t", name, err, tc.wantErr, tc.notExist)
+			}
+
+			if err == nil && info.IsDir() != tc.wantDir {
+				t.Errorf("statInMount(%s) IsDir = %t, want %t", name, info.IsDir(), tc.wantDir)
+			}
+
+			f, err := openInMount(tc.base, tc.path, os.O_RDONLY, 0)
+			if (err != nil) != tc.wantErr || errors.Is(err, fs.ErrNotExist) != tc.notExist {
+				t.Fatalf("openInMount(%s) error = %v, want error: %t, not exist: %t", name, err, tc.wantErr, tc.notExist)
+			}
+
+			if err != nil {
+				return
+			}
+
+			defer f.Close()
+
+			if tc.wantDir {
+				return
+			}
+
+			b, err := io.ReadAll(f)
+			if err != nil || string(b) != tc.contents {
+				t.Errorf("reading openInMount(%s) = %q, %v, want %q", name, b, err, tc.contents)
+			}
+		})
+	}
+}
+
+// mountRoot opens the mount with the path relative to it.
+func TestMountRoot(t *testing.T) {
+	t.Parallel()
+
+	base := mountTree(t)
+
+	root, rel, err := mountRoot(base, filepath.Join(base, "etc", "hostname"))
+	if err != nil {
+		t.Fatalf("mountRoot(mount, etc/hostname) error = %v", err)
+	}
+
+	defer root.Close()
+
+	if want := filepath.Join("etc", "hostname"); rel != want {
+		t.Errorf("mountRoot(mount, etc/hostname) path = %q, want %q", rel, want)
+	}
+
+	if _, err := root.Stat(rel); err != nil {
+		t.Errorf("Stat(%s) in the root mountRoot opened error = %v, want the file", rel, err)
+	}
+}
+
+// Writing through openInMount creates a file inside the mount with the mode
+// uploads use.
+func TestOpenInMountCreates(t *testing.T) {
+	t.Parallel()
+
+	base := mountTree(t)
+	path := filepath.Join(base, "etc", "notes.txt")
+
+	f, err := openInMount(base, path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mountFileMode)
+	if err != nil {
+		t.Fatalf("openInMount(new etc/notes.txt) error = %v", err)
+	}
+
+	if _, err := io.WriteString(f, "notes"); err != nil {
+		t.Errorf("writing etc/notes.txt: %v", err)
+	}
+
+	f.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("os.Stat(etc/notes.txt) error = %v", err)
+	}
+
+	if got := info.Mode().Perm(); got != mountFileMode {
+		t.Errorf("etc/notes.txt mode = %v, want %v", got, os.FileMode(mountFileMode))
+	}
+
+	if _, err := openInMount(base, filepath.Join(base, "escape", "planted"), os.O_WRONLY|os.O_CREATE, mountFileMode); err == nil {
+		t.Error("openInMount(escape/planted) error = nil, want a symlink out of the mount refused")
 	}
 }

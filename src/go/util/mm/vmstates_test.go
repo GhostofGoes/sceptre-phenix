@@ -28,6 +28,25 @@ func TestGetVMStates(t *testing.T) { //nolint:paralleltest // shares the fake mi
 			},
 			want: map[string]string{"a": "RUNNING", "b": "PAUSED", "c": "BUILDING"},
 		},
+		"reads an empty namespace": {
+			answer: []*minicli.Response{mmtest.Tabular("head", header), mmtest.Tabular("compute1", header)},
+			want:   map[string]string{},
+		},
+		"skips answers without a name and state": {
+			answer: []*minicli.Response{
+				mmtest.Tabular("head", []string{"name"}, []string{"a"}),
+				mmtest.Tabular("compute1", []string{"state"}, []string{"RUNNING"}),
+				mmtest.Tabular("compute2", header, []string{"short"}, []string{"c", "BUILDING"}),
+			},
+			want: map[string]string{"c": "BUILDING"},
+		},
+		"names every host that cannot answer": {
+			answer: []*minicli.Response{
+				{Host: "head", Error: "head down"},
+				{Host: "compute1", Error: "compute1 down"},
+			},
+			wantErr: "getting VM states in namespace exp: head down. compute1 down",
+		},
 		"fails when a host cannot answer": {
 			answer: []*minicli.Response{
 				mmtest.Tabular("head", header, []string{"a", "RUNNING"}),

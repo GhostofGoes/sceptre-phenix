@@ -49,6 +49,34 @@ func storedStartTime(t *testing.T, name string) string {
 	return exp.Status.StartTime()
 }
 
+// experimentStopUseMM makes fake answer for minimega for the rest of the test.
+func experimentStopUseMM(t *testing.T, fake *teardownMM) {
+	t.Helper()
+
+	original := mm.DefaultMM
+	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore the default
+
+	mm.DefaultMM = fake //nolint:reassign // install test double
+}
+
+// experimentStopClearCancelers cancels and removes, when the test ends, what
+// a failed stop of experiment name re-armed.
+func experimentStopClearCancelers(t *testing.T, name string) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		commonMu.Lock()
+		cancels := cancelers[name]
+		delete(cancelers, name)
+		delete(waiters, name)
+		commonMu.Unlock()
+
+		for _, c := range cancels {
+			c.cancel()
+		}
+	})
+}
+
 // A stop whose VMs minimega could not kill leaves the experiment running and
 // says it can be forced; the forced stop marks it stopped and is audited so.
 func TestStopExperimentOffersAForcedRetry(t *testing.T) {
@@ -59,10 +87,7 @@ func TestStopExperimentOffersAForcedRetry(t *testing.T) {
 	fake := &teardownMM{testMM: &testMM{vms: mm.VMs{}}}
 	fake.failing.Store(true)
 
-	original := mm.DefaultMM
-	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore the default
-
-	mm.DefaultMM = fake //nolint:reassign // install test double
+	experimentStopUseMM(t, fake)
 
 	var (
 		events = captureAudit(t)
@@ -126,22 +151,9 @@ func TestFailedStopRearmsPendingWork(t *testing.T) {
 	fake := &teardownMM{testMM: &testMM{vms: mm.VMs{}, states: map[string]string{"late": "BUILDING"}}}
 	fake.failing.Store(true)
 
-	original := mm.DefaultMM
-	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore the default
+	experimentStopUseMM(t, fake)
 
-	mm.DefaultMM = fake //nolint:reassign // install test double
-
-	t.Cleanup(func() {
-		commonMu.Lock()
-		cancels := cancelers["running"]
-		delete(cancelers, "running")
-		delete(waiters, "running")
-		commonMu.Unlock()
-
-		for _, c := range cancels {
-			c.cancel()
-		}
-	})
+	experimentStopClearCancelers(t, "running")
 
 	stop := serveAs(t, "alice", testRole("experiments/stop", "update", "running")).URL +
 		"/api/v1/experiments/running/stop"
@@ -190,22 +202,9 @@ func TestFailedStopWithNothingToResumeKeepsPeriodicApps(t *testing.T) {
 	fake := &teardownMM{testMM: &testMM{vms: mm.VMs{}}}
 	fake.failing.Store(true)
 
-	original := mm.DefaultMM
-	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore the default
+	experimentStopUseMM(t, fake)
 
-	mm.DefaultMM = fake //nolint:reassign // install test double
-
-	t.Cleanup(func() {
-		commonMu.Lock()
-		cancels := cancelers["running"]
-		delete(cancelers, "running")
-		delete(waiters, "running")
-		commonMu.Unlock()
-
-		for _, c := range cancels {
-			c.cancel()
-		}
-	})
+	experimentStopClearCancelers(t, "running")
 
 	stop := serveAs(t, "alice", testRole("experiments/stop", "update", "running")).URL +
 		"/api/v1/experiments/running/stop"

@@ -72,6 +72,10 @@ func TestGetLogFiles(t *testing.T) {
 			phenix, t.TempDir(),
 			[]LogFile{phenixOK, {Name: "minimega", Reason: "the minimega log file is not a regular file"}},
 		},
+		"minimega under a file": {
+			phenix, filepath.Join(phenix, "minimega.log"),
+			[]LogFile{phenixOK, {Name: "minimega", Reason: "the minimega log file cannot be read"}},
+		},
 		"no system log": {
 			"", minimega,
 			[]LogFile{
@@ -164,8 +168,9 @@ func TestDownloadLogFile(t *testing.T) {
 	}
 }
 
-// Without logs get, a download is refused and audited as refused; an unknown
-// or unconfigured log file is a 404 audited as a failure.
+// Without logs get, a download is refused and audited as refused. A log file
+// that is unknown, not configured, missing or not a file is a 404, one the
+// server may not read a 503, and any other open error a 500, each audited.
 func TestDownloadLogFileRefusals(t *testing.T) {
 	phenix := writeLogFile(t, "phenix.log", "phenix\n")
 
@@ -186,22 +191,110 @@ func TestDownloadLogFileRefusals(t *testing.T) {
 		wantDenied(t, events(), "log-download")
 	})
 
+	var (
+		unreadable = logFilesUnreadable(t)
+		underFile  = filepath.Join(phenix, "minimega.log")
+	)
+
 	for name, tc := range map[string]struct {
-		path, wantMsg string
+		path, minimega, wantMsg string
+		want                    int
+		auditMsg                string // the audited error, when not wantMsg
 	}{
-		"unknown":                 {"/api/v1/logs/files/other", "no such log file: other"},
-		"minimega not configured": {"/api/v1/logs/files/minimega", "the minimega log file is not configured (set ui.logs.minimega-path)"},
+		"unknown": {path: "/api/v1/logs/files/other", want: http.StatusNotFound, wantMsg: "no such log file: other"},
+		"minimega not configured": {
+			path: "/api/v1/logs/files/minimega", want: http.StatusNotFound,
+			wantMsg: "the minimega log file is not configured (set ui.logs.minimega-path)",
+		},
+		"minimega not written yet": {
+			path: "/api/v1/logs/files/minimega", minimega: filepath.Join(t.TempDir(), "minimega.log"),
+			want: http.StatusNotFound, wantMsg: "the minimega log file does not exist yet",
+		},
+		"minimega a directory": {
+			path: "/api/v1/logs/files/minimega", minimega: t.TempDir(),
+			want: http.StatusNotFound, wantMsg: "the minimega log file is not a regular file", auditMsg: "not a regular file",
+		},
+		"minimega under a file": {
+			path: "/api/v1/logs/files/minimega", minimega: underFile,
+			want: http.StatusInternalServerError, wantMsg: "the minimega log file cannot be read",
+		},
+		"minimega unreadable": {
+			path: "/api/v1/logs/files/minimega", minimega: unreadable,
+			want: http.StatusServiceUnavailable, wantMsg: "the phenix server does not have permission to read the minimega log file",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			events := captureAudit(t)
-
-			resp := do(t, http.MethodGet, logFilesServer(t, phenix, "")+tc.path, "")
-			if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); resp.StatusCode != http.StatusNotFound ||
-				got != tc.wantMsg {
-				t.Errorf("GET %s = %d %q, want %d %q", tc.path, resp.StatusCode, got, http.StatusNotFound, tc.wantMsg)
+			if tc.minimega == unreadable && os.Geteuid() == 0 {
+				t.Skip("root reads every file")
 			}
 
-			wantAudit(t, events(), "log-download", "failure", map[string]any{"error.message": tc.wantMsg})
+			events := captureAudit(t)
+
+			resp := do(t, http.MethodGet, logFilesServer(t, phenix, tc.minimega)+tc.path, "")
+			if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); resp.StatusCode != tc.want ||
+				got != tc.wantMsg {
+				t.Errorf("GET %s = %d %q, want %d %q", tc.path, resp.StatusCode, got, tc.want, tc.wantMsg)
+			}
+
+			auditMsg := tc.auditMsg
+			if auditMsg == "" {
+				auditMsg = tc.wantMsg
+			}
+
+			if failed := wantAudit(t, events(), "log-download", "failure", map[string]any{"user.name": "alice"}); failed != nil {
+				wantErrorMessage(t, failed, auditMsg)
+			}
+		})
+	}
+}
+
+// logFilesUnreadable is the path of a new log file the test user may not
+// read.
+func logFilesUnreadable(t *testing.T) string {
+	t.Helper()
+
+	path := writeLogFile(t, "minimega.log", "secret\n")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("os.Chmod(%s) error = %v", path, err)
+	}
+
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	return path
+}
+
+// A ranged download from the first byte is audited as a download, with the
+// range asked for; one from later in the file is a resumed one, not audited.
+func TestDownloadLogFileRangeIsAudited(t *testing.T) {
+	var (
+		phenix = writeLogFile(t, "phenix.log", "0123456789\n")
+		url    = logFilesServer(t, phenix, "") + "/api/v1/logs/files/phenix"
+	)
+
+	for rng, want := range map[string]struct {
+		body    string
+		audited int
+	}{
+		"bytes=0-3": {body: "0123", audited: 1},
+		"bytes=-20": {body: "0123456789\n", audited: 1},
+		"bytes=4-5": {body: "45", audited: 0},
+	} {
+		t.Run(rng, func(t *testing.T) {
+			events := captureAudit(t)
+
+			resp := do(t, http.MethodGet, url, "", "Range", rng)
+			if resp.StatusCode != http.StatusPartialContent {
+				t.Fatalf("GET %s Range %s = %d, want %d", url, rng, resp.StatusCode, http.StatusPartialContent)
+			}
+
+			if got := readBody(t, resp); got != want.body {
+				t.Errorf("GET %s Range %s body = %q, want %q", url, rng, got, want.body)
+			}
+
+			fields := map[string]any{"phenix.log.name": "phenix", "http.request.range": rng}
+			if n := countAudit(events(), "log-download", "success", fields); n != want.audited {
+				t.Errorf("log-download success events for Range %s = %d, want %d", rng, n, want.audited)
+			}
 		})
 	}
 }

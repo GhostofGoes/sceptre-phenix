@@ -535,3 +535,259 @@ func TestServeDownloadStartedSendsTheFirstByte(t *testing.T) {
 		}
 	})
 }
+
+// ServeOpenFile serves a file the caller opened and leaves it open, and
+// refuses one it cannot stat, having sent nothing.
+func TestServeOpenFile(t *testing.T) {
+	t.Parallel()
+
+	path := downloadFile(t, "0123456789")
+
+	t.Run("serves and leaves the file open", func(t *testing.T) {
+		t.Parallel()
+
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() { _ = f.Close() })
+
+		rec := httptest.NewRecorder()
+
+		served, err := ServeOpenFile(rec, httptest.NewRequest(http.MethodGet, "/download", nil), f, Download{Path: path})
+		if err != nil || !served.Started || rec.Body.String() != "0123456789" {
+			t.Fatalf("ServeOpenFile(%q) = %+v, %v, body %q; want a started download of the file", path, served, err, rec.Body.String())
+		}
+
+		if _, err := f.Stat(); err != nil {
+			t.Errorf("after ServeOpenFile(%q), Stat of the file = %v, want it still open", path, err)
+		}
+	})
+
+	t.Run("refuses a closed file", func(t *testing.T) {
+		t.Parallel()
+
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_ = f.Close()
+
+		rec := httptest.NewRecorder()
+
+		_, err = ServeOpenFile(rec, httptest.NewRequest(http.MethodGet, "/download", nil), f, Download{Path: path})
+		if !errors.Is(err, os.ErrClosed) {
+			t.Errorf("ServeOpenFile(closed %q) = %v, want %v", path, err, os.ErrClosed)
+		}
+
+		if rec.Body.Len() != 0 || len(rec.Header()) != 0 {
+			t.Errorf("ServeOpenFile(closed %q) wrote header %v and body %q, want nothing", path, rec.Header(), rec.Body.String())
+		}
+	})
+}
+
+func TestDownloadType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		d    Download
+		want string
+	}{
+		{name: "given", d: Download{Path: "a.json", Name: "a.json", ContentType: "text/csv"}, want: "text/csv"},
+		{name: "by name", d: Download{Path: "a.bin", Name: "a.json"}, want: "application/json"},
+		{name: "by path inline", d: Download{Path: "/dir/a.json"}, want: "application/json"},
+		{name: "name wins over path", d: Download{Path: "a.json", Name: "a.unknownext"}, want: "application/octet-stream"},
+		{name: "unknown attachment", d: Download{Path: "a.json", Name: "disk"}, want: "application/octet-stream"},
+		{name: "unknown inline is sniffed", d: Download{Path: "/dir/disk.unknownext"}, want: ""},
+		{name: "no extension inline is sniffed", d: Download{Path: "/dir/disk"}, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := downloadType(tc.d); got != tc.want {
+				t.Errorf("downloadType(%+v) = %q, want %q", tc.d, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRangeFromStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		header string
+		size   int64
+		want   bool
+	}{
+		{header: "", size: 100, want: false},
+		{header: "bytes=0-9", size: 100, want: true},
+		{header: "bytes=0-", size: 100, want: true},
+		{header: "bytes= 0 - 5", size: 100, want: true},
+		{header: "bytes=10-19", size: 100, want: false},
+		{header: "bytes=10-19,0-9", size: 100, want: true},
+		{header: "bytes=-100", size: 100, want: true},
+		{header: "bytes=-101", size: 100, want: true},
+		{header: "bytes=-99", size: 100, want: false},
+		{header: "bytes=-0", size: 0, want: true},
+		{header: "bytes=-x", size: 0, want: false},
+		{header: "bytes=x-9", size: 100, want: false},
+		{header: "bytes=5,0-9", size: 100, want: true},
+		{header: "bytes=5", size: 100, want: false},
+		{header: "items=0-9", size: 100, want: false},
+		{header: "Bytes=0-9", size: 100, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.header, func(t *testing.T) {
+			t.Parallel()
+
+			if got := rangeFromStart(tc.header, tc.size); got != tc.want {
+				t.Errorf("rangeFromStart(%q, %d) = %t, want %t", tc.header, tc.size, got, tc.want)
+			}
+		})
+	}
+}
+
+// downloadReaderFromRecorder is a recorder that also takes a body with
+// ReadFrom, as net/http's writer does for sendfile.
+type downloadReaderFromRecorder struct {
+	*httptest.ResponseRecorder
+
+	readFrom bool
+}
+
+func (r *downloadReaderFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	r.readFrom = true
+
+	return io.Copy(r.ResponseRecorder, src)
+}
+
+// statusWriter passes a success through, using the writer's own ReadFrom
+// when it has one, and holds back an error status and its text for finish to
+// send as the JSON Error body.
+func TestStatusWriter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		write        func(sw *statusWriter)
+		readerFrom   bool
+		wantStatus   int
+		wantCode     int
+		wantBody     string
+		wantMessage  string
+		wantReadFrom bool
+	}{
+		{
+			name:       "write without a header",
+			write:      func(sw *statusWriter) { _, _ = sw.Write([]byte("body")) },
+			wantStatus: http.StatusOK, wantCode: http.StatusOK, wantBody: "body",
+		},
+		// a 1xx status is passed on but is not the response's status
+		{
+			name: "informational header first",
+			write: func(sw *statusWriter) {
+				sw.WriteHeader(http.StatusContinue)
+				_, _ = sw.Write([]byte("part"))
+			},
+			wantStatus: http.StatusOK, wantCode: http.StatusContinue, wantBody: "part",
+		},
+		{
+			name: "only the first status counts",
+			write: func(sw *statusWriter) {
+				sw.WriteHeader(http.StatusOK)
+				sw.WriteHeader(http.StatusNotModified)
+			},
+			wantStatus: http.StatusOK, wantCode: http.StatusOK,
+		},
+		{
+			name: "error with text",
+			write: func(sw *statusWriter) {
+				sw.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				_, _ = sw.Write([]byte("invalid range: failed to overlap\n"))
+			},
+			wantStatus: http.StatusRequestedRangeNotSatisfiable, wantCode: http.StatusRequestedRangeNotSatisfiable,
+			wantMessage: "invalid range: failed to overlap",
+		},
+		{
+			name:       "error without text",
+			write:      func(sw *statusWriter) { sw.WriteHeader(http.StatusPreconditionFailed) },
+			wantStatus: http.StatusPreconditionFailed, wantCode: http.StatusPreconditionFailed,
+			wantMessage: "Precondition Failed",
+		},
+		{
+			name:       "read from a plain writer",
+			write:      func(sw *statusWriter) { _, _ = sw.ReadFrom(strings.NewReader("copied")) },
+			wantStatus: http.StatusOK, wantCode: http.StatusOK, wantBody: "copied",
+		},
+		{
+			name:       "read from a writer with ReadFrom",
+			write:      func(sw *statusWriter) { _, _ = sw.ReadFrom(strings.NewReader("sent")) },
+			readerFrom: true,
+			wantStatus: http.StatusOK, wantCode: http.StatusOK, wantBody: "sent", wantReadFrom: true,
+		},
+		{
+			name: "read from after an error",
+			write: func(sw *statusWriter) {
+				sw.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				_, _ = sw.ReadFrom(strings.NewReader("bad range"))
+			},
+			readerFrom: true,
+			wantStatus: http.StatusRequestedRangeNotSatisfiable, wantCode: http.StatusRequestedRangeNotSatisfiable,
+			wantMessage: "bad range",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := &downloadReaderFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+			var w http.ResponseWriter = rec.ResponseRecorder
+			if tc.readerFrom {
+				w = rec
+			}
+
+			sw := &statusWriter{ResponseWriter: w}
+
+			if got := sw.Unwrap(); got != w {
+				t.Errorf("statusWriter.Unwrap() = %v, want the writer it wraps", got)
+			}
+
+			tc.write(sw)
+			sw.finish()
+
+			if sw.status != tc.wantStatus || rec.Code != tc.wantCode || rec.readFrom != tc.wantReadFrom {
+				t.Errorf("statusWriter status %d, sent %d, ReadFrom used %t; want %d, %d, %t",
+					sw.status, rec.Code, rec.readFrom, tc.wantStatus, tc.wantCode, tc.wantReadFrom)
+			}
+
+			if tc.wantMessage == "" {
+				if got := rec.Body.String(); got != tc.wantBody {
+					t.Errorf("statusWriter body = %q, want %q", got, tc.wantBody)
+				}
+
+				return
+			}
+
+			resp := rec.Result()
+			t.Cleanup(func() { _ = resp.Body.Close() })
+
+			wantJSONError(t, resp)
+
+			var e struct {
+				Message string `json:"message"`
+			}
+
+			if err := json.NewDecoder(resp.Body).Decode(&e); err != nil || e.Message != tc.wantMessage {
+				t.Errorf("statusWriter error message = %q, %v; want %q", e.Message, err, tc.wantMessage)
+			}
+		})
+	}
+}

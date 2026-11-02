@@ -450,10 +450,17 @@ func TestParseList(t *testing.T) {
 		"[a, b]":    {"a", "b"},
 		"[a, , c]":  {"a", "", "c"},
 		"[EXP (1)]": {"EXP (1)"},
+		"[a,b]":     {"a,b"},
+		"a, b":      {"a", "b"},
+		"[[a]]":     {"[a]"},
 	} {
-		if diff := cmp.Diff(want, parseList(in)); diff != "" {
-			t.Errorf("parseList(%q) mismatch (-want +got):\n%s", in, diff)
-		}
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(want, parseList(in)); diff != "" {
+				t.Errorf("parseList(%q) mismatch (-want +got):\n%s", in, diff)
+			}
+		})
 	}
 }
 
@@ -475,19 +482,45 @@ func TestVMLaunchSameAs(t *testing.T) {
 	unknown := base
 	unknown.at = time.Time{}
 
+	with := func(change func(*vmLaunch)) vmLaunch {
+		l := base
+		change(&l)
+
+		return l
+	}
+
 	for name, tc := range map[string]struct {
 		other vmLaunch
 		want  bool
 	}{
-		"same":       {base, true},
-		"jitter":     {later, true},
-		"relaunched": {relaunched, false},
-		"moved":      {moved, false},
-		"unknown":    {unknown, false},
+		"same":                 {base, true},
+		"jitter":               {later, true},
+		"earlier jitter":       {with(func(l *vmLaunch) { l.at = now.Add(-launchTolerance / 2) }), true},
+		"at the tolerance":     {with(func(l *vmLaunch) { l.at = now.Add(launchTolerance) }), true},
+		"before the tolerance": {with(func(l *vmLaunch) { l.at = now.Add(-launchTolerance - 1) }), false},
+		"relaunched":           {relaunched, false},
+		"moved":                {moved, false},
+		"other namespace":      {with(func(l *vmLaunch) { l.ns = "exp2" }), false},
+		"other name":           {with(func(l *vmLaunch) { l.name = "b" }), false},
+		"other UUID":           {with(func(l *vmLaunch) { l.uuid = "u2" }), false},
+		"other disk":           {with(func(l *vmLaunch) { l.disk = "d2" }), false},
+		"unknown":              {unknown, false},
 	} {
-		if got := base.sameAs(tc.other); got != tc.want {
-			t.Errorf("base.sameAs(%s launch %+v) = %v, want %v", name, tc.other, got, tc.want)
-		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := base.sameAs(tc.other); got != tc.want {
+				t.Errorf("base.sameAs(%s launch %+v) = %v, want %v", name, tc.other, got, tc.want)
+			}
+
+			if got := tc.other.sameAs(base); got != tc.want {
+				t.Errorf("(%s launch).sameAs(base) = %v, want %v", name, got, tc.want)
+			}
+		})
+	}
+
+	if unknown.sameAs(unknown) {
+		t.Error("a launch at an unknown time is the same as itself, want false")
 	}
 }
 
@@ -503,15 +536,25 @@ func TestDiskUsageCommandAndParse(t *testing.T) {
 	}
 
 	for resp, want := range map[string]map[int]float64{
-		"0=42% 1=17%": {0: 42, 1: 17},
-		"0= 1=17%":    {1: 17},
-		"0=Use% 1=5%": {1: 5},
-		"":            {},
-		"0=1% 7=2%":   {0: 1},
+		"0=42% 1=17%":    {0: 42, 1: 17},
+		"0= 1=17%":       {1: 17},
+		"0=Use% 1=5%":    {1: 5},
+		"":               {},
+		"0=1% 7=2%":      {0: 1},
+		"-1=3% 1=2%":     {1: 2},
+		"x=3% 1=2%":      {1: 2},
+		"42% 1=2%":       {1: 2},
+		"0=12.5% 1=0%":   {0: 12.5, 1: 0},
+		"0=1% 0=2%":      {0: 2},
+		"\n0=9%\t1=8%\n": {0: 9, 1: 8},
 	} {
-		if diff := cmp.Diff(want, parseDiskUsage(resp, 2)); diff != "" {
-			t.Errorf("parseDiskUsage(%q, 2) mismatch (-want +got):\n%s", resp, diff)
-		}
+		t.Run(resp, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(want, parseDiskUsage(resp, 2)); diff != "" {
+				t.Errorf("parseDiskUsage(%q, 2) mismatch (-want +got):\n%s", resp, diff)
+			}
+		})
 	}
 }
 

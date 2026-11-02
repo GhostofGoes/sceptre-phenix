@@ -1,6 +1,7 @@
 package mm
 
 import (
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -400,9 +401,17 @@ func TestSameHostSet(t *testing.T) {
 		{[]string{"a", "b"}, []string{"a", "c"}, false},
 		{[]string{"node1"}, []string{"node11"}, false},
 	} {
-		if got := sameHostSet(tc.a, tc.b); got != tc.want {
-			t.Errorf("sameHostSet(%q, %q) = %t, want %t", tc.a, tc.b, got, tc.want)
-		}
+		t.Run(fmt.Sprintf("%q %q", tc.a, tc.b), func(t *testing.T) {
+			t.Parallel()
+
+			if got := sameHostSet(tc.a, tc.b); got != tc.want {
+				t.Errorf("sameHostSet(%q, %q) = %t, want %t", tc.a, tc.b, got, tc.want)
+			}
+
+			if got := sameHostSet(tc.b, tc.a); got != tc.want {
+				t.Errorf("sameHostSet(%q, %q) = %t, want %t", tc.b, tc.a, got, tc.want)
+			}
+		})
 	}
 }
 

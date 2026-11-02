@@ -6,6 +6,16 @@ import (
 	"phenix/util/partition"
 )
 
+// partitionFuzzEntries returns n one-sector GPT entries from sector 34 on.
+func partitionFuzzEntries(n int) []gptEntry {
+	entries := make([]gptEntry, n)
+	for i := range entries {
+		entries[i] = gptEntry{typ: guidBytes(linuxType), first: uint64(34 + i), last: uint64(34 + i)}
+	}
+
+	return entries
+}
+
 // Inspect keeps its invariants (see checkTable) for any disk image.
 func FuzzInspect(f *testing.F) {
 	const size = 16 << 10
@@ -21,6 +31,7 @@ func FuzzInspect(f *testing.F) {
 		gptEntry{typ: guidBytes(linuxType), first: 10, last: 29, name: "kali"},
 	).write(4*512, fatBootSector(true, 6, "EFI")).write(10*512, extSuperblock(4, 0x42, 0, "kali")).bytes())
 	f.Add(newDisk(0x8800).write(0x8001, []byte("CD001")).bytes())
+	f.Add(gptDisk(64<<10, 512, partitionFuzzEntries(partition.MaxProbes+2)...).bytes())
 	f.Add([]byte("LUKS\xba\xbe"))
 	f.Add([]byte("LUKS\xba\xbe\x00"))
 

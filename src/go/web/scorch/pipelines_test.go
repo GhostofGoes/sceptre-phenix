@@ -147,7 +147,7 @@ func TestBreakMarksTheLoopsAboveIt(t *testing.T) {
 	useScorch(t, map[string]any{"name": "looped", "start": []string{"a"}, "loop": map[string]any{"start": []string{"b"}}})
 
 	brk := ComponentUpdate{
-		Exp: "exp", Run: 0, Loop: 1, Stage: stageStart, CmpName: "b", CmpType: "break", Status: statusRunning,
+		Exp: "exp", Run: 0, Loop: 1, Stage: stageStart, CmpName: "b", CmpType: componentTypeBreak, Status: statusRunning,
 	}
 
 	if err := UpdatePipeline(brk); err != nil {

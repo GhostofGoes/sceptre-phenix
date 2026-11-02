@@ -84,6 +84,21 @@ func TestConfigAPIHidesUserSecrets(t *testing.T) {
 	viewer := testRole("configs", "get", "User/*")
 	vars := map[string]string{"kind": "user", "name": "alice"}
 
+	// the list leaves out every config's spec
+	list := httptest.NewRecorder()
+	if err := GetConfigs(list, roleRequest(http.MethodGet, "/api/v1/configs?kind=user", "", nil,
+		testRole("configs", "list", "User/*"))); err != nil {
+		t.Fatalf("GetConfigs(GET /configs?kind=user) = %v", err)
+	}
+
+	if found := secretsIn(list.Body.String()); len(found) > 0 {
+		t.Errorf("GetConfigs(GET /configs?kind=user) holds %q, want no secrets", found)
+	}
+
+	if !strings.Contains(list.Body.String(), "alice") || !strings.Contains(list.Body.String(), "bob") {
+		t.Errorf("GetConfigs(GET /configs?kind=user) = %s, want alice and bob", list.Body.String())
+	}
+
 	for _, accept := range []string{mimeJSON, "application/x-yaml"} {
 		w := httptest.NewRecorder()
 		req := roleRequest(http.MethodGet, "/api/v1/configs/user/alice", "", vars, viewer)

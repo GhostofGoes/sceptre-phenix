@@ -16,6 +16,8 @@ import (
 // Seq never repeats or goes back, even across many goroutines, never trails
 // the clock, and fits a JavaScript number.
 func TestSeqIsStrictlyIncreasing(t *testing.T) {
+	t.Parallel()
+
 	const (
 		goroutines = 64
 		calls      = 1000
@@ -63,6 +65,8 @@ func TestSeqIsStrictlyIncreasing(t *testing.T) {
 }
 
 func TestObservationOlder(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	failed := errors.New("busy")
 

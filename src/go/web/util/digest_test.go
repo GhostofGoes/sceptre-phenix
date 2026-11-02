@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -213,10 +215,34 @@ func TestServeChecksum(t *testing.T) {
 	if digest := resp.Header.Get("Repr-Digest"); digest != reprDigest(sum[:]) {
 		t.Errorf("ServeDownload(%q) Repr-Digest = %q, want %q", path, digest, reprDigest(sum[:]))
 	}
+}
+
+func TestServeChecksumRefuses(t *testing.T) {
+	t.Parallel()
 
 	dir := t.TempDir()
-	if err := ServeChecksum(httptest.NewRecorder(), dir, "dir"); !errors.Is(err, ErrNotRegular) {
-		t.Errorf("ServeChecksum(%q) = %v, want ErrNotRegular", dir, err)
+
+	tests := []struct {
+		name, path string
+		want       error
+	}{
+		{name: "directory", path: dir, want: ErrNotRegular},
+		{name: "missing", path: dir + "/missing", want: os.ErrNotExist},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+			if err := ServeChecksum(rec, tc.path, tc.name); !errors.Is(err, tc.want) {
+				t.Errorf("ServeChecksum(%q) = %v, want %v", tc.path, err, tc.want)
+			}
+
+			if rec.Body.Len() != 0 || len(rec.Header()) != 0 {
+				t.Errorf("ServeChecksum(%q) wrote header %v and body %q, want nothing", tc.path, rec.Header(), rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -253,5 +279,223 @@ func TestServeChecksumAnswers202WhileHashing(t *testing.T) {
 	want := Checksum{Path: "out.pcap", Size: 8}
 	if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Checksum{}, "Modified", "ETag")); diff != "" {
 		t.Errorf("ServeChecksum(%q) while hashing body mismatch (-want +got):\n%s", path, diff)
+	}
+}
+
+// A file that went missing while it waited to be hashed, and came back as it
+// was, reports the failure once, having sent nothing. Not parallel: it holds
+// every one of Digests' hashers.
+func TestServeChecksumReportsAFailedHash(t *testing.T) {
+	path := downloadFile(t, "contents")
+
+	// move the directory, not the file: a rename of the file changes its inode change time
+	dir := filepath.Dir(path)
+	moved := dir + ".moved"
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	held := true
+	release := func() {
+		if held {
+			held = false
+
+			for range cap(Digests.hashers) {
+				<-Digests.hashers
+			}
+		}
+	}
+
+	for range cap(Digests.hashers) {
+		Digests.hashers <- struct{}{}
+	}
+
+	t.Cleanup(release)
+
+	if sum, err := Digests.Start(path, info); sum != nil || err != nil {
+		t.Fatalf("Digests.Start(%q) = %x, %v; want nil, nil", path, sum, err)
+	}
+
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+
+	release()
+
+	if !Digests.Wait(path, info, 10*time.Second) {
+		t.Fatalf("Digests.Wait(%q) = false after 10s, want true", path)
+	}
+
+	if err := os.Rename(moved, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	if err := ServeChecksum(rec, path, "out.pcap"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ServeChecksum(%q) after its hash failed = %v, want %v", path, err, os.ErrNotExist)
+	}
+
+	if rec.Body.Len() != 0 || len(rec.Header()) != 0 {
+		t.Errorf("ServeChecksum(%q) after its hash failed wrote header %v and body %q, want nothing",
+			path, rec.Header(), rec.Body.String())
+	}
+}
+
+func TestDigestCacheWaitWithNothingRunning(t *testing.T) {
+	t.Parallel()
+
+	path := downloadFile(t, "contents")
+	info, _ := os.Stat(path)
+	c := NewDigestCache(4, 1)
+
+	if !c.Wait(path, info, time.Hour) {
+		t.Errorf("DigestCache.Wait(%q) with nothing running = false, want true", path)
+	}
+}
+
+// Failures past the bound are forgotten, so a forgotten one is computed again
+// rather than reported.
+func TestDigestCacheForgetsFailuresPastTheBound(t *testing.T) {
+	t.Parallel()
+
+	c := NewDigestCache(1, 1)
+
+	// a file removed after it was stat'd fails to hash
+	gone := func(name string) (string, os.FileInfo) {
+		path := downloadFile(t, name)
+
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+
+		return path, info
+	}
+
+	pathA, infoA := gone("a")
+	pathB, infoB := gone("b")
+
+	for _, f := range []struct {
+		path string
+		info os.FileInfo
+	}{{pathA, infoA}, {pathB, infoB}} {
+		_, _ = c.Start(f.path, f.info)
+
+		if !c.Wait(f.path, f.info, 10*time.Second) {
+			t.Fatalf("DigestCache.Wait(%q) = false after 10s, want true", f.path)
+		}
+	}
+
+	if sum, err := c.Start(pathA, infoA); sum != nil || err != nil {
+		t.Errorf("DigestCache.Start(%q) of a forgotten failure = %x, %v; want nil, nil", pathA, sum, err)
+	}
+
+	if _, err := c.Start(pathB, infoB); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("DigestCache.Start(%q) of the last failure = %v, want %v", pathB, err, os.ErrNotExist)
+	}
+}
+
+func TestHashFile(t *testing.T) {
+	t.Parallel()
+
+	path := downloadFile(t, "contents")
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sum := sha256.Sum256([]byte("contents"))
+	stale := keyOf(path, info)
+	stale.size++
+
+	tests := []struct {
+		name    string
+		key     digestKey
+		want    []byte
+		wantErr error
+	}{
+		{name: "the file", key: keyOf(path, info), want: sum[:]},
+		{name: "another file", key: stale, wantErr: ErrChangedWhileHashing},
+		{name: "missing", key: digestKey{path: path + ".missing"}, wantErr: os.ErrNotExist},
+		// it opens and stats as described, but cannot be read
+		{name: "directory", key: keyOf(dir, dirInfo), wantErr: syscall.EISDIR},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := hashFile(tc.key)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("hashFile(%+v) error = %v, want %v", tc.key, err, tc.wantErr)
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("hashFile(%+v) mismatch (-want +got):\n%s", tc.key, diff)
+			}
+		})
+	}
+}
+
+func TestKeyOf(t *testing.T) {
+	t.Parallel()
+
+	path := downloadFile(t, "contents")
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := digestKey{
+		path: path, inode: fileInode(info), size: 8,
+		mtimeNs: info.ModTime().UnixNano(), ctimeNs: fileChangeTime(info),
+	}
+	if diff := cmp.Diff(want, keyOf(path, info), cmp.AllowUnexported(digestKey{})); diff != "" {
+		t.Errorf("keyOf(%q) mismatch (-want +got):\n%s", path, diff)
+	}
+
+	if keyOf("other", info) == keyOf(path, info) {
+		t.Errorf("keyOf(other) = keyOf(%q), want the path to tell them apart", path)
+	}
+}
+
+func TestReprDigest(t *testing.T) {
+	t.Parallel()
+
+	empty := sha256.Sum256(nil)
+
+	tests := []struct {
+		name string
+		sum  []byte
+		want string
+	}{
+		// RFC 9530's encoding of the SHA-256 of no content
+		{name: "empty content", sum: empty[:], want: "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"},
+		{name: "no sum", sum: nil, want: "sha-256=::"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := reprDigest(tc.sum); got != tc.want {
+				t.Errorf("reprDigest(%x) = %q, want %q", tc.sum, got, tc.want)
+			}
+		})
 	}
 }

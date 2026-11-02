@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/user"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"pgregory.net/rapid"
 
 	"phenix/cmd"
@@ -57,6 +59,8 @@ func renderPages(t *testing.T, root *cobra.Command) map[string]page {
 }
 
 func TestRenderPages(t *testing.T) {
+	t.Parallel()
+
 	pages, err := render(newRenderTestTree())
 	if err != nil {
 		t.Fatalf("render() = %v, want no error", err)
@@ -76,6 +80,8 @@ func TestRenderPages(t *testing.T) {
 }
 
 func TestRenderCommandPage(t *testing.T) {
+	t.Parallel()
+
 	got := renderPages(t, newRenderTestTree())["alpha.md"].Body
 
 	want := "# app alpha\n\n" + generatedNote + "\n\n" +
@@ -98,6 +104,8 @@ func TestRenderCommandPage(t *testing.T) {
 }
 
 func TestRenderIndexHoldsGlobalFlags(t *testing.T) {
+	t.Parallel()
+
 	pages := renderPages(t, newRenderTestTree())
 
 	for _, want := range []string{
@@ -118,6 +126,8 @@ func TestRenderIndexHoldsGlobalFlags(t *testing.T) {
 }
 
 func TestRenderRestoresCommands(t *testing.T) {
+	t.Parallel()
+
 	root := newRenderTestTree()
 
 	if _, err := render(root); err != nil {
@@ -141,6 +151,7 @@ func TestRenderRestoresCommands(t *testing.T) {
 
 var markdownLink = regexp.MustCompile(`\]\(([^)#]+)(?:#([^)]+))?\)`)
 
+//nolint:paralleltest // renders the shared phenix command tree
 func TestRenderPhenixTree(t *testing.T) {
 	first := renderPages(t, cmd.Root())
 
@@ -207,20 +218,30 @@ func hasHeadingSlug(markdown, anchor string) bool {
 }
 
 func TestSlug(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct{ in, want string }{
 		{"phenix experiment create", "phenix-experiment-create"},
 		{"phenix vm capture start-subnet", "phenix-vm-capture-start-subnet"},
 		{"  Options  ", "options"},
 		{"a - b", "a-b"},
 		{"phenix (beta)!", "phenix-beta"},
+		{"", ""},
+		{"under_score", "under_score"},
 	} {
-		if got := slug(tc.in); got != tc.want {
-			t.Errorf("slug(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+
+			if got := slug(tc.in); got != tc.want {
+				t.Errorf("slug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
 func TestSlugProperties(t *testing.T) {
+	t.Parallel()
+
 	anchor := regexp.MustCompile(`^[a-z0-9_-]*$`)
 
 	rapid.Check(t, func(t *rapid.T) {
@@ -238,20 +259,30 @@ func TestSlugProperties(t *testing.T) {
 }
 
 func TestDedent(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
 		{"\n  a\n    b\n\n  c  \n\n", "a\n  b\n\nc"},
 		{"first\n  second", "first\n  second"},
 		{"\t\tx\n\ty", "\tx\ny"},
 		{"   \n  only\n", "only"},
+		{"\n\n", ""},
+		{"  \ta\n  b", "\ta\nb"},
 	} {
-		if got := dedent(tc.in); got != tc.want {
-			t.Errorf("dedent(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+
+			if got := dedent(tc.in); got != tc.want {
+				t.Errorf("dedent(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
 func TestDedentProperties(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		lines := rapid.SliceOf(rapid.SampledFrom([]string{"", " ", "a", "  b", "\tc", " d e "})).Draw(t, "lines")
 		indent := rapid.SampledFrom([]string{"", " ", "  ", "\t"}).Draw(t, "indent")
@@ -275,6 +306,8 @@ func TestDedentProperties(t *testing.T) {
 }
 
 func TestTidy(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct{ name, in, want string }{
 		{"labels unlabeled code blocks", "```\nx\n```\n", "```text\nx\n```\n"},
 		{"keeps labeled code blocks", "```bash\nx\n```\n", "```bash\nx\n```\n"},
@@ -284,6 +317,8 @@ func TestTidy(t *testing.T) {
 		{"drops trailing spaces", "a  \n```\nb\t\n```\n", "a\n```text\nb\n```\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := tidy(tc.in); got != tc.want {
 				t.Errorf("tidy(%q) = %q, want %q", tc.in, got, tc.want)
 			}
@@ -292,6 +327,8 @@ func TestTidy(t *testing.T) {
 }
 
 func TestTidyIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		lines := rapid.SliceOf(rapid.SampledFrom([]string{
 			"", "```", "```go", "text", "* [a](b.md)\t - c", "  x  ", "\t",
@@ -302,4 +339,171 @@ func TestTidyIsIdempotent(t *testing.T) {
 			t.Fatalf("tidy(tidy(x)) = %q, want tidy(x) = %q", twice, once)
 		}
 	})
+}
+
+// renderFailingWriter fails every write.
+type renderFailingWriter struct{}
+
+func (renderFailingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+func TestGenMarkdownReportsWriteErrors(t *testing.T) {
+	t.Parallel()
+
+	c := &cobra.Command{Use: "app", Short: "An app"}
+
+	err := genMarkdown(c, renderFailingWriter{}, func(s string) string { return s })
+	if err == nil || !strings.Contains(err.Error(), "rendering app") {
+		t.Errorf("genMarkdown(app, a writer that fails) = %v, want an error naming app", err)
+	}
+
+	if !c.DisableAutoGenTag {
+		t.Error("genMarkdown(app) DisableAutoGenTag = false, want true")
+	}
+}
+
+// Each command is documented on its top-level command's page, under its own
+// heading below the top, and cobra links it by its path.
+func TestRenderTargets(t *testing.T) {
+	t.Parallel()
+
+	root := newRenderTestTree()
+
+	for _, tc := range []struct {
+		path         []string
+		target, link string
+	}{
+		{nil, indexFile, "app.md"},
+		{[]string{"alpha"}, "alpha.md", "app_alpha.md"},
+		{[]string{"alpha", "beta"}, "alpha.md#app-alpha-beta", "app_alpha_beta.md"},
+		{[]string{"zeta"}, "zeta.md", "app_zeta.md"},
+	} {
+		c, _, err := root.Find(tc.path)
+		if err != nil {
+			t.Fatalf("Find(%v) error = %v", tc.path, err)
+		}
+
+		if got := target(c); got != tc.target {
+			t.Errorf("target(%s) = %q, want %q", c.CommandPath(), got, tc.target)
+		}
+
+		if got := cobraLink(c); got != tc.link {
+			t.Errorf("cobraLink(%s) = %q, want %q", c.CommandPath(), got, tc.link)
+		}
+	}
+}
+
+// visit walks the documented commands depth first, by name, leaving out
+// hidden commands and help topics.
+func TestVisitOrder(t *testing.T) {
+	t.Parallel()
+
+	root := newRenderTestTree()
+	root.AddCommand(&cobra.Command{Use: "topic", Short: "A help topic"})
+
+	var got []string
+
+	visit(root, func(c *cobra.Command) { got = append(got, c.CommandPath()) })
+
+	want := []string{"app", "app alpha", "app alpha beta", "app zeta"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("visit(app) order mismatch (-want +got):\n%s", diff)
+	}
+
+	if children := available(&cobra.Command{Use: "leaf"}); len(children) != 0 {
+		t.Errorf("available(leaf) = %d commands, want none", len(children))
+	}
+}
+
+// hideFlags hides every flag, and its restore keeps a flag hidden before
+// hidden.
+func TestHideFlags(t *testing.T) {
+	t.Parallel()
+
+	fs := pflag.NewFlagSet("app", pflag.ContinueOnError)
+	fs.String("shown", "", "")
+	fs.String("hidden", "", "")
+	_ = fs.MarkHidden("hidden")
+
+	hidden := func() map[string]bool {
+		got := map[string]bool{}
+		fs.VisitAll(func(f *pflag.Flag) { got[f.Name] = f.Hidden })
+
+		return got
+	}
+
+	restore := hideFlags(fs)
+
+	if diff := cmp.Diff(map[string]bool{"shown": true, "hidden": true}, hidden()); diff != "" {
+		t.Errorf("hideFlags() hidden flags mismatch (-want +got):\n%s", diff)
+	}
+
+	restore()
+
+	if diff := cmp.Diff(map[string]bool{"shown": false, "hidden": true}, hidden()); diff != "" {
+		t.Errorf("after hideFlags() restore, hidden flags mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// useDocDefaults uses an annotated flag's documented default, and leaves a
+// flag whose annotation is empty as it is.
+func TestUseDocDefaults(t *testing.T) {
+	t.Parallel()
+
+	root := &cobra.Command{Use: "app"}
+	root.Flags().String("store", "/home/u/store.db", "store path")
+	root.Flags().String("empty", "x", "no default given")
+	_ = root.Flags().SetAnnotation("store", cmd.DocDefaultAnnotation, []string{"/etc/store.db"})
+	_ = root.Flags().SetAnnotation("empty", cmd.DocDefaultAnnotation, []string{})
+
+	type shown struct{ DefValue, Usage string }
+
+	flags := func() map[string]shown {
+		got := map[string]shown{}
+		root.Flags().VisitAll(func(f *pflag.Flag) { got[f.Name] = shown{f.DefValue, f.Usage} })
+
+		return got
+	}
+
+	original := flags()
+	restore := useDocDefaults(root)
+
+	want := map[string]shown{
+		"store": {"", "store path (default: /etc/store.db)"},
+		"empty": {"x", "no default given"},
+	}
+	if diff := cmp.Diff(want, flags()); diff != "" {
+		t.Errorf("useDocDefaults() flags mismatch (-want +got):\n%s", diff)
+	}
+
+	restore()
+
+	if diff := cmp.Diff(original, flags()); diff != "" {
+		t.Errorf("after useDocDefaults() restore, flags mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// useTextBlocks fences a synopsis with more backticks than it holds, and
+// leaves a command without one as it is.
+func TestUseTextBlocks(t *testing.T) {
+	t.Parallel()
+
+	root := &cobra.Command{Use: "app", Long: "  Run:\n  ```\n  app\n  ```\n"}
+	plain := &cobra.Command{Use: "plain", Run: func(*cobra.Command, []string) {}}
+	root.AddCommand(plain)
+
+	restore := useTextBlocks(root)
+
+	if want := "````text\nRun:\n```\napp\n```\n````"; root.Long != want {
+		t.Errorf("useTextBlocks() app.Long = %q, want %q", root.Long, want)
+	}
+
+	if plain.Long != "" {
+		t.Errorf("useTextBlocks() plain.Long = %q, want empty", plain.Long)
+	}
+
+	restore()
+
+	if want := "  Run:\n  ```\n  app\n  ```\n"; root.Long != want {
+		t.Errorf("after useTextBlocks() restore, app.Long = %q, want %q", root.Long, want)
+	}
 }

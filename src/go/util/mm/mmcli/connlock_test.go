@@ -113,3 +113,96 @@ func TestConnLockExcludes(t *testing.T) {
 		}
 	})
 }
+
+// A free lock is taken even with a done context; a held one is not waited for
+// with a done context, and the waiter leaves no trace.
+func TestConnLockAcquireWithADoneContext(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		held       bool
+		background bool
+		want       bool
+	}{
+		{name: "free", want: true},
+		{name: "free, background", background: true, want: true},
+		{name: "held", held: true, want: false},
+		{name: "held, background", held: true, background: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var lock connLock
+
+			if tc.held && !lock.acquire(context.Background(), false) {
+				t.Fatal("acquire of a free lock = false, want true")
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			if got := lock.acquire(ctx, tc.background); got != tc.want {
+				t.Errorf("acquire(done ctx, background %t) = %t, want %t", tc.background, got, tc.want)
+			}
+
+			others, background := lock.waiters()
+			if others != 0 || background != 0 || !lock.held {
+				t.Errorf("after acquire(done ctx): waiting %d and %d, held %t; want none waiting, held", others, background, lock.held)
+			}
+
+			lock.release()
+
+			if lock.held {
+				t.Error("after release with no one waiting, held = true, want false")
+			}
+		})
+	}
+}
+
+// A waiter handed the lock just as its context ends either keeps it or passes
+// it on to the next waiter: the lock is never lost. Repeated, as the two
+// endings race.
+func TestConnLockPassesOnALockHandedAsCtxEnds(t *testing.T) {
+	t.Parallel()
+
+	for range 50 {
+		var lock connLock
+
+		lock.acquire(context.Background(), false)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		quitter := make(chan bool, 1)
+		patient := make(chan bool, 1)
+
+		go func() { quitter <- lock.acquire(ctx, false) }()
+
+		polltest.Until(t, "the quitter waiting", func() bool { o, _ := lock.waiters(); return o == 1 })
+
+		go func() { patient <- lock.acquire(context.Background(), true) }()
+
+		polltest.Until(t, "the patient waiter waiting", func() bool { _, b := lock.waiters(); return b == 1 })
+
+		// end the quitter's context while it cannot yet leave the queue, then
+		// most likely hand it the lock before it does
+		lock.mu.Lock()
+		cancel()
+		time.Sleep(time.Millisecond)
+		lock.mu.Unlock()
+		lock.release()
+
+		if <-quitter {
+			lock.release()
+		}
+
+		if !<-patient {
+			t.Fatal("the patient waiter never got the lock")
+		}
+
+		lock.release()
+
+		if others, background := lock.waiters(); others != 0 || background != 0 || lock.held {
+			t.Fatalf("after every waiter left: waiting %d and %d, held %t; want none", others, background, lock.held)
+		}
+	}
+}

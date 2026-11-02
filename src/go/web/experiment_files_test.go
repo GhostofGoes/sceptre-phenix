@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,12 +23,15 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/gorilla/mux"
 
 	"phenix/api/experiment"
 	"phenix/api/job"
 	"phenix/util/common"
 	"phenix/util/file"
+	"phenix/util/freshness"
 	"phenix/util/mm"
+	"phenix/web/middleware"
 	"phenix/web/rbac"
 	"phenix/web/util"
 )
@@ -44,8 +50,6 @@ func requestFiles(t *testing.T, method, path, body, verb string) *http.Response 
 }
 
 func TestGetExperimentFilesReportsTotalBeforePaging(t *testing.T) {
-	useTestFiles(t, "a", "b", "c")
-
 	tests := map[string]struct {
 		query     string
 		wantCode  int
@@ -54,12 +58,20 @@ func TestGetExperimentFilesReportsTotalBeforePaging(t *testing.T) {
 		"paged":     {query: "?pageNum=1&perPage=2", wantCode: http.StatusOK, wantFiles: []string{"a", "b"}},
 		"last page": {query: "?pageNum=2&perPage=2", wantCode: http.StatusOK, wantFiles: []string{"c"}},
 		"not paged": {query: "", wantCode: http.StatusOK, wantFiles: []string{"a", "b", "c"}},
+		"sorted":    {query: "?sortCol=name&sortDir=desc", wantCode: http.StatusOK, wantFiles: []string{"c", "b", "a"}},
+		"sorted, then paged": {
+			query: "?sortCol=name&sortDir=desc&pageNum=1&perPage=2", wantCode: http.StatusOK, wantFiles: []string{"c", "b"},
+		},
+		"sort without a direction": {query: "?sortCol=name", wantCode: http.StatusOK, wantFiles: []string{"a", "b", "c"}},
 		// web/util's ParsePage tests cover every invalid page
 		"invalid page": {query: "?pageNum=0&perPage=2", wantCode: http.StatusBadRequest},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			// a listing of its own, as sorting reorders it
+			useTestFiles(t, "a", "b", "c")
+
 			resp := requestFiles(t, http.MethodGet, tc.query, "", "list")
 			if resp.StatusCode != tc.wantCode {
 				t.Fatalf("GET %s%s = %d, want %d: %s", filesPath, tc.query, resp.StatusCode, tc.wantCode, readBody(t, resp))
@@ -255,13 +267,154 @@ func TestDeleteExperimentFilesReportsEachFailure(t *testing.T) {
 	}
 }
 
-func TestDeleteExperimentFilesNeedsPaths(t *testing.T) {
+// Each request acting on several files needs a JSON body listing them.
+func TestExperimentFilesRequestsNeedPaths(t *testing.T) {
 	useTestFiles(t)
+	useJobs(t)
 
-	for _, body := range []string{``, `{}`, `{"paths":[]}`, `not json`} {
-		if resp := requestFiles(t, http.MethodPost, "/delete", body, "delete"); resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("POST %s/delete %q = %d, want %d", filesPath, body, resp.StatusCode, http.StatusBadRequest)
+	for route, verb := range map[string]string{"/delete": "delete", "/download": "get", "/archive": "get"} {
+		for _, body := range []string{``, `{}`, `{"paths":[]}`, `{"paths":null}`, `not json`} {
+			resp := requestFiles(t, http.MethodPost, route, body, verb)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("POST %s%s %q = %d, want %d", filesPath, route, body, resp.StatusCode, http.StatusBadRequest)
+			}
 		}
+	}
+}
+
+// decodeFilesRequest reads the paths of a JSON body of at most
+// maxFilesRequestBytes, and refuses one that names none.
+func TestDecodeFilesRequest(t *testing.T) {
+	t.Parallel()
+
+	tooLarge := `{"paths":["` + strings.Repeat("a", maxFilesRequestBytes) + `"]}`
+
+	tests := map[string]struct {
+		body    string
+		want    []string
+		wantErr string
+	}{
+		"paths":       {body: `{"paths":["a.log","b/c.json"]}`, want: []string{"a.log", "b/c.json"}},
+		"repeated":    {body: `{"paths":["a.log","a.log"]}`, want: []string{"a.log", "a.log"}},
+		"empty path":  {body: `{"paths":[""]}`, want: []string{""}},
+		"no paths":    {body: `{"paths":[]}`, wantErr: "no files given"},
+		"no field":    {body: `{}`, wantErr: "no files given"},
+		"empty body":  {body: ``, wantErr: "invalid request body: EOF"},
+		"not JSON":    {body: `not json`, wantErr: "invalid request body: "},
+		"not strings": {body: `{"paths":[1]}`, wantErr: "invalid request body: "},
+		"too large":   {body: tooLarge, wantErr: "invalid request body: http: request body too large"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := httptest.NewRequest(http.MethodPost, filesPath+"/delete", strings.NewReader(tc.body))
+
+			got, err := decodeFilesRequest(httptest.NewRecorder(), r)
+
+			status, werr := webErrorStatus(t, err)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("decodeFilesRequest(%s) error = %v, want none", name, err)
+			}
+
+			if tc.wantErr != "" && (status != http.StatusBadRequest || !strings.HasPrefix(werr.Error(), tc.wantErr)) {
+				t.Errorf("decodeFilesRequest(%s) error = %d %v, want %d %q", name, status, err, http.StatusBadRequest, tc.wantErr)
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("decodeFilesRequest(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// A request that deletes nothing still answers with a list of the deleted.
+func TestDeleteExperimentFilesNoneDeleted(t *testing.T) {
+	fake := useTestFiles(t, "a.log")
+
+	resp := requestFiles(t, http.MethodPost, "/delete", `{"paths":["missing.log","../x"]}`, "delete")
+	body := readBody(t, resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s/delete of no listed file = %d, want %d: %s", filesPath, resp.StatusCode, http.StatusOK, body)
+	}
+
+	if !strings.Contains(body, `"deleted":[]`) || !strings.Contains(body, `"path":"missing.log"`) {
+		t.Errorf("POST %s/delete of no listed file = %s, want no file deleted and missing.log failed", filesPath, body)
+	}
+
+	if len(fake.deleted) != 0 {
+		t.Errorf("POST %s/delete of no listed file deleted %v, want nothing", filesPath, fake.deleted)
+	}
+}
+
+// experimentFilesDeleteFails is a cluster that lists its files but fails to
+// delete them.
+type experimentFilesDeleteFails struct {
+	testFiles
+}
+
+func (*experimentFilesDeleteFails) DeleteExistingFiles([]string) error {
+	return errors.New("compute1: timed out")
+}
+
+// A cluster that cannot list or delete the files fails the delete with 500,
+// audited as a failure.
+func TestDeleteExperimentFilesClusterFailures(t *testing.T) {
+	listed := file.Files{{Name: "a.log", Path: "a.log"}, {Name: "b.log", Path: "b.log"}}
+
+	tests := map[string]struct {
+		cluster func() file.ClusterFiles
+		method  string
+		path    string
+		body    string
+		fields  map[string]any
+	}{
+		"one, listing fails": {
+			cluster: func() file.ClusterFiles { return new(failingFiles) },
+			method:  http.MethodDelete, path: "/a.log?path=a.log", fields: map[string]any{"file.path": "a.log"},
+		},
+		"one, deleting fails": {
+			cluster: func() file.ClusterFiles { return &experimentFilesDeleteFails{testFiles{files: listed}} },
+			method:  http.MethodDelete, path: "/a.log?path=a.log", fields: map[string]any{"file.path": "a.log"},
+		},
+		"several, listing fails": {
+			cluster: func() file.ClusterFiles { return new(failingFiles) },
+			method:  http.MethodPost, path: "/delete", body: `{"paths":["a.log","b.log"]}`,
+			fields: map[string]any{"phenix.file.count": 2},
+		},
+		"several, deleting fails": {
+			cluster: func() file.ClusterFiles { return &experimentFilesDeleteFails{testFiles{files: listed}} },
+			method:  http.MethodPost, path: "/delete", body: `{"paths":["a.log","b.log"]}`,
+			fields: map[string]any{"phenix.file.count": 2},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestFiles(t) // restores the cluster after the test
+
+			file.DefaultClusterFiles = tc.cluster() //nolint:reassign // install test double
+
+			events := captureAudit(t)
+
+			resp := requestFiles(t, tc.method, tc.path, tc.body, "delete")
+			if body := readBody(t, resp); resp.StatusCode != http.StatusInternalServerError {
+				t.Errorf("%s %s%s = %d, want %d: %s", tc.method, filesPath, tc.path, resp.StatusCode, http.StatusInternalServerError, body)
+			}
+
+			tc.fields["user.name"] = "alice"
+
+			e := wantAudit(t, events(), "file-delete", "failure", tc.fields)
+			if e != nil && !strings.Contains(fmt.Sprint(e["error.message"]), "compute1: timed out") {
+				t.Errorf("%s %s%s audited error.message %v, want the cluster's error", tc.method, filesPath, tc.path, e["error.message"])
+			}
+
+			if n := countAudit(events(), "file-delete", "success", nil); n != 0 {
+				t.Errorf("%s %s%s audited %d files as deleted, want 0", tc.method, filesPath, tc.path, n)
+			}
+		})
 	}
 }
 
@@ -342,8 +495,11 @@ func TestDownloadExperimentFilesAuditsFilesSentBeforeFailing(t *testing.T) {
 	}
 }
 
+// A download or an archive of files refuses, before it starts, paths it may
+// not or cannot zip, and fails when the cluster cannot list the files.
 func TestDownloadExperimentFilesRefusals(t *testing.T) {
 	useExperimentFilesDir(t, map[string]string{"a.log": "alpha"})
+	useJobs(t)
 
 	tooMany := make([]string, maxZipFiles+1)
 	for i := range tooMany {
@@ -353,31 +509,42 @@ func TestDownloadExperimentFilesRefusals(t *testing.T) {
 	tooManyBody, _ := json.Marshal(map[string][]string{"paths": tooMany})
 
 	tests := map[string]struct {
-		body     string
-		wantCode int
+		body         string
+		listingFails bool
+		wantCode     int
 	}{
 		"too many files": {body: string(tooManyBody), wantCode: http.StatusRequestEntityTooLarge},
 		"too many bytes": {body: `{"paths":["a.log","big.iso"]}`, wantCode: http.StatusRequestEntityTooLarge},
 		"escapes":        {body: `{"paths":["../../etc/passwd"]}`, wantCode: http.StatusBadRequest},
 		"missing":        {body: `{"paths":["c.log"]}`, wantCode: http.StatusNotFound},
-		"no paths":       {body: `{"paths":[]}`, wantCode: http.StatusBadRequest},
+		"listing fails":  {body: `{"paths":["a.log","remote.log"]}`, listingFails: true, wantCode: http.StatusInternalServerError},
 	}
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			// only a mesh node has big.iso, so its size is the listing's
-			fake := useTestFiles(t, "big.iso")
-			fake.files[0].Size = maxZipBytes
+	for _, route := range []string{"/download", "/archive"} {
+		for name, tc := range tests {
+			t.Run(route+" "+name, func(t *testing.T) {
+				// only a mesh node has big.iso, so its size is the listing's
+				fake := useTestFiles(t, "big.iso")
+				fake.files[0].Size = maxZipBytes
 
-			resp := requestFiles(t, http.MethodPost, "/download", tc.body, "get")
-			if resp.StatusCode != tc.wantCode {
-				t.Errorf("POST %s/download (%s) = %d, want %d: %s", filesPath, name, resp.StatusCode, tc.wantCode, readBody(t, resp))
-			}
+				if tc.listingFails {
+					file.DefaultClusterFiles = new(failingFiles) //nolint:reassign // useTestFiles restores it
+				}
 
-			if got := resp.Header.Get("Content-Type"); got == "application/zip" {
-				t.Errorf("POST %s/download (%s) Content-Type = %q, want no zip for a refusal", filesPath, name, got)
-			}
-		})
+				resp := requestFiles(t, http.MethodPost, route, tc.body, "get")
+				if resp.StatusCode != tc.wantCode {
+					t.Errorf("POST %s%s (%s) = %d, want %d: %s", filesPath, route, name, resp.StatusCode, tc.wantCode, readBody(t, resp))
+				}
+
+				if got := resp.Header.Get("Content-Type"); got == "application/zip" {
+					t.Errorf("POST %s%s (%s) Content-Type = %q, want no zip for a refusal", filesPath, route, name, got)
+				}
+
+				if got := resp.Header.Get("Location"); got != "" {
+					t.Errorf("POST %s%s (%s) Location = %q, want no job for a refusal", filesPath, route, name, got)
+				}
+			})
+		}
 	}
 }
 
@@ -559,25 +726,59 @@ func TestGetExperimentFileViewerRefusesLargeFiles(t *testing.T) {
 
 func TestGetExperimentFileRefuses(t *testing.T) {
 	tests := map[string]struct {
-		path     string
-		wantCode int
+		path         string
+		listingFails bool
+		unreadable   bool
+		wantCode     int
+		wantError    string
 	}{
 		"being captured": {path: "live.pcap", wantCode: http.StatusBadRequest},
 		"directory":      {path: "scorch", wantCode: http.StatusNotFound},
 		"missing":        {path: "missing.log", wantCode: http.StatusNotFound},
 		"escapes":        {path: "../other/files/a.log", wantCode: http.StatusBadRequest},
+		"listing fails": {
+			path: "remote.log", listingFails: true, wantCode: http.StatusInternalServerError, wantError: "compute1: timed out",
+		},
+		"unreadable": {
+			path: "scorch/run-0/a.log", unreadable: true, wantCode: http.StatusInternalServerError,
+			wantError: "unable to read scorch/run-0/a.log",
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			if tc.unreadable && os.Geteuid() == 0 {
+				t.Skip("root can read an unreadable file")
+			}
+
 			useCapturingExperiment(t)
 			useExperimentFilesDir(t, map[string]string{"live.pcap": "pcap", "scorch/run-0/a.log": "a"})
 			useTestFiles(t, "live.pcap", "scorch/run-0/a.log")
 
-			resp := getExperimentFile(t, http.MethodGet, tc.path)
-			if resp.StatusCode != tc.wantCode {
-				t.Errorf("GET %s/<name>?path=%s = %d, want %d: %s", filesPath, tc.path, resp.StatusCode, tc.wantCode, readBody(t, resp))
+			if tc.listingFails {
+				file.DefaultClusterFiles = new(failingFiles) //nolint:reassign // useTestFiles restores it
 			}
+
+			if tc.unreadable {
+				if err := os.Chmod(filepath.Join(common.PhenixBase, "images", "test-experiment", "files", tc.path), 0); err != nil {
+					t.Fatalf("making %s unreadable: %v", tc.path, err)
+				}
+			}
+
+			events := captureAudit(t)
+
+			resp := getExperimentFile(t, http.MethodGet, tc.path)
+
+			body := readBody(t, resp)
+			if resp.StatusCode != tc.wantCode {
+				t.Errorf("GET %s/<name>?path=%s = %d, want %d: %s", filesPath, tc.path, resp.StatusCode, tc.wantCode, body)
+			}
+
+			if !strings.Contains(body, tc.wantError) {
+				t.Errorf("GET %s/<name>?path=%s = %s, want it to say %q", filesPath, tc.path, body, tc.wantError)
+			}
+
+			wantAudit(t, events(), "file-download", "failure", map[string]any{"user.name": "alice", "file.path": tc.path})
 		})
 	}
 }
@@ -693,6 +894,7 @@ func TestGetExperimentFileChecksumRefuses(t *testing.T) {
 		"being captured": {path: "live.pcap", verb: "get", wantCode: http.StatusBadRequest},
 		"missing":        {path: "missing.log", verb: "get", wantCode: http.StatusNotFound},
 		"escapes":        {path: "../other/files/a.log", verb: "get", wantCode: http.StatusBadRequest},
+		"listing fails":  {path: "remote.log", verb: "get", wantCode: http.StatusInternalServerError},
 	}
 
 	for name, tc := range tests {
@@ -700,6 +902,10 @@ func TestGetExperimentFileChecksumRefuses(t *testing.T) {
 			useCapturingExperiment(t)
 			useExperimentFilesDir(t, map[string]string{"live.pcap": "pcap", "a.log": "a"})
 			useTestFiles(t, "live.pcap", "a.log")
+
+			if tc.wantCode == http.StatusInternalServerError {
+				file.DefaultClusterFiles = new(failingFiles) //nolint:reassign // useTestFiles restores it
+			}
 
 			events := captureAudit(t)
 
@@ -1067,4 +1273,255 @@ func TestArchiveExperimentFilesCanceled(t *testing.T) {
 	waitAudit(t, events, "file-download", "failure", map[string]any{
 		"user.name": "alice", "phenix.job.id": j.ID, "error.message": "canceled",
 	})
+}
+
+// experimentFilesCanceledListing is a cluster whose file listing gives up
+// once the request's context is done.
+type experimentFilesCanceledListing struct {
+	testFiles
+}
+
+func (*experimentFilesCanceledListing) GetExperimentFilesObserved(
+	ctx context.Context, _, _ string,
+) (file.Files, freshness.Observation, error) {
+	<-ctx.Done()
+
+	return nil, freshness.Observation{}, fmt.Errorf("listing files: %w", ctx.Err())
+}
+
+// A listing the client gave up on gets no answer, not an error.
+func TestGetExperimentFilesCanceled(t *testing.T) {
+	useTestFiles(t) // restores the cluster after the test
+
+	file.DefaultClusterFiles = new(experimentFilesCanceledListing) //nolint:reassign // install test double
+
+	ctx, cancel := context.WithCancel(context.WithValue(
+		t.Context(), middleware.ContextKeyRole, testRole("experiments/files", "list", "test-experiment"),
+	))
+	cancel()
+
+	r := httptest.NewRequestWithContext(ctx, http.MethodGet, filesPath, nil)
+	w := httptest.NewRecorder()
+
+	if err := GetExperimentFiles(w, mux.SetURLVars(r, map[string]string{"name": "test-experiment"})); err != nil {
+		t.Errorf("GetExperimentFiles() of a canceled request = %v, want nil", err)
+	}
+
+	if w.Body.Len() != 0 || len(w.Header()) != 0 {
+		t.Errorf("GetExperimentFiles() of a canceled request wrote %v %q, want nothing", w.Header(), w.Body.String())
+	}
+}
+
+func TestFileErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		err  error
+		want int
+	}{
+		"invalid path":   {fmt.Errorf("x: %w", experiment.ErrInvalidFilePath), http.StatusBadRequest},
+		"being captured": {&experiment.CaptureWritingError{Path: "live.pcap"}, http.StatusBadRequest},
+		"capture exists": {mm.ErrCaptureExists, http.StatusBadRequest},
+		"not found":      {fmt.Errorf("x: %w", experiment.ErrFileNotFound), http.StatusNotFound},
+		"too large":      {fmt.Errorf("x: %w", experiment.ErrDownloadTooLarge), http.StatusRequestEntityTooLarge},
+		"other":          {errors.New("compute1: timed out"), http.StatusInternalServerError},
+		"truncated":      {experiment.ErrFileTruncated, http.StatusInternalServerError},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := fileErrorStatus(tc.err); got != tc.want {
+				t.Errorf("fileErrorStatus(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMayDownloadArchive(t *testing.T) {
+	t.Parallel()
+
+	j := job.Job{Kind: archiveKind, Owner: "alice", Experiment: "test-experiment"}
+
+	tests := map[string]struct {
+		role rbac.Role
+		want bool
+	}{
+		"files get":           {testRole("experiments/files", "get", "test-experiment"), true},
+		"files get of all":    {testRole("experiments/files", "get", "*"), true},
+		"files list":          {testRole("experiments/files", "list", "test-experiment"), false},
+		"another experiment":  {testRole("experiments/files", "get", "other"), false},
+		"the job, not a file": {testRole("jobs", "get", "test-experiment"), false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := mayDownloadArchive(tc.role, j); got != tc.want {
+				t.Errorf("mayDownloadArchive(%s) = %t, want %t", name, got, tc.want)
+			}
+		})
+	}
+}
+
+// An archive job that ended without an archive is audited as a failed
+// download, as its owner; one with an archive is audited when downloaded.
+func TestAuditArchiveJob(t *testing.T) {
+	events := captureAudit(t)
+
+	auditArchiveJob(job.Job{
+		ID: "j1", Owner: "alice", Experiment: "test-experiment", Status: job.StatusSucceeded,
+		Artifact: &job.Artifact{Name: "test-experiment-files.zip"},
+	})
+
+	if got := events(); len(got) != 0 {
+		t.Errorf("auditArchiveJob(a job with an archive) audit events = %v, want none", got)
+	}
+
+	auditArchiveJob(job.Job{
+		ID: "j2", Owner: "alice", Experiment: "test-experiment", Status: job.StatusFailed,
+		Items: []job.Item{{Name: "a.log", Status: job.ItemFailed, Error: "a.log: gone"}, {Name: "b.log"}},
+	})
+
+	wantAudit(t, events(), "file-download", "failure", map[string]any{
+		"user.name": "alice", "phenix.experiment.name": "test-experiment", "phenix.job.id": "j2",
+		"phenix.file.count": 2, "error.message": "a.log: gone",
+	})
+}
+
+// A download of an archive audits each file archived, with the range asked
+// for, and none it left out.
+func TestAuditArchiveDownload(t *testing.T) {
+	j := job.Job{
+		ID: "j1", Owner: "alice", Experiment: "test-experiment",
+		Items: []job.Item{
+			{Name: "a.log", Status: job.ItemSucceeded},
+			{Name: "captures/r.pcap", Status: job.ItemSucceeded},
+			{Name: "gone.log", Status: job.ItemFailed},
+			{Name: "never.log", Status: job.ItemPending},
+		},
+	}
+
+	for name, rng := range map[string]string{"whole": "", "range": "bytes=5-"} {
+		t.Run(name, func(t *testing.T) {
+			events := captureAudit(t)
+
+			ctx := context.WithValue(t.Context(), middleware.ContextKeyUser, "bob")
+			r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/jobs/j1/artifact", nil)
+
+			if rng != "" {
+				r.Header.Set("Range", rng)
+			}
+
+			auditArchiveDownload(r, j)
+
+			got := events()
+			if n := len(got); n != 2 {
+				t.Errorf("auditArchiveDownload(%s) logged %d audit events, want 2: %v", name, n, got)
+			}
+
+			for path, capture := range map[string]bool{"a.log": false, "captures/r.pcap": true} {
+				fields := map[string]any{
+					"user.name": "bob", "file.path": path, "phenix.file.capture": capture, "phenix.job.id": "j1",
+					"phenix.experiment.name": "test-experiment",
+				}
+				if rng != "" {
+					fields["http.request.range"] = rng
+				}
+
+				e := wantAudit(t, got, "file-download", "success", fields)
+				if _, ok := e["http.request.range"]; e != nil && rng == "" && ok {
+					t.Errorf("auditArchiveDownload(%s) of %s http.request.range = %v, want none", name, path, e["http.request.range"])
+				}
+			}
+		})
+	}
+}
+
+// An archive job that cannot write or name its archive fails, leaving no
+// partial archive of its own.
+func TestArchiveFilesFailures(t *testing.T) {
+	const partial = "test-experiment-files.zip.partial"
+
+	tests := map[string]struct {
+		noDir      bool
+		prepare    func(dir string) error // run in the job's folder first
+		want       string
+		wantStatus job.Status // partial once a.log is archived
+	}{
+		"no job folder": {noDir: true, want: "no folder configured for job artifacts", wantStatus: job.StatusFailed},
+		"partial archive exists": {
+			prepare:    func(dir string) error { return os.WriteFile(filepath.Join(dir, partial), nil, 0o600) },
+			want:       "creating archive",
+			wantStatus: job.StatusFailed,
+		},
+		"archive cannot be named": {
+			prepare: func(dir string) error {
+				return os.MkdirAll(filepath.Join(dir, "test-experiment-files.zip", "taken"), 0o750)
+			},
+			want:       "finishing archive",
+			wantStatus: job.StatusPartial,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useExperimentFilesDir(t, map[string]string{"a.log": "alpha"})
+			useTestFiles(t)
+
+			dir := ""
+			if !tc.noDir {
+				dir = t.TempDir()
+			}
+
+			registry := useJobsIn(t, dir)
+
+			plan, err := experiment.PlanZip("test-experiment", []string{"a.log"}, experiment.ZipLimits{MaxFiles: 1, MaxBytes: 1 << 20})
+			if err != nil {
+				t.Fatalf("experiment.PlanZip(test-experiment, [a.log]) error = %v", err)
+			}
+
+			started, err := registry.Start(job.Spec{
+				Kind: archiveKind, Owner: "alice", Experiment: "test-experiment", Items: plan.Paths,
+				Run: func(ctx context.Context, run *job.Run) error {
+					if tc.prepare != nil {
+						jobDir, err := run.Dir()
+						if err != nil {
+							return fmt.Errorf("preparing the job folder: %w", err)
+						}
+
+						if err := tc.prepare(jobDir); err != nil {
+							return fmt.Errorf("preparing the job folder: %w", err)
+						}
+					}
+
+					return archiveFiles(ctx, run, plan)
+				},
+			})
+			if err != nil {
+				t.Fatalf("Registry.Start(archive of a.log) error = %v", err)
+			}
+
+			j := waitJob(t, registry, started.ID)
+			if j.Status != tc.wantStatus || j.Artifact != nil {
+				t.Errorf("archive job (%s) = %s, artifact %+v; want %s without one", name, j.Status, j.Artifact, tc.wantStatus)
+			}
+
+			if !strings.Contains(j.Error, tc.want) {
+				t.Errorf("archive job (%s) error = %q, want it to say %q", name, j.Error, tc.want)
+			}
+
+			if tc.noDir || tc.prepare == nil {
+				return
+			}
+
+			// the partial file the test made itself is left for it to remove
+			_, err = os.Stat(filepath.Join(dir, j.ID, partial))
+			if tc.want == "finishing archive" && !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("archive job (%s) left %s: stat error %v, want it removed", name, partial, err)
+			}
+		})
+	}
 }

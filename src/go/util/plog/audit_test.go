@@ -1,6 +1,7 @@
 package plog
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -113,5 +114,63 @@ func TestAuditSkipsLevelForOtherHandlers(t *testing.T) {
 	want := []string{"AUDIT error audit user.name=alice"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("UI handler at ERROR lines after Audit(Info) and Audit(Error) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Audit does nothing before the package logger exists.
+func TestAuditWithoutLogger(t *testing.T) { //nolint:paralleltest // replaces the package logger
+	var got []string
+
+	AddHandler(t.Name(), NewUIHandler("DEBUG", func(_ time.Time, _, _, message string) {
+		got = append(got, message)
+	}))
+	t.Cleanup(func() { RemoveHandler(t.Name()) })
+
+	original := logger
+	logger = nil
+
+	t.Cleanup(func() { logger = original })
+
+	Audit(slog.LevelError, "dropped audit")
+
+	if len(got) != 0 {
+		t.Errorf("UI handler lines after Audit() without a logger = %q, want none", got)
+	}
+
+	logger = original
+
+	Audit(slog.LevelError, "kept audit")
+
+	if diff := cmp.Diff([]string{"kept audit"}, got); diff != "" {
+		t.Errorf("UI handler lines after Audit() with the logger mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Only the context of an Audit record is one.
+func TestIsAudit(t *testing.T) {
+	t.Parallel()
+
+	type otherKey struct{}
+
+	tests := map[string]struct {
+		ctx  context.Context //nolint:containedctx // the context under test
+		want bool
+	}{
+		"audit":      {ctx: context.WithValue(context.Background(), auditKey{}, true), want: true},
+		"not audit":  {ctx: context.WithValue(context.Background(), auditKey{}, false), want: false},
+		"other type": {ctx: context.WithValue(context.Background(), auditKey{}, "true"), want: false},
+		"no value":   {ctx: context.Background(), want: false},
+		"derived":    {ctx: context.WithValue(context.WithValue(context.Background(), auditKey{}, true), otherKey{}, "v"), want: true},
+		"other key":  {ctx: context.WithValue(context.Background(), otherKey{}, true), want: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isAudit(tc.ctx); got != tc.want {
+				t.Errorf("isAudit(%s context) = %t, want %t", name, got, tc.want)
+			}
+		})
 	}
 }

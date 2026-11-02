@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"math"
 	"net/http"
@@ -265,4 +266,53 @@ func TestFloatMarshalsRoundTrip(t *testing.T) {
 			t.Fatalf("json.Marshal(Float(%v)) = %s, want digits with a decimal point", f, got)
 		}
 	})
+}
+
+// A result that cannot be encoded answers 500 rather than a broken body.
+func TestHandlerEncodingError(t *testing.T) {
+	t.Parallel()
+
+	nan := Check{
+		Name: "nan",
+		Keys: []Key{{Name: "nan:value", ComponentID: "nan", ComponentType: TypeComponent}},
+		Run: func(context.Context) map[string][]Result {
+			return map[string][]Result{"nan:value": {{ObservedValue: Float(math.NaN()), Status: Pass}}}
+		},
+	}
+
+	w := serve(t, http.MethodGet, "/healthz", true, nan)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("GET /healthz of a NaN value = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+
+	if body := decode(t, w); !strings.Contains(fmt.Sprint(body["message"]), "unsupported observed value") {
+		t.Errorf("GET /healthz of a NaN value body = %v, want the encoding error", body)
+	}
+}
+
+// Empty and blank names in ?exclude= are ignored, and a handler without an
+// Authenticated function shows no output.
+func TestHandlerBlankExcludesAndNoAuthenticator(t *testing.T) {
+	t.Parallel()
+
+	h := Handler{Registry: NewRegistry(fixed("minimega", Fail), fixed("store", Pass))}
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz?exclude=,%20,minimega%20&exclude=", nil))
+
+	body := decode(t, w)
+
+	checks, _ := body["checks"].(map[string]any)
+	if diff := cmp.Diff([]string{"store:value"}, slices.Sorted(maps.Keys(checks))); diff != "" {
+		t.Errorf("GET /readyz?exclude= with blanks check keys mismatch (-want +got):\n%s", diff)
+	}
+
+	if hasOutput(body) {
+		t.Errorf("GET /readyz without an Authenticated function = %v, want no output", body)
+	}
+
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("GET /readyz X-Content-Type-Options = %q, want nosniff", got)
+	}
 }

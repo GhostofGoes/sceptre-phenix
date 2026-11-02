@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"pgregory.net/rapid"
 )
 
@@ -45,23 +47,28 @@ func (ti redactTestInput) input() *doctorInput {
 	return in
 }
 
-// The redactor replaces the host name (keeping a hostname suffix), the user
-// names, email addresses and IP addresses with tokens, and secrets and URL
-// credentials with <redacted>. It keeps defaults and text that only looks alike.
-func TestDoctorRedact(t *testing.T) {
-	t.Parallel()
-
-	base := redactTestInput{
+// doctorRedactBase is a host with a hostname suffix, users, a password, an email address, a JWT key, SUDO_USER and
+// interface addresses, which most redactor cases read.
+func doctorRedactBase() redactTestInput {
+	return redactTestInput{
 		host: "ws42-phenix", suffixes: "-minimega,-phenix", user: "alice", home: "/home/alice",
 		users: "bob@corp.example:hunter2:global-admin carol:Pw-3x:viewer", key: "s3cr3t-key",
 		vars: map[string]string{"SUDO_USER": "erin"}, addrs: []string{"127.0.0.1/8", "192.0.2.10/24", "fe80::1/64"},
 	}
+}
 
-	tests := map[string]struct {
-		in   redactTestInput
-		text string
-		want string
-	}{
+// doctorRedactCase is a redactor input, a text, and the text redacted.
+type doctorRedactCase struct {
+	in   redactTestInput
+	text string
+	want string
+}
+
+// doctorRedactCases are the redactor cases that the table and fuzz tests share.
+func doctorRedactCases() map[string]doctorRedactCase {
+	base := doctorRedactBase()
+
+	return map[string]doctorRedactCase{
 		"host with a suffix":    {in: base, text: "ws42-phenix and ws42-minimega", want: "<host-1>-phenix and <host-1>-minimega"},
 		"host in another case":  {in: base, text: "WS42 is ws42", want: "<host-1> is <host-1>"},
 		"host in a longer word": {in: base, text: "ws420 xws42", want: "ws420 xws42"},
@@ -132,9 +139,21 @@ func TestDoctorRedact(t *testing.T) {
 		"JWT":                    {in: base, text: "Bearer eyJhbGciOi.eyJzdWIiOi.c2ln", want: "Bearer <redacted>"},
 		"tokens stay":            {in: base, text: "<host-1> <redacted> <user-3>", want: "<host-1> <redacted> <user-3>"},
 		"same value, same token": {in: base, text: "alice ws42 alice ws42", want: "<user-1> <host-1> <user-1> <host-1>"},
+		"empty text":             {in: base, text: "", want: ""},
+		"no values to hide":      {in: redactTestInput{}, text: "ws42 alice 10.1.2.3", want: "ws42 alice <ip-1>"},
+		"non-ASCII next to a word": {
+			in: base, text: "\u00e9alice alice\u00e9 \u00e9 alice", want: "\u00e9alice alice\u00e9 \u00e9 <user-1>",
+		},
 	}
+}
 
-	for name, tc := range tests {
+// The redactor replaces the host name (keeping a hostname suffix), the user
+// names, email addresses and IP addresses with tokens, and secrets and URL
+// credentials with <redacted>. It keeps defaults and text that only looks alike.
+func TestDoctorRedact(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range doctorRedactCases() {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -346,4 +365,118 @@ func TestDoctorRedactProperties(t *testing.T) {
 			t.Fatalf("redact(%q) = %q, want the defaults kept", keptText, got)
 		}
 	})
+}
+
+// A setting's value is redacted as a string, each string of a list, and each string in a list of lists; any other
+// value stays as it is.
+func TestDoctorRedactValue(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		value any
+		want  any
+	}{
+		"string":        {value: "alice on ws42", want: "<user-1> on <host-1>"},
+		"strings":       {value: []string{"alice", "root", ""}, want: []string{"<user-1>", "root", ""}},
+		"empty strings": {value: []string{}, want: []string{}},
+		"list":          {value: []any{"alice", 3, []any{"ws42", true}}, want: []any{"<user-1>", 3, []any{"<host-1>", true}}},
+		"number":        {value: 3000, want: 3000},
+		"bool":          {value: true, want: true},
+		"nil":           {value: nil, want: nil},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newDoctorRedactor(doctorRedactBase().input())
+			if diff := cmp.Diff(tc.want, r.value(tc.value)); diff != "" {
+				t.Errorf("value(%v) mismatch (-want +got):\n%s", tc.value, diff)
+			}
+		})
+	}
+}
+
+// The ui.users entries come from the setting, then a config file, then PHENIX_UI_USERS, each split on spaces.
+func TestDoctorRedactUsersEntries(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		setting string
+		file    any // the ui.users value of a config file; nil for none
+		env     string
+		want    []string
+	}{
+		"none":    {want: []string{}},
+		"setting": {setting: "a:1:r  b:2:r", want: []string{"a:1:r", "b:2:r"}},
+		"all three": {
+			setting: "a:1:r", file: []any{"c:3:r", "d:4:r"}, env: " e:5:r f:6:r ",
+			want: []string{"a:1:r", "c:3:r", "d:4:r", "e:5:r", "f:6:r"},
+		},
+		"file as text": {file: "g:7:r h:8:r", want: []string{"g:7:r", "h:8:r"}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput("/nonexistent", map[string]string{"ui.users": tc.setting})
+			if tc.file != nil {
+				in.config.values["ui.users"] = fileSetting{file: "/etc/phenix/config.yml", value: tc.file}
+			}
+
+			lookup := func(name string) string {
+				if name == "PHENIX_UI_USERS" {
+					return tc.env
+				}
+
+				return ""
+			}
+
+			if diff := cmp.Diff(tc.want, redactUsersEntries(in, lookup), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("redactUsersEntries() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The redactor also hides the cluster nodes that VM schedules name, the DNS names of the TLS certificate, the stored
+// users, the user of phenix's uid, and the users and passwords of a config file's ui.users.
+func TestDoctorRedactorSources(t *testing.T) {
+	t.Parallel()
+
+	in := redactTestInput{host: "ws42"}.input()
+	in.found = &doctorFound{
+		experiments: &doctorExperiments{list: []doctorExperiment{{name: "e1", schedules: map[string]string{"vm1": "node9"}}}},
+		certNames:   []string{"*.lab.example", "ui.corp.example"},
+		users:       []string{"mallory"},
+	}
+	in.phenixUID = "1000"
+	in.config.values["ui.users"] = fileSetting{file: "/etc/phenix/config.yml", value: []any{"trent:Tr3nt-pw:global-admin"}}
+
+	r := newDoctorRedactor(in)
+
+	text := "vm1 on node9, cert lab.example and ui.corp.example, users mallory alice trent, password Tr3nt-pw"
+	want := "vm1 on <host-3>, cert <host-2> and <host-1>, users <user-1> <user-2> <user-3>, password <redacted>"
+
+	if diff := cmp.Diff(want, r.redact(text)); diff != "" {
+		t.Errorf("redact(%q) mismatch (-want +got):\n%s", text, diff)
+	}
+}
+
+// interfaceAddrs gives each address of this host's interfaces as an address with its prefix length.
+// Interfaces can change between calls, so the test does not compare it with [net.InterfaceAddrs].
+func TestInterfaceAddrs(t *testing.T) {
+	t.Parallel()
+
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		t.Fatalf("interfaceAddrs() error = %v", err)
+	}
+
+	for i, a := range addrs {
+		if _, err := netip.ParsePrefix(a); err != nil {
+			t.Errorf("interfaceAddrs()[%d] = %q, want an address and prefix length: %v", i, a, err)
+		}
+	}
 }

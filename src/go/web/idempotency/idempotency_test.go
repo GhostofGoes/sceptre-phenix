@@ -1,7 +1,9 @@
 package idempotency
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +76,8 @@ func send(t interface{ Helper() }, h http.Handler, user, target, key, body strin
 const actions = "/api/v1/experiments/exp/vms/actions"
 
 func TestRetryReplaysTheFirstAnswer(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs jobStarter
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
@@ -97,6 +101,8 @@ func TestRetryReplaysTheFirstAnswer(t *testing.T) {
 }
 
 func TestKeysAreScopedToUserMethodAndPath(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs jobStarter
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
@@ -125,6 +131,8 @@ func TestKeysAreScopedToUserMethodAndPath(t *testing.T) {
 }
 
 func TestKeyReusedForAnotherRequestIsRefused(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs jobStarter
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
@@ -149,6 +157,8 @@ func TestKeyReusedForAnotherRequestIsRefused(t *testing.T) {
 }
 
 func TestOnlyAcceptedAnswersAreKept(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs jobStarter
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
@@ -166,6 +176,8 @@ func TestOnlyAcceptedAnswersAreKept(t *testing.T) {
 }
 
 func TestKeyBeingServedIsConflict(t *testing.T) {
+	t.Parallel()
+
 	var (
 		entered = make(chan struct{})
 		release = make(chan struct{})
@@ -194,6 +206,8 @@ func TestKeyBeingServedIsConflict(t *testing.T) {
 }
 
 func TestKeysExpire(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs  jobStarter
 		now   = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -217,6 +231,8 @@ func TestKeysExpire(t *testing.T) {
 }
 
 func TestStoreIsBounded(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                 string
 		maxEntries, maxBytes int
@@ -227,6 +243,8 @@ func TestStoreIsBounded(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			var (
 				jobs  jobStarter
 				now   = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -261,6 +279,8 @@ func TestStoreIsBounded(t *testing.T) {
 }
 
 func TestInvalidKeyIsRefused(t *testing.T) {
+	t.Parallel()
+
 	var (
 		jobs jobStarter
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
@@ -279,6 +299,8 @@ func TestInvalidKeyIsRefused(t *testing.T) {
 
 // A key is valid exactly when it is 1 to 255 printable ASCII characters.
 func TestValidKeyProperty(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		key := rapid.OneOf(
 			rapid.StringMatching(`[ -~]{1,255}`),
@@ -298,6 +320,8 @@ func TestValidKeyProperty(t *testing.T) {
 
 // Whatever keys and bodies one user sends, a key starts at most one job, and every answer for a key is that job's.
 func TestOneJobPerKeyProperty(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		var (
 			jobs      jobStarter
@@ -329,4 +353,232 @@ func TestOneJobPerKeyProperty(t *testing.T) {
 			t.Fatalf("jobs started = %d, want %d, one per key", got, len(first))
 		}
 	})
+}
+
+// idempotencyErrReader fails every read.
+type idempotencyErrReader struct{}
+
+func (idempotencyErrReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+func TestUnreadableBodyIsRefused(t *testing.T) {
+	t.Parallel()
+
+	var jobs jobStarter
+
+	req := httptest.NewRequest(http.MethodPost, actions, idempotencyErrReader{})
+	req.Header.Set(Header, "k1")
+
+	rec := httptest.NewRecorder()
+	New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "reading request body: connection reset") {
+		t.Errorf("POST of an unreadable body = %d %q, want %d and the read error", rec.Code, rec.Body.String(), http.StatusBadRequest)
+	}
+
+	if got := jobs.started.Load(); got != 0 {
+		t.Errorf("jobs started = %d, want 0", got)
+	}
+}
+
+// A body too large to fingerprint is passed on whole, and each retry of it
+// is served again.
+func TestOversizedBodyIsServedWithoutTheKey(t *testing.T) {
+	t.Parallel()
+
+	var (
+		received []int
+		h        = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil || !bytes.Equal(body, bytes.Repeat([]byte("x"), len(body))) {
+					t.Errorf("reading the oversized body = %d bytes, %v; want only x", len(body), err)
+				}
+
+				if err := r.Body.Close(); err != nil {
+					t.Errorf("closing the oversized body error = %v", err)
+				}
+
+				received = append(received, len(body))
+				w.WriteHeader(http.StatusAccepted)
+			}))
+		body = strings.Repeat("x", maxBodyBytes+10)
+	)
+
+	for range 2 {
+		if got := send(t, h, "alice", actions, "k1", body); got.Status != http.StatusAccepted || got.Replayed != "" {
+			t.Errorf("POST of a %d byte body = %d (replayed %q), want it served", len(body), got.Status, got.Replayed)
+		}
+	}
+
+	if diff := cmp.Diff([]int{len(body), len(body)}, received); diff != "" {
+		t.Errorf("body lengths the handler read mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Only a whole 202 is replayed: an answer with no status written is a 200,
+// and one too large to keep is served again; a later status is ignored.
+func TestRecordedAnswers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		serve      func(w http.ResponseWriter)
+		wantStatus int
+		wantReplay bool
+	}{
+		{
+			name:       "body without a status",
+			serve:      func(w http.ResponseWriter) { _, _ = w.Write([]byte("done")) },
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "202 too large to keep",
+			serve: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write(bytes.Repeat([]byte("a"), maxBodyBytes))
+				_, _ = w.Write([]byte("b"))
+				_, _ = w.Write([]byte("c"))
+			},
+			wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "202 then another status",
+			serve: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusAccepted)
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("queued"))
+			},
+			wantStatus: http.StatusAccepted,
+			wantReplay: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				served atomic.Int32
+				h      = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(http.HandlerFunc(
+					func(w http.ResponseWriter, _ *http.Request) {
+						served.Add(1)
+						test.serve(w)
+					}))
+			)
+
+			first := send(t, h, "alice", actions, "k1", "start")
+			if first.Status != test.wantStatus {
+				t.Errorf("first POST = %d, want %d", first.Status, test.wantStatus)
+			}
+
+			retry := send(t, h, "alice", actions, "k1", "start")
+			if replayed := retry.Replayed == "true"; replayed != test.wantReplay || retry.Body != first.Body {
+				t.Errorf("retried POST replayed %t with a %d byte body, want replayed %t with the first's %d bytes",
+					replayed, len(retry.Body), test.wantReplay, len(first.Body))
+			}
+
+			wantServed := int32(2)
+			if test.wantReplay {
+				wantServed = 1
+			}
+
+			if got := served.Load(); got != wantServed {
+				t.Errorf("handler served %d requests, want %d", got, wantServed)
+			}
+		})
+	}
+}
+
+// idempotencyHeld serves each request with the key "held" until release
+// closes, and starts a job for every other request.
+func idempotencyHeld(jobs *jobStarter, entered chan<- struct{}, release <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(Header) == "held" {
+			entered <- struct{}{}
+			<-release
+		}
+
+		jobs.ServeHTTP(w, r)
+	})
+}
+
+// A key that expires while its request is served is not kept when the
+// request ends, so a retry starts a new job.
+func TestKeyExpiringWhileServed(t *testing.T) {
+	t.Parallel()
+
+	var (
+		jobs    jobStarter
+		entered = make(chan struct{})
+		release = make(chan struct{})
+		now     atomic.Pointer[time.Time]
+		store   = New(time.Hour, DefaultMaxEntries, DefaultMaxBytes)
+		h       = store.Wrap(idempotencyHeld(&jobs, entered, release))
+		done    = make(chan answer)
+	)
+
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now.Store(&start)
+	store.now = func() time.Time { return *now.Load() }
+
+	go func() { done <- send(t, h, "alice", actions, "held", "start") }()
+
+	<-entered
+
+	later := start.Add(time.Hour)
+	now.Store(&later)
+
+	// another request expires the held key
+	send(t, h, "alice", actions, "other", "start")
+
+	close(release)
+
+	if got := <-done; got.Status != http.StatusAccepted {
+		t.Errorf("held POST = %d, want %d", got.Status, http.StatusAccepted)
+	}
+
+	go func() { <-entered }()
+
+	if got := send(t, h, "alice", actions, "held", "start"); got.Replayed != "" || got.Location != "/api/v1/jobs/3" {
+		t.Errorf("retry of a key that expired while served = %q (replayed %q), want a new job", got.Location, got.Replayed)
+	}
+}
+
+// Keys still being served are never evicted, even past maxEntries.
+func TestKeysBeingServedAreNotEvicted(t *testing.T) {
+	t.Parallel()
+
+	var (
+		jobs    jobStarter
+		entered = make(chan struct{})
+		release = make(chan struct{})
+		store   = New(DefaultTTL, 1, DefaultMaxBytes)
+		h       = store.Wrap(idempotencyHeld(&jobs, entered, release))
+		done    = make(chan answer)
+	)
+
+	go func() { done <- send(t, h, "alice", actions, "held", "start") }()
+
+	<-entered
+
+	// the store is full of the held key, so this answer is the one evicted
+	if got := send(t, h, "alice", actions, "other", "start"); got.Status != http.StatusAccepted {
+		t.Errorf("POST beside a held key = %d, want %d", got.Status, http.StatusAccepted)
+	}
+
+	if got := send(t, h, "alice", actions, "held", "start"); got.Status != http.StatusConflict {
+		t.Errorf("POST of the held key = %d, want %d", got.Status, http.StatusConflict)
+	}
+
+	close(release)
+
+	first := <-done
+
+	if got := send(t, h, "alice", actions, "held", "start"); got.Replayed != "true" || got.Location != first.Location {
+		t.Errorf("retry of the held key = %q (replayed %q), want %q replayed", got.Location, got.Replayed, first.Location)
+	}
+
+	if got := send(t, h, "alice", actions, "other", "start"); got.Replayed != "" {
+		t.Errorf("retry of the evicted key replayed = %q, want it served again", got.Replayed)
+	}
 }

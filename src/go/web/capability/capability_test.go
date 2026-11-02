@@ -60,6 +60,8 @@ func isDone(g Grant) bool {
 }
 
 func TestUse(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -77,8 +79,14 @@ func TestUse(t *testing.T) {
 		t.Errorf("Use(router-secret.pcap, %v) mismatch (-want +got):\n%s", OpView, diff)
 	}
 
-	if _, err := r.Use("router-secret.pcap", OpStream); !errors.Is(err, ErrOperation) {
+	refused, err := r.Use("router-secret.pcap", OpStream)
+	if !errors.Is(err, ErrOperation) {
 		t.Errorf("Use(router-secret.pcap, %v) error = %v, want %v", OpStream, err, ErrOperation)
+	}
+
+	// a refused operation returns the grant and does not count as a use
+	if diff := cmp.Diff(want, refused); diff != "" {
+		t.Errorf("Use(router-secret.pcap, %v) mismatch (-want +got):\n%s", OpStream, diff)
 	}
 
 	for _, token := range []string{"router-secret.pca", "Router-secret.pcap", ""} {
@@ -88,7 +96,89 @@ func TestUse(t *testing.T) {
 	}
 }
 
+// Minting a token again replaces its grant: the old one ends, and only the new
+// one, with what it allows, is kept under the same ID.
+func TestMintReplacesTheGrantOfItsToken(t *testing.T) {
+	t.Parallel()
+
+	c := newClock()
+	r := New(10, 10, c.Now)
+
+	first := r.Mint("t", viewGrant(c))
+
+	if _, err := r.Use("t", OpView); err != nil {
+		t.Fatalf("Use(t, %v) error = %v", OpView, err)
+	}
+
+	c.advance(time.Minute)
+
+	g := viewGrant(c)
+	g.Ops = []Op{OpStream}
+	second := r.Mint("t", g)
+
+	if !isDone(first) || isDone(second) {
+		t.Errorf("after minting t again, first closed %t, second closed %t; want true, false", isDone(first), isDone(second))
+	}
+
+	if second.ID != first.ID || second.Uses != 0 || !second.Created.Equal(c.Now()) {
+		t.Errorf("Mint(t) again = ID %s, uses %d, created %v; want ID %s, no uses, created %v",
+			second.ID, second.Uses, second.Created, first.ID, c.Now())
+	}
+
+	if _, err := r.Use("t", OpView); !errors.Is(err, ErrOperation) {
+		t.Errorf("Use(t, %v) of the new grant error = %v, want %v", OpView, err, ErrOperation)
+	}
+
+	if diff := cmp.Diff([]Grant{second}, r.List("alice", "test-experiment")); diff != "" {
+		t.Errorf("List(alice, test-experiment) after minting t again mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Mint keeps a copy of the grant's operations, and sets what the caller may not.
+func TestMintSetsItsOwnFields(t *testing.T) {
+	t.Parallel()
+
+	c := newClock()
+	r := New(10, 10, c.Now)
+
+	g := viewGrant(c)
+	g.ID, g.Uses, g.Created = "forged", 7, c.Now().Add(-time.Hour)
+	minted := r.Mint("t", g)
+
+	g.Ops[0] = OpStream
+
+	got, err := r.Use("t", OpView)
+	if err != nil {
+		t.Fatalf("Use(t, %v) after the caller changed its operations error = %v", OpView, err)
+	}
+
+	want := viewGrant(c)
+	want.ID, want.Created, want.LastUsed, want.Checked, want.Uses, want.Done = IDOf("t"), c.Now(), c.Now(), c.Now(), 1, minted.Done
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Use(t, %v) of the minted grant mismatch (-want +got):\n%s", OpView, diff)
+	}
+}
+
+func TestAllows(t *testing.T) {
+	t.Parallel()
+
+	g := Grant{Ops: []Op{OpView, OpWatch}}
+
+	for op, want := range map[Op]bool{OpView: true, OpWatch: true, OpDownload: false, OpStream: false, "": false} {
+		if got := g.Allows(op); got != want {
+			t.Errorf("Grant{Ops: %v}.Allows(%q) = %t, want %t", g.Ops, op, got, want)
+		}
+	}
+
+	if (Grant{}).Allows(OpView) {
+		t.Errorf("Grant{}.Allows(%q) = true, want false", OpView)
+	}
+}
+
 func TestIDIsNotTheToken(t *testing.T) {
+	t.Parallel()
+
 	r := New(10, 10, nil)
 
 	token := "pcs_abcdefghijklmnopqrstuvwxyz"
@@ -108,6 +198,8 @@ func TestIDIsNotTheToken(t *testing.T) {
 }
 
 func TestIdleTimeout(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -140,6 +232,8 @@ func TestIdleTimeout(t *testing.T) {
 }
 
 func TestExpiry(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -178,6 +272,8 @@ func TestExpiry(t *testing.T) {
 }
 
 func TestUseBy(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -220,6 +316,8 @@ func TestUseBy(t *testing.T) {
 }
 
 func TestRevoke(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -251,6 +349,8 @@ func TestRevoke(t *testing.T) {
 }
 
 func TestRevokeWhereAndList(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -288,6 +388,8 @@ func TestRevokeWhereAndList(t *testing.T) {
 }
 
 func TestListOrdersGrantsMintedAtOnceByID(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -314,6 +416,8 @@ func TestListOrdersGrantsMintedAtOnceByID(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(10, 10, c.Now)
 
@@ -344,6 +448,8 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestEviction(t *testing.T) {
+	t.Parallel()
+
 	c := newClock()
 	r := New(4, 2, c.Now)
 
@@ -399,6 +505,8 @@ func TestEviction(t *testing.T) {
 }
 
 func TestConcurrentUse(t *testing.T) {
+	t.Parallel()
+
 	r := New(64, 64, nil)
 
 	var (

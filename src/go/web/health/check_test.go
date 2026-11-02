@@ -2,7 +2,10 @@ package health
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -326,5 +329,65 @@ func TestEvaluateSkipsExcludedAndDisabledChecks(t *testing.T) {
 
 	if got := runs.Load(); got != 0 {
 		t.Errorf("Evaluate(exclude test): %d runs, want 0", got)
+	}
+}
+
+// A run that ends as its timeout fires reports its own results, not the
+// timeout: the run holds the lock, in its clock, until the request's
+// goroutine, its timer fired, waits on that lock.
+func TestEvaluateRunEndingAtTheTimeout(t *testing.T) {
+	t.Parallel()
+
+	var (
+		runs   atomic.Int32
+		calls  atomic.Int32
+		check  = counted(&runs, Pass, nil)
+		inLock = make(chan struct{})
+		gate   = make(chan struct{})
+		at     = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	)
+
+	check.Timeout = 20 * time.Millisecond
+	r := NewRegistry(check)
+
+	// the run reads the clock in safeRun, then again holding the lock
+	r.entries[0].now = func() time.Time {
+		if calls.Add(1) == 2 {
+			close(inLock)
+			<-gate
+		}
+
+		return at
+	}
+
+	got := make(chan Response, 1)
+
+	go func() { got <- r.Evaluate(context.Background()) }()
+
+	<-inLock
+
+	// the request's goroutine waits on the lock only once its timer has fired
+	blockedGet := fmt.Sprintf("health.(*entry).get(%p", r.entries[0])
+	polltest.Until(t, "the request's timer fires", func() bool {
+		buf := make([]byte, 1<<20)
+
+		for stack := range strings.SplitSeq(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(stack, "sync.(*Mutex).Lock") && strings.Contains(stack, blockedGet) {
+				return true
+			}
+		}
+
+		return false
+	})
+	close(gate)
+
+	want := Response{Status: Pass, Checks: map[string][]Result{"test:value": {{
+		ObservedValue: 1,
+		Status:        Pass,
+		Time:          "2026-01-01T00:00:00Z",
+	}}}}
+
+	if diff := cmp.Diff(want, <-got); diff != "" {
+		t.Errorf("Evaluate() of a run ending at its timeout mismatch (-want +got):\n%s", diff)
 	}
 }

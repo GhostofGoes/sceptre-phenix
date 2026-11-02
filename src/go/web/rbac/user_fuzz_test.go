@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -28,8 +29,7 @@ func usernameModel(u string) bool {
 }
 
 // FuzzValidateUsername checks ValidateUsername against usernameModel, and
-// checks that each name it accepts is one URL path segment as it is, not a dot
-// segment, and a resource name pattern that matches only itself.
+// checks each name it accepts with usernameCheck.
 func FuzzValidateUsername(f *testing.F) {
 	for _, name := range []string{
 		"", "alice#tag", "alice?x", "a/b", "a%2Fb", ".", "..", ".alice", "-alice", "a*", "a[b]", `a\b`, "a b", "élan",
@@ -39,34 +39,47 @@ func FuzzValidateUsername(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, name string) {
-		err := ValidateUsername(name)
-
-		if want := usernameModel(name); (err == nil) != want {
-			t.Fatalf("ValidateUsername(%q) = %v, want accepted: %t", name, err, want)
-		}
-
-		if err != nil {
-			if !errors.Is(err, ErrInvalidUsername) {
-				t.Fatalf("ValidateUsername(%q) = %v, want an error that wraps %v", name, err, ErrInvalidUsername)
-			}
-
-			return
-		}
-
-		if got := url.PathEscape(name); got != name {
-			t.Fatalf("url.PathEscape(%q) = %q, want it unchanged", name, got)
-		}
-
-		if strings.HasPrefix(name, ".") || strings.ContainsAny(name, `*?[]\/!`) {
-			t.Fatalf("ValidateUsername(%q) accepted a dot segment or a pattern character", name)
-		}
-
-		if matched, err := filepath.Match(name, name); !matched || err != nil {
-			t.Fatalf("filepath.Match(%q, %q) = %t, %v, want true, nil", name, name, matched, err)
-		}
-
-		if matched, err := filepath.Match(name, name+"x"); matched || err != nil {
-			t.Fatalf("filepath.Match(%q, %q) = %t, %v, want false, nil", name, name+"x", matched, err)
+		if err := usernameCheck(name); err != nil {
+			t.Fatal(err)
 		}
 	})
+}
+
+// usernameCheck checks ValidateUsername(name) against usernameModel, and that
+// a name it accepts is one URL path segment as it is, not a dot segment, and a
+// resource name pattern that matches only itself.
+func usernameCheck(name string) error {
+	text := func(err error) string { return fmt.Sprint(err) }
+
+	err := ValidateUsername(name)
+
+	if want := usernameModel(name); (err == nil) != want {
+		return fmt.Errorf("ValidateUsername(%q) = %s, want accepted: %t", name, text(err), want)
+	}
+
+	if err != nil {
+		if !errors.Is(err, ErrInvalidUsername) {
+			return fmt.Errorf("ValidateUsername(%q) = %w, want an error that wraps %w", name, err, ErrInvalidUsername)
+		}
+
+		return nil
+	}
+
+	if got := url.PathEscape(name); got != name {
+		return fmt.Errorf("url.PathEscape(%q) = %q, want it unchanged", name, got)
+	}
+
+	if strings.HasPrefix(name, ".") || strings.ContainsAny(name, `*?[]\/!`) {
+		return fmt.Errorf("ValidateUsername(%q) accepted a dot segment or a pattern character", name)
+	}
+
+	if matched, err := filepath.Match(name, name); !matched || err != nil {
+		return fmt.Errorf("filepath.Match(%q, %q) = %t, %s, want true, nil", name, name, matched, text(err))
+	}
+
+	if matched, err := filepath.Match(name, name+"x"); matched || err != nil {
+		return fmt.Errorf("filepath.Match(%q, %q) = %t, %s, want false, nil", name, name+"x", matched, text(err))
+	}
+
+	return nil
 }

@@ -1,9 +1,12 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -484,4 +487,235 @@ func TestCompressResponsesChunkingProperties(t *testing.T) {
 			}
 		}
 	})
+}
+
+// compressCodesWriter records the status codes and body written to it, and
+// fails every write once failWrites is set.
+type compressCodesWriter struct {
+	header     http.Header
+	codes      []int
+	body       bytes.Buffer
+	failWrites bool
+}
+
+func (w *compressCodesWriter) Header() http.Header { return w.header }
+
+func (w *compressCodesWriter) WriteHeader(code int) { w.codes = append(w.codes, code) }
+
+func (w *compressCodesWriter) Write(b []byte) (int, error) {
+	if w.failWrites {
+		return 0, errCompressWriteFailed
+	}
+
+	return w.body.Write(b)
+}
+
+var errCompressWriteFailed = errors.New("client went away")
+
+// compressHijacker is a writer whose connection can be taken over.
+type compressHijacker struct {
+	*httptest.ResponseRecorder
+
+	conn net.Conn
+}
+
+func (h *compressHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+// The compressing writer hands over the underlying connection when the
+// underlying writer can, and says it cannot otherwise; Unwrap gives
+// [http.ResponseController] the underlying writer.
+func TestCompressWriterHijackAndUnwrap(t *testing.T) {
+	t.Parallel()
+
+	server, client := net.Pipe()
+	t.Cleanup(func() { server.Close(); client.Close() })
+
+	hijackable := &compressHijacker{ResponseRecorder: httptest.NewRecorder(), conn: server}
+	cw := &compressWriter{ResponseWriter: hijackable}
+
+	conn, rw, err := cw.Hijack()
+	if err != nil || conn != server || rw == nil {
+		t.Errorf("Hijack() of a hijackable writer = %v, %v, %v, want its connection", conn, rw, err)
+	}
+
+	if got := cw.Unwrap(); got != hijackable {
+		t.Errorf("Unwrap() = %v, want the underlying writer", got)
+	}
+
+	rec := httptest.NewRecorder()
+	plain := &compressWriter{ResponseWriter: rec}
+
+	if conn, rw, err := plain.Hijack(); !errors.Is(err, errNotHijacker) || conn != nil || rw != nil {
+		t.Errorf("Hijack() of a ResponseRecorder = %v, %v, %v, want %v", conn, rw, err, errNotHijacker)
+	}
+
+	if _, _, err := http.NewResponseController(plain).Hijack(); !errors.Is(err, errNotHijacker) {
+		t.Errorf("ResponseController.Hijack() of a ResponseRecorder error = %v, want %v", err, errNotHijacker)
+	}
+}
+
+// Informational statuses go out at once, before the real one is decided,
+// and a status written after the real one goes straight through.
+func TestCompressWriterStatusOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		write     func(w http.ResponseWriter)
+		wantCodes []int
+		wantGzip  bool
+	}{
+		"early hints before JSON": {
+			write: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusEarlyHints)
+				w.Header().Set("Content-Type", mimeJSON)
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, bigJSON)
+			},
+			wantCodes: []int{http.StatusEarlyHints, http.StatusOK},
+			wantGzip:  true,
+		},
+		"second status after the first": {
+			write: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.WriteHeader(http.StatusOK)
+				w.WriteHeader(http.StatusCreated)
+			},
+			wantCodes: []int{http.StatusOK, http.StatusCreated},
+		},
+		"held-back status sent at the end": {
+			write:     func(w http.ResponseWriter) { w.WriteHeader(http.StatusAccepted) },
+			wantCodes: []int{http.StatusAccepted},
+		},
+		"no content needs no type": {
+			write:     func(w http.ResponseWriter) { w.WriteHeader(http.StatusNoContent) },
+			wantCodes: []int{http.StatusNoContent},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			w := &compressCodesWriter{header: http.Header{}}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/vms", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+
+			CompressResponses(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { tc.write(w) })).ServeHTTP(w, req)
+
+			if diff := cmp.Diff(tc.wantCodes, w.codes); diff != "" {
+				t.Errorf("status codes written mismatch (-want +got):\n%s", diff)
+			}
+
+			if got := w.header.Get("Content-Encoding") == "gzip"; got != tc.wantGzip {
+				t.Errorf("gzipped = %t, want %t", got, tc.wantGzip)
+			}
+		})
+	}
+}
+
+// A write that fails to reach the client reports the failure to the handler,
+// whether the body was held back for sniffing or not.
+func TestCompressWriterReportsWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("x", sniffLen)
+
+	for name, contentType := range map[string]string{"sniffed": "", "typed": "application/octet-stream"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			w := &compressCodesWriter{header: http.Header{}, failWrites: true}
+			cw := &compressWriter{ResponseWriter: w}
+
+			if contentType != "" {
+				cw.Header().Set("Content-Type", contentType)
+			}
+
+			n, err := cw.Write([]byte(long))
+			if !errors.Is(err, errCompressWriteFailed) || n != 0 {
+				t.Errorf("Write(%d bytes) to a failing client = %d, %v, want 0, %v", len(long), n, err, errCompressWriteFailed)
+			}
+		})
+	}
+}
+
+func TestShouldCompress(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		code   int
+		header map[string]string
+		want   bool
+	}{
+		"json":                {http.StatusOK, map[string]string{"Content-Type": mimeJSON}, true},
+		"json with charset":   {http.StatusOK, map[string]string{"Content-Type": "application/json; charset=utf-8"}, true},
+		"yaml":                {http.StatusOK, map[string]string{"Content-Type": "text/yaml"}, true},
+		"error json":          {http.StatusNotFound, map[string]string{"Content-Type": mimeJSON}, true},
+		"html":                {http.StatusOK, map[string]string{"Content-Type": "text/html"}, false},
+		"no type":             {http.StatusOK, nil, false},
+		"malformed type":      {http.StatusOK, map[string]string{"Content-Type": "application/json; ="}, false},
+		"informational":       {http.StatusContinue, map[string]string{"Content-Type": mimeJSON}, false},
+		"no content":          {http.StatusNoContent, map[string]string{"Content-Type": mimeJSON}, false},
+		"partial content":     {http.StatusPartialContent, map[string]string{"Content-Type": mimeJSON}, false},
+		"not modified":        {http.StatusNotModified, map[string]string{"Content-Type": mimeJSON}, false},
+		"already encoded":     {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Encoding": "br"}, false},
+		"attachment":          {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Disposition": "attachment"}, false},
+		"inline":              {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Disposition": "inline"}, true},
+		"short length":        {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Length": "1023"}, false},
+		"length at threshold": {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Length": "1024"}, true},
+		"malformed length":    {http.StatusOK, map[string]string{"Content-Type": mimeJSON, "Content-Length": "many"}, true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			header := http.Header{}
+			for k, v := range tc.header {
+				header.Set(k, v)
+			}
+
+			if got := shouldCompress(tc.code, header); got != tc.want {
+				t.Errorf("shouldCompress(%d, %v) = %t, want %t", tc.code, tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsAttachment(t *testing.T) {
+	t.Parallel()
+
+	for disposition, want := range map[string]bool{
+		"":                               false,
+		"inline":                         false,
+		"attachment":                     true,
+		`attachment; filename="vms.txt"`: true,
+		`ATTACHMENT; filename=vms.txt`:   true,
+		"attachment; filename":           false,
+		"form-data; name=file":           false,
+	} {
+		header := http.Header{}
+		if disposition != "" {
+			header.Set("Content-Disposition", disposition)
+		}
+
+		if got := isAttachment(header); got != want {
+			t.Errorf("isAttachment(Content-Disposition %q) = %t, want %t", disposition, got, want)
+		}
+	}
+}
+
+func TestBodyAllowed(t *testing.T) {
+	t.Parallel()
+
+	for code, want := range map[int]bool{
+		http.StatusOK: true, http.StatusCreated: true, http.StatusNotFound: true,
+		http.StatusNoContent: false, http.StatusNotModified: false,
+	} {
+		if got := bodyAllowed(code); got != want {
+			t.Errorf("bodyAllowed(%d) = %t, want %t", code, got, want)
+		}
+	}
 }

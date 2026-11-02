@@ -285,6 +285,170 @@ func TestGroupForget(t *testing.T) {
 	}
 }
 
+// Every caller that joins a run gets the run's error, and the next call runs on its own.
+func TestGroupSharesTheRunError(t *testing.T) {
+	t.Parallel()
+
+	var (
+		group   Group[int]
+		boom    = errors.New("boom")
+		entered = make(chan struct{})
+		release = make(chan struct{})
+		errs    = make(chan error, 2)
+	)
+
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	go func() {
+		_, err := group.Do(context.Background(), "k", func(context.Context, func()) (int, error) {
+			close(entered)
+			<-release
+
+			return 5, boom
+		})
+		errs <- err
+	}()
+
+	<-entered
+
+	go func() {
+		_, err := group.Do(context.Background(), "k", func(context.Context, func()) (int, error) { return 7, nil })
+		errs <- err
+	}()
+
+	polltest.Until(t, "the second caller joins the run", func() bool { return group.Waiting("k") == 2 })
+	unblock()
+
+	for range 2 {
+		if err := <-errs; !errors.Is(err, boom) {
+			t.Errorf("Do(k) error of a caller of the failed run = %v, want %v", err, boom)
+		}
+	}
+
+	if got := value(group.Do(context.Background(), "k", func(context.Context, func()) (int, error) { return 3, nil })); got != 3 {
+		t.Errorf("Do(k) after the failed run = %d, want its own result 3", got)
+	}
+}
+
+// When the caller that started a run leaves, the run goes on for a caller still waiting, which gets its result.
+func TestGroupKeepsARunSomeoneWaitsFor(t *testing.T) {
+	t.Parallel()
+
+	var (
+		group      Group[int]
+		running    = make(chan context.Context, 1)
+		release    = make(chan struct{})
+		leaderDone = make(chan int, 1)
+		joinedDone = make(chan int, 1)
+
+		leaderCtx, cancelLeader = context.WithCancel(context.Background())
+	)
+
+	t.Cleanup(cancelLeader)
+
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	go func() {
+		leaderDone <- value(group.Do(leaderCtx, "k", func(ctx context.Context, _ func()) (int, error) {
+			running <- ctx
+			<-release
+
+			return 1, ctx.Err()
+		}))
+	}()
+
+	runCtx := <-running
+
+	go func() {
+		joinedDone <- value(group.Do(context.Background(), "k", func(context.Context, func()) (int, error) { return 2, nil }))
+	}()
+
+	polltest.Until(t, "the second caller joins the run", func() bool { return group.Waiting("k") == 2 })
+	cancelLeader()
+	polltest.Until(t, "the leader leaves", func() bool { return group.Waiting("k") == 1 })
+
+	if err := runCtx.Err(); err != nil {
+		t.Errorf("run context error while a caller waits = %v, want nil", err)
+	}
+
+	unblock()
+
+	if got := <-joinedDone; got != 1 {
+		t.Errorf("Do(k) of the caller still waiting = %d, want the run's 1", got)
+	}
+
+	if got := <-leaderDone; got != 1 {
+		t.Errorf("Do(k) of the leader = %d, want its run's 1", got)
+	}
+}
+
+// Waiting is 0 and Forget does nothing for a key with no run, also on a zero Group, and after a run is over.
+func TestGroupWithoutARun(t *testing.T) {
+	t.Parallel()
+
+	var group Group[string]
+
+	group.Forget("k")
+
+	if got := group.Waiting("k"); got != 0 {
+		t.Errorf("Waiting(k) of a zero Group = %d, want 0", got)
+	}
+
+	got := value(group.Do(context.Background(), "k", func(context.Context, func()) (string, error) { return "a", nil }))
+	if got != "a" {
+		t.Errorf("Do(k) = %q, want %q", got, "a")
+	}
+
+	if got := group.Waiting("k"); got != 0 {
+		t.Errorf("Waiting(k) after the run = %d, want 0", got)
+	}
+
+	if got := group.Waiting("other"); got != 0 {
+		t.Errorf("Waiting(other) = %d, want 0", got)
+	}
+}
+
+// Concurrent calls for many keys each get the result of a run for their own key.
+func TestGroupKeepsKeysApart(t *testing.T) {
+	t.Parallel()
+
+	const keys, callersPerKey = 8, 4
+
+	var (
+		group Group[string]
+		wg    sync.WaitGroup
+		got   = make([][]string, keys)
+	)
+
+	for k := range keys {
+		got[k] = make([]string, callersPerKey)
+
+		for c := range callersPerKey {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				key := fmt.Sprintf("k%d", k)
+				got[k][c] = value(group.Do(context.Background(), key, func(context.Context, func()) (string, error) {
+					return key, nil
+				}))
+			}()
+		}
+	}
+
+	wg.Wait()
+
+	for k := range keys {
+		want := fmt.Sprintf("k%d", k)
+		if diff := cmp.Diff([]string{want, want, want, want}, got[k]); diff != "" {
+			t.Errorf("Do(%s) results mismatch (-want +got):\n%s", want, diff)
+		}
+	}
+}
+
 // value returns a Group result, panicking (which fails the test, even
 // from another goroutine) if the run aborted.
 func value[T any](val T, err error) T { //nolint:ireturn // T is concrete at each use

@@ -16,6 +16,7 @@ import (
 	"phenix/store"
 	"phenix/store/storetest"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
 	v1 "phenix/types/version/v1"
 	v2 "phenix/types/version/v2"
 )
@@ -271,17 +272,128 @@ func TestSummarizeStoppedAndUnconfigured(t *testing.T) {
 func TestSummarizeReportsUndecodableResults(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]map[string]any{
-		"hosts":   {"hosts": "nope"},
-		"history": {"hosts": []any{}, "history": "nope"},
+	tests := map[string]any{
+		"hosts":       map[string]any{"hosts": "nope"},
+		"history":     map[string]any{"hosts": []any{}, "history": "nope"},
+		"soh status":  "nope",
+		"nil status":  nil,
+		"list status": []any{map[string]any{"hosts": []any{}}},
 	}
 
 	for name, status := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := Summarize(summaryExperiment(status), nil, 10); err == nil {
+			exp := summaryExperiment(nil)
+			exp.Status.(*v1.ExperimentStatus).AppsF["soh"] = status
+
+			if _, err := Summarize(exp, nil, 10); err == nil {
 				t.Errorf("Summarize(exp with soh status %v, nil, 10) error = nil, want an error", status)
+			}
+		})
+	}
+}
+
+// A running experiment whose soh app has not written a status yet has no results, and is not initialized.
+func TestSummarizeWithoutSOHStatus(t *testing.T) {
+	t.Parallel()
+
+	exp := summaryExperiment(nil)
+	delete(exp.Status.(*v1.ExperimentStatus).AppsF, "soh")
+
+	sum, err := Summarize(exp, nil, 10)
+	if err != nil {
+		t.Fatalf("Summarize(exp without soh status, nil, 10) error = %v", err)
+	}
+
+	want := Summary{
+		Name: "exp", Scenario: "soh-full", Running: true, Configured: true, ExpStarted: true,
+		VMs: VMCounts{Total: 7}, DownVMs: []string{}, History: []RunSummary{}, FailingChecks: []FailingCheck{},
+	}
+	if diff := cmp.Diff(want, sum); diff != "" {
+		t.Errorf("Summarize(exp without soh status, nil, 10) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A run duration the app status holds as a whole number, as a status written in this process does, is read as is;
+// a duration of any other type is left out.
+func TestSummarizeReadsRunDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		duration any
+		want     float64
+	}{
+		"float":  {duration: 2.5, want: 2.5},
+		"int":    {duration: 3, want: 3},
+		"string": {duration: "4", want: 0},
+		"nil":    {duration: nil, want: 0},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			status := map[string]any{"lastRun": "2026-09-28T14:03:40Z", "lastRunDuration": tc.duration}
+
+			sum, err := Summarize(summaryExperiment(status), nil, 10)
+			if err != nil {
+				t.Fatalf("Summarize(exp with lastRunDuration %v, nil, 10) error = %v", tc.duration, err)
+			}
+
+			if sum.LastRunDuration != tc.want || sum.LastRun != "2026-09-28T14:03:40Z" {
+				t.Errorf("Summarize(exp with lastRunDuration %v, nil, 10) LastRun, LastRunDuration = %q, %v; want %q, %v",
+					tc.duration, sum.LastRun, sum.LastRunDuration, "2026-09-28T14:03:40Z", tc.want)
+			}
+		})
+	}
+}
+
+// summaryNoTopology is an experiment spec without any topology, not even an empty one.
+type summaryNoTopology struct {
+	*v1.ExperimentSpec
+}
+
+func (summaryNoTopology) Topology() ifaces.TopologySpec { //nolint:ireturn // the spec's interface
+	return nil
+}
+
+// An experiment with an empty topology or none counts no VMs, even while minimega reports some.
+func TestSummarizeWithoutTopology(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		spec func(*v1.ExperimentSpec) ifaces.ExperimentSpec
+		want VMCounts
+	}{
+		"empty topology": {
+			spec: func(s *v1.ExperimentSpec) ifaces.ExperimentSpec { s.TopologyF = nil; return s },
+			want: VMCounts{Known: true},
+		},
+		"no topology": {
+			spec: func(s *v1.ExperimentSpec) ifaces.ExperimentSpec { return summaryNoTopology{s} },
+			want: VMCounts{},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			exp := summaryExperiment(map[string]any{})
+			exp.Spec = tc.spec(exp.Spec.(*v1.ExperimentSpec))
+
+			sum, err := Summarize(exp, map[string]string{"hmi": "RUNNING"}, 10)
+			if err != nil {
+				t.Fatalf("Summarize(exp, {hmi: RUNNING}, 10) error = %v", err)
+			}
+
+			if diff := cmp.Diff(tc.want, sum.VMs); diff != "" {
+				t.Errorf("Summarize(exp, {hmi: RUNNING}, 10).VMs mismatch (-want +got):\n%s", diff)
+			}
+
+			if len(sum.DownVMs) != 0 {
+				t.Errorf("Summarize(exp, {hmi: RUNNING}, 10).DownVMs = %q, want empty", sum.DownVMs)
 			}
 		})
 	}
@@ -366,8 +478,8 @@ func useStoredExperiment(t *testing.T, exp *types.Experiment) {
 	}
 }
 
-// asStored returns v as it reads back from the store, which keeps JSON.
-func asStored(t *testing.T, v any) any {
+// asStored returns v as it reads back from the store, which keeps JSON. It takes a test or a rapid check.
+func asStored(t rapid.TB, v any) any {
 	t.Helper()
 
 	body, err := json.Marshal(v)
@@ -505,21 +617,6 @@ func TestWriteRunFinishedRecordsTheRunForTheSummary(t *testing.T) { //nolint:par
 	}
 }
 
-// summaryStoredAs returns v as it reads back from the store, which keeps JSON.
-func summaryStoredAs(t *rapid.T, v any) any {
-	body, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("json.Marshal(%v) error = %v", v, err)
-	}
-
-	var decoded any
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(%s) error = %v", body, err)
-	}
-
-	return decoded
-}
-
 // genSummaryRun draws the summary of a finished run.
 func genSummaryRun() *rapid.Generator[RunSummary] {
 	return rapid.Custom(func(t *rapid.T) RunSummary {
@@ -550,7 +647,7 @@ func TestRunHistoryProperties(t *testing.T) {
 				t.Fatalf("appendRunHistory(%v, %+v) error = %v", history, run, err)
 			}
 
-			history = summaryStoredAs(t, appended)
+			history = asStored(t, appended)
 		}
 
 		sum, err := Summarize(summaryExperiment(map[string]any{"history": history}), nil, 0)
@@ -613,7 +710,7 @@ func TestSummarizeProperties(t *testing.T) {
 		).Draw(t, "vm states")
 		maxFailing := rapid.IntRange(0, 6).Draw(t, "max failing")
 
-		exp := summaryExperiment(map[string]any{"hosts": summaryStoredAs(t, hosts)})
+		exp := summaryExperiment(map[string]any{"hosts": asStored(t, hosts)})
 
 		capped, err := Summarize(exp, vmStates, maxFailing)
 		if err != nil {

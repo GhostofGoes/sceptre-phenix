@@ -3,14 +3,18 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 
 	"phenix/app"
+	"phenix/types"
 	"phenix/util/mm"
 )
 
@@ -170,5 +174,158 @@ func TestUserAppRunAloneReadsRuntime(t *testing.T) {
 
 	if diff := cmp.Diff(wantRuntime, readGiven(t, out, name)); diff != "" {
 		t.Errorf("runtime given to %s mismatch (-want +got):\n%s", name, diff)
+	}
+}
+
+// runtimeMM is a minimega whose host query fails with hostErr, counting the
+// queries made.
+type runtimeMM struct {
+	countingMM
+
+	hostErr error
+}
+
+func (m *runtimeMM) GetClusterHosts(schedOnly bool) (mm.Hosts, error) {
+	if m.hostErr != nil {
+		m.hostCalls.Add(1)
+
+		return nil, m.hostErr
+	}
+
+	return m.countingMM.GetClusterHosts(schedOnly)
+}
+
+// runtimeUseMM installs m as mm.DefaultMM for the test.
+func runtimeUseMM(t *testing.T, m mm.MM) {
+	t.Helper()
+
+	saved := mm.DefaultMM
+	mm.DefaultMM = m //nolint:reassign // install test double
+
+	t.Cleanup(func() { mm.DefaultMM = saved }) //nolint:reassign // restore test double
+}
+
+// runtimeOf returns the hosts and VMs of exp by name.
+func runtimeOf(exp *types.Experiment) givenRuntime {
+	got := givenRuntime{}
+
+	for _, h := range exp.Hosts {
+		got.Hosts = append(got.Hosts, named{Name: h.Name})
+	}
+
+	for _, v := range exp.VMs {
+		got.VMs = append(got.VMs, named{Name: v.Name})
+	}
+
+	return got
+}
+
+// PopulateRuntime and populateStageRuntime give an experiment minimega's
+// hosts and VMs, or the host query's error with the experiment unchanged.
+//
+//nolint:paralleltest // replaces mm.DefaultMM
+func TestPopulateRuntime(t *testing.T) {
+	hostErr := errors.New("minimega is down")
+
+	populate := map[string]func(*types.Experiment) error{
+		"PopulateRuntime": app.PopulateRuntime,
+		"populateStageRuntime outside a stage": func(exp *types.Experiment) error {
+			return app.PopulateStageRuntime(context.Background(), exp)
+		},
+		"populateStageRuntime in a stage": func(exp *types.Experiment) error {
+			return app.PopulateStageRuntime(app.WithStageRuntime(context.Background()), exp)
+		},
+	}
+
+	tests := map[string]struct {
+		hostErr error
+		want    givenRuntime
+	}{
+		"minimega answers":     {want: wantRuntime},
+		"the host query fails": {hostErr: hostErr},
+	}
+
+	for fn, call := range populate {
+		for name, tc := range tests {
+			t.Run(fn+"/"+name, func(t *testing.T) {
+				fake := &runtimeMM{hostErr: tc.hostErr}
+				runtimeUseMM(t, fake)
+
+				exp := runningStageExperiment(t)
+
+				err := call(exp)
+				if !errors.Is(err, tc.hostErr) || (tc.hostErr == nil) != (err == nil) {
+					t.Fatalf("%s() error = %v, want %v", fn, err, tc.hostErr)
+				}
+
+				if err != nil && !strings.Contains(err.Error(), "getting cluster hosts") {
+					t.Errorf("%s() error = %q, want it to tell of the cluster hosts", fn, err)
+				}
+
+				if diff := cmp.Diff(tc.want, runtimeOf(exp)); diff != "" {
+					t.Errorf("%s() runtime mismatch (-want +got):\n%s", fn, diff)
+				}
+
+				// the VM query runs only once the hosts are read
+				if got, want := fake.vmCalls.Load(), map[bool]int32{true: 1, false: 0}[tc.hostErr == nil]; got != want {
+					t.Errorf("%s() made %d VM queries, want %d", fn, got, want)
+				}
+			})
+		}
+	}
+}
+
+// The apps of one stage, run at once, share one reading of the runtime; a
+// failed reading is not kept, so the next app reads again.
+//
+//nolint:paralleltest // replaces mm.DefaultMM
+func TestPopulateStageRuntimeReadsOnce(t *testing.T) {
+	fake := &runtimeMM{hostErr: errors.New("minimega is down")}
+	runtimeUseMM(t, fake)
+
+	ctx := app.WithStageRuntime(context.Background())
+
+	if err := app.PopulateStageRuntime(ctx, runningStageExperiment(t)); err == nil {
+		t.Fatal("populateStageRuntime() with the host query failing error = nil, want an error")
+	}
+
+	fake.hostErr = nil
+
+	const apps = 8
+
+	exps := make([]*types.Experiment, apps)
+	for i := range exps {
+		exps[i] = runningStageExperiment(t)
+	}
+
+	var wg sync.WaitGroup
+
+	errs := make([]error, apps)
+
+	for i := range apps {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			errs[i] = app.PopulateStageRuntime(ctx, exps[i])
+		}()
+	}
+
+	wg.Wait()
+
+	for i := range apps {
+		if errs[i] != nil {
+			t.Fatalf("populateStageRuntime() app %d error = %v", i, errs[i])
+		}
+
+		if diff := cmp.Diff(wantRuntime, runtimeOf(exps[i])); diff != "" {
+			t.Errorf("populateStageRuntime() app %d runtime mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+
+	// one failed host query, then one reading for every app
+	if hosts, vms := fake.hostCalls.Load(), fake.vmCalls.Load(); hosts != 2 || vms != 1 {
+		t.Errorf("populateStageRuntime() for %d apps made %d host and %d VM queries, want 2 and 1", apps, hosts, vms)
 	}
 }

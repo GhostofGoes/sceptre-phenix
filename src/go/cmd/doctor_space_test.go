@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ func TestDoctorDiskSpace(t *testing.T) {
 		logfile   bool
 		leftovers *doctorLeftovers
 		statfsErr error
+		failDir   string // the only directory statfsErr is for, or every one when empty
 		want      func(dir, log string) []doctorCheck
 	}{
 		"enough space on one filesystem": {
@@ -73,6 +75,18 @@ func TestDoctorDiskSpace(t *testing.T) {
 				}
 			},
 		},
+		"cannot measure the base": {
+			devices:   map[string]health.DiskStat{"files": {Device: 1, Total: 100 * gib, Avail: 50 * gib}},
+			statfsErr: errors.New("statfs: permission denied"), failDir: "minimega",
+			want: func(dir, _ string) []doctorCheck {
+				return []doctorCheck{
+					row("disk-space files", doctorPass, filepath.Join(dir, "files")+" (the images directory): 50.0 GiB free "+
+						"of 100.0 GiB (50.0%). Minimega's -base "+filepath.Join(dir, "minimega")+" is not measured: statfs: "+
+						"permission denied"),
+					row(diskSpaceInjectRow, doctorPass, "no dstImg* directories in "+filepath.Join(dir, "minimega")),
+				}
+			},
+		},
 		"cannot measure": {
 			statfsErr: errors.New("statfs: permission denied"),
 			want: func(dir, _ string) []doctorCheck {
@@ -102,7 +116,7 @@ func TestDoctorDiskSpace(t *testing.T) {
 
 			in.found = &doctorFound{minimegaUp: true, minimegaArgs: args, leftovers: tc.leftovers}
 			in.statfs = func(path string) (health.DiskStat, error) {
-				if tc.statfsErr != nil {
+				if tc.statfsErr != nil && (tc.failDir == "" || tc.failDir == filepath.Base(path)) {
 					return health.DiskStat{}, tc.statfsErr
 				}
 
@@ -183,6 +197,17 @@ func TestDoctorInjectDirs(t *testing.T) {
 		t.Errorf("injectDirsCheck() mismatch (-want +got):\n%s", diff)
 	}
 
+	readDir := in.env.readDir
+	in.env.readDir = func(path string) ([]os.DirEntry, error) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+	}
+
+	if diff := cmp.Diff(row(diskSpaceInjectRow, doctorSkip, "not checked, because this user cannot list "+base+
+		": permission denied"), injectDirsCheck(in, base)); diff != "" {
+		t.Errorf("injectDirsCheck() of a directory it cannot list mismatch (-want +got):\n%s", diff)
+	}
+
+	in.env.readDir = readDir
 	missing := filepath.Join(base, "missing")
 	if diff := cmp.Diff(row(diskSpaceInjectRow, doctorSkip, "not checked, because "+missing+" does not exist"),
 		injectDirsCheck(in, missing)); diff != "" {
@@ -224,6 +249,59 @@ func TestDoctorDiskSpaceHint(t *testing.T) {
 
 			if got := diskSpaceHint(tc.check); got != tc.want {
 				t.Errorf("diskSpaceHint() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A filesystem has too little free space below the larger of 10% and 5 GiB, and as much as that is enough.
+func TestDiskSpaceRowThreshold(t *testing.T) {
+	t.Parallel()
+
+	const gib = 1 << 30
+
+	tests := map[string]struct {
+		stat health.DiskStat
+		want doctorCheck
+	}{
+		"10% free": {
+			stat: health.DiskStat{Device: 1, Total: 100 * gib, Avail: 10 * gib},
+			want: row("disk-space files", doctorPass, "/f (the images directory): 10.0 GiB free of 100.0 GiB (10.0%)"),
+		},
+		"less than 10%": {
+			stat: health.DiskStat{Device: 1, Total: 100 * gib, Avail: 9 * gib},
+			want: row("disk-space files", doctorWarn, "/f (the images directory): 9.0 GiB free of 100.0 GiB (9.0%), "+
+				"which is less than 10.0 GiB"),
+		},
+		"5 GiB free": {
+			stat: health.DiskStat{Device: 1, Total: 20 * gib, Avail: 5 * gib},
+			want: row("disk-space files", doctorPass, "/f (the images directory): 5.0 GiB free of 20.0 GiB (25.0%)"),
+		},
+		"less than 5 GiB": {
+			stat: health.DiskStat{Device: 1, Total: 20 * gib, Avail: 5*gib - 1},
+			want: row("disk-space files", doctorWarn, "/f (the images directory): 5.0 GiB free of 20.0 GiB (25.0%), "+
+				"which is less than 5.0 GiB"),
+		},
+		"no size": {
+			stat: health.DiskStat{Device: 1},
+			want: row("disk-space files", doctorWarn, "/f (the images directory): 0 B free of 0 B (0.0%), "+
+				"which is less than 5.0 GiB"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), nil)
+			in.found = &doctorFound{leftovers: &doctorLeftovers{}}
+
+			f := &diskSpaceFS{stat: tc.stat, places: []diskSpacePlace{
+				{row: "disk-space files", path: "/f", label: "the images directory", dir: "/f"},
+			}}
+
+			if diff := cmp.Diff(tc.want, in.diskSpaceRow(f, false)); diff != "" {
+				t.Errorf("diskSpaceRow() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

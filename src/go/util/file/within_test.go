@@ -20,16 +20,36 @@ func TestWithinDir(t *testing.T) {
 		{dir: "/f/", path: "/f/win/10/a.qc2", want: true},
 		{dir: "/f", path: "/f/win/../a.qc2", want: true},
 		{dir: "/f", path: "/f/..a.qc2", want: true},
+		{dir: "/f", path: "/f/./a.qc2", want: true},
+		{dir: "/f//g", path: "/f/g/a.qc2", want: true},
+		{dir: "/", path: "/a.qc2", want: true},
+		{dir: "/", path: "/../a.qc2", want: true},
 		{dir: "/f", path: "/f/../a.qc2", want: false},
 		{dir: "/f", path: "/f/win/../../a.qc2", want: false},
 		{dir: "/f", path: "/f-other/a.qc2", want: false},
+		{dir: "/f/g", path: "/f", want: false},
 		{dir: "/f", path: "/", want: false},
 		{dir: "/f", path: "a.qc2", want: false},
 		{dir: "f", path: "/f/a.qc2", want: false},
+		{dir: "f", path: "f/a.qc2", want: true},
+		{dir: "f", path: "./f", want: true},
+		{dir: "f", path: "g", want: false},
+		{dir: "f", path: "f/../g", want: false},
+		{dir: ".", path: "a.qc2", want: true},
+		{dir: "", path: "a.qc2", want: true},
+		{dir: ".", path: "../a.qc2", want: false},
+		{dir: "..", path: "../a.qc2", want: true},
+		{dir: "..", path: "a.qc2", want: false}, // filepath.Rel fails
+		{dir: "../f", path: "../g", want: false},
+		{dir: "", path: "", want: true},
 	} {
-		if got := WithinDir(tc.dir, tc.path); got != tc.want {
-			t.Errorf("WithinDir(%q, %q) = %t, want %t", tc.dir, tc.path, got, tc.want)
-		}
+		t.Run(tc.dir+" "+tc.path, func(t *testing.T) {
+			t.Parallel()
+
+			if got := WithinDir(tc.dir, tc.path); got != tc.want {
+				t.Errorf("WithinDir(%q, %q) = %t, want %t", tc.dir, tc.path, got, tc.want)
+			}
+		})
 	}
 }
 

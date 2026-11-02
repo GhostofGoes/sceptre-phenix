@@ -35,6 +35,11 @@ func TestQemuImgCheck(t *testing.T) {
 
 	version := func(context.Context, string) (string, error) { return "qemu-img version 8.2.2", nil }
 	broken := func(context.Context, string) (string, error) { return "", errors.New("exit status 1") }
+	hangs := func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+
+		return "", ctx.Err()
+	}
 	found := lookPathIn(map[string]string{"qemu-img": "/usr/bin/qemu-img"})
 
 	tests := map[string]struct {
@@ -52,13 +57,18 @@ func TestQemuImgCheck(t *testing.T) {
 			want: row("", doctorFail,
 				"running /usr/bin/qemu-img --version: exit status 1 (phenix commits VMs to disk images with it)"),
 		},
+		"hangs": {
+			lookPath: found, version: hangs,
+			want: row("", doctorFail, "running /usr/bin/qemu-img --version: context deadline exceeded "+
+				"(phenix commits VMs to disk images with it)"),
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got := qemuImgCheck(t.Context(), time.Second, tc.lookPath, tc.version)
+			got := qemuImgCheck(t.Context(), 50*time.Millisecond, tc.lookPath, tc.version)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("qemuImgCheck() mismatch (-want +got):\n%s", diff)
 			}
@@ -176,6 +186,13 @@ func TestDiskChecks(t *testing.T) {
 			settings: map[string]string{"store.endpoint": "bolt://" + filepath.Join(dir, "missing", "store.bdb")},
 			avail:    map[string]uint64{filepath.Join(dir, "phenix"): 1},
 			want:     []doctorCheck{row("disk phenix-base", doctorFail, "99.0% used, "+filepath.Join(dir, "phenix")+": 1 bytes free")},
+		},
+		"cannot measure": {
+			avail: map[string]uint64{},
+			want: []doctorCheck{
+				row("disk phenix-base", doctorWarn, "measuring "+filepath.Join(dir, "phenix")+": no such filesystem"),
+				row("disk store", doctorWarn, "measuring "+dir+": no such filesystem"),
+			},
 		},
 		"nothing to measure": {
 			settings: map[string]string{"base-dir.phenix": filepath.Join(dir, "missing"), "store.endpoint": "bolt://"},
@@ -422,6 +439,54 @@ func TestMinimegaLogCheck(t *testing.T) {
 			env := fakeDoctorEnv(tc.vars, false)
 			if diff := cmp.Diff(tc.want, env.minimegaLogCheck(tc.path, tc.minimegaLog)); diff != "" {
 				t.Errorf("minimegaLogCheck(%q, %q) mismatch (-want +got):\n%s", tc.path, tc.minimegaLog, diff)
+			}
+		})
+	}
+}
+
+// A relative path is named with the working directory it is relative to.
+func TestRelativeToCwd(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"/opt/phenix/webshark": "/opt/phenix/webshark",
+		"downloads/tunneler":   "downloads/tunneler (under /home/alice)",
+		".":                    ". (under /home/alice)",
+		"":                     " (under /home/alice)",
+	}
+
+	for path, want := range tests {
+		if got := relativeToCwd(path, "/home/alice"); got != want {
+			t.Errorf("relativeToCwd(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// The ui.features hint fixes unknown names first, and otherwise keeps only vm-mount.
+func TestFeaturesHint(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		check doctorCheck
+		want  string
+	}{
+		"unknown": {
+			check: row("", doctorWarn, `unknown feature "vmmount". webshark is set by hand without a WebShark build`),
+			want:  "remove or fix the unknown features (phenix ui knows vm-mount, webshark, tunneler-download, file-server)",
+		},
+		"set by hand": {
+			check: row("", doctorFail, "webshark is set by hand without a WebShark build"),
+			want: "keep only vm-mount in ui.features, because phenix ui enables webshark, tunneler-download, " +
+				"file-server by itself when it finds what each needs",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := featuresHint(tc.check); got != tc.want {
+				t.Errorf("featuresHint() = %q, want %q", got, tc.want)
 			}
 		})
 	}

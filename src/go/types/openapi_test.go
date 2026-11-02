@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gopkg.in/yaml.v3"
 
 	"phenix/util/mm"
@@ -188,4 +190,69 @@ func undocumentedProperties(path string, value any) []string {
 	}
 
 	return problems
+}
+
+// The checks above report what they look for, so a schema they pass is
+// documented rather than unread.
+func TestOpenAPIUndocumentedProperties(t *testing.T) {
+	t.Parallel()
+
+	doc := `
+components:
+  schemas:
+    Thing:
+      properties:
+        good:
+          title: Good
+          description: Fully documented.
+          type: string
+          example: x
+        bare:
+          type: integer
+        notSchema: 3
+        list:
+          title: List
+          description: Items.
+          type: array
+          items:
+            properties:
+              inner:
+                title: Inner
+                description: No example.
+                type: boolean
+`
+
+	var raw any
+	if err := yaml.Unmarshal([]byte(doc), &raw); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	want := []string{
+		"#/components/schemas/Thing.bare has no title",
+		"#/components/schemas/Thing.bare has no description",
+		"#/components/schemas/Thing.bare has no example, default, or enum",
+		"#/components/schemas/Thing.notSchema is not a schema object",
+		"#/components/schemas/Thing.list/items.inner has no example, default, or enum",
+	}
+
+	got := undocumentedProperties("#", raw)
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("undocumentedProperties() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAPIMissingJSONFields(t *testing.T) {
+	t.Parallel()
+
+	type model struct {
+		Named   string `json:"named,omitempty"`
+		Plain   int
+		Present bool `json:"present"`
+	}
+
+	schema := &openapi3.Schema{Properties: openapi3.Schemas{"present": nil, "extra": nil}}
+
+	if diff := cmp.Diff([]string{"named", "Plain"}, missingJSONFields(schema, reflect.TypeFor[model]())); diff != "" {
+		t.Errorf("missingJSONFields() mismatch (-want +got):\n%s", diff)
+	}
 }

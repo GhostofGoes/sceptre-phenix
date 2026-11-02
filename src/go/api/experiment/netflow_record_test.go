@@ -326,21 +326,53 @@ func TestNetflowCaptures(t *testing.T) {
 	}
 }
 
-// An experiment with no capture directory has no captures; an unknown one is
-// an error.
+// An experiment with no capture directory has no captures; an unknown or unnamed one, or a capture directory phenix
+// cannot read, is an error.
 //
 //nolint:paralleltest // replaces the store and the experiment files directory
 func TestNetflowCapturesEmptyAndUnknown(t *testing.T) {
-	useNetflows(t, "a")
-	useNetflowBase(t)
-
-	got, err := NetflowCaptures("a")
-	if err != nil || got == nil || len(got) != 0 {
-		t.Errorf("NetflowCaptures(a) with no directory = %#v, %v; want an empty list", got, err)
+	tests := []struct {
+		name     string
+		exp      string
+		notDir   bool   // a file where the capture directory belongs
+		wantErr  error  // nil for none
+		wantText string // part of the error
+	}{
+		{name: "no capture directory", exp: "a"},
+		{name: "an unknown experiment", exp: "missing", wantErr: ErrExperimentNotFound},
+		{name: "no experiment named", exp: "", wantText: "no experiment name provided"},
+		{name: "a file for a capture directory", exp: "a", notDir: true, wantText: "listing netflow captures"},
 	}
 
-	if _, err := NetflowCaptures("missing"); !errors.Is(err, ErrExperimentNotFound) {
-		t.Errorf("NetflowCaptures(missing) error = %v, want %v", err, ErrExperimentNotFound)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useNetflows(t, "a")
+			dir := useNetflowBase(t)
+
+			if tc.notDir {
+				writeCaptureFiles(t, filepath.Dir(dir), map[string]string{"netflow": "not a directory"})
+			}
+
+			got, err := NetflowCaptures(tc.exp)
+
+			if tc.wantErr == nil && tc.wantText == "" {
+				if err != nil || got == nil || len(got) != 0 {
+					t.Errorf("NetflowCaptures(%s) = %#v, %v; want an empty list", tc.exp, got, err)
+				}
+
+				return
+			}
+
+			if got != nil || err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) ||
+				!strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("NetflowCaptures(%q) = %#v, %v; want nil and an error matching %v, containing %q",
+					tc.exp, got, err, tc.wantErr, tc.wantText)
+			}
+
+			if tc.wantErr == nil && errors.Is(err, ErrExperimentNotFound) {
+				t.Errorf("NetflowCaptures(%q) error = %v, want it not to match %v", tc.exp, err, ErrExperimentNotFound)
+			}
+		})
 	}
 }
 
@@ -352,6 +384,10 @@ func TestOpenNetflowCapture(t *testing.T) {
 	dir := useNetflowBase(t)
 
 	writeCaptureFiles(t, dir, map[string]string{netflowTestID + ".txt": "line\n", "other.txt": "secret\n"})
+
+	if err := os.Mkdir(filepath.Join(dir, "20260102T000000.000Z.txt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.Symlink(filepath.Join(dir, "other.txt"), filepath.Join(dir, "20260101T000000.000Z.txt")); err != nil {
 		t.Fatal(err)
@@ -367,6 +403,7 @@ func TestOpenNetflowCapture(t *testing.T) {
 		{exp: "a", id: "20991231T000000.000Z", want: ErrNetflowCaptureNotFound},
 		{exp: "a", id: "20260101T000000.000Z", want: ErrNetflowCaptureNotFound},
 		{exp: "missing", id: netflowTestID, want: ErrExperimentNotFound},
+		{exp: "a", id: "20260102T000000.000Z", want: ErrNetflowCaptureNotFound}, // a directory
 	} {
 		f, _, err := OpenNetflowCapture(tc.exp, tc.id)
 		if f != nil {
@@ -584,5 +621,281 @@ func TestNetflowStreamsWhenRecordingFails(t *testing.T) {
 
 	if body, _ := os.ReadFile(dir); string(body) != "not a directory" {
 		t.Errorf("file in the capture directory's place = %q, want it unchanged", body)
+	}
+}
+
+func TestNetflowDir(t *testing.T) {
+	t.Parallel()
+
+	for filesDir, want := range map[string]string{
+		"/phenix/images/a/files": "/phenix/images/a/files/netflow", "/phenix/images/a/files/": "/phenix/images/a/files/netflow",
+		"": "netflow",
+	} {
+		if got := netflowDir(filesDir); got != want {
+			t.Errorf("netflowDir(%q) = %q, want %q", filesDir, got, want)
+		}
+	}
+}
+
+// A recorder that cannot make its directory or write its metadata leaves no capture and no live recorder.
+//
+//nolint:paralleltest // reads the netflow recorder registry
+func TestNewNetflowRecorderFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		now   time.Time
+		setup func(t *testing.T, dir string)
+		want  string
+	}{
+		{
+			name: "a file where the directory belongs",
+			now:  netflowTestStart,
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				writeCaptureFiles(t, filepath.Dir(dir), map[string]string{filepath.Base(dir): "not a directory"})
+			},
+			want: "making netflow capture directory",
+		},
+		{
+			name: "a directory where the metadata belongs",
+			now:  netflowTestStart,
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+
+				if err := os.MkdirAll(filepath.Join(dir, netflowTestID+".json"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "writing netflow capture metadata",
+		},
+		{
+			name: "a start time JSON cannot hold",
+			now:  time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC),
+			want: "encoding netflow capture metadata",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "netflow")
+			if tc.setup != nil {
+				tc.setup(t, dir)
+			}
+
+			r, err := newNetflowRecorder("newfail", dir, 1<<20, tc.now)
+			if err == nil {
+				r.discard()
+				t.Fatal("newNetflowRecorder() succeeded, want an error")
+			}
+
+			if r != nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("newNetflowRecorder() = %v, %v; want nil and an error containing %q", r, err, tc.want)
+			}
+
+			if matches, _ := filepath.Glob(filepath.Join(dir, "*.txt")); len(matches) != 0 {
+				t.Errorf("capture files after a failed create = %q, want none", matches)
+			}
+
+			if live := liveRecorder("newfail"); live != nil {
+				t.Errorf("liveRecorder(newfail) after a failed create = %v, want nil", live)
+			}
+		})
+	}
+}
+
+// A recorder whose metadata can no longer be written still ends recording at its limit and still closes.
+//
+//nolint:paralleltest // uses the netflow recorder registry
+func TestNetflowRecorderMetadataFailures(t *testing.T) {
+	r, dir := newTestRecorder(t, "metafail", 6)
+
+	sidecar := filepath.Join(dir, netflowTestID+".json")
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Mkdir(sidecar, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	r.record([]string{"abcd", "efgh"})
+	r.record([]string{"x"})
+
+	if got := readCapture(t, dir, netflowTestID); got != "abcd\n" {
+		t.Errorf("recorded lines = %q, want %q", got, "abcd\n")
+	}
+
+	if c := r.capture(); !c.Truncated || c.State != NetflowStateRecording || *c.Flows != 1 {
+		t.Errorf("capture() at the limit = %+v, want truncated and recording with 1 flow", c)
+	}
+
+	stopped := netflowTestStart.Add(time.Minute)
+	r.close(stopped)
+
+	c := r.capture()
+	if c.State != NetflowStateStopped || c.Stopped == nil || !c.Stopped.Equal(stopped) {
+		t.Errorf("capture() after close = %+v, want stopped at %v", c, stopped)
+	}
+
+	if live := liveRecorder("metafail"); live != nil {
+		t.Errorf("liveRecorder(metafail) after close = %v, want nil", live)
+	}
+}
+
+// capture() describes the recorder while it records and once it is closed.
+//
+//nolint:paralleltest // uses the netflow recorder registry
+func TestNetflowRecorderCapture(t *testing.T) {
+	r, _ := newTestRecorder(t, "describe", 1<<20)
+
+	r.record([]string{"one", "two"})
+
+	flows := func(n int64) *int64 { return &n }
+	want := NetflowCapture{
+		ID: netflowTestID, Started: netflowTestStart, State: NetflowStateRecording, Size: 8, Flows: flows(2),
+		Path: "netflow/" + netflowTestID + ".txt",
+	}
+
+	if diff := cmp.Diff(want, r.capture()); diff != "" {
+		t.Errorf("capture() while recording mismatch (-want +got):\n%s", diff)
+	}
+
+	if live := liveRecorder("describe"); live != r {
+		t.Errorf("liveRecorder(describe) while recording = %v, want the recorder", live)
+	}
+
+	stopped := netflowTestStart.Add(time.Hour)
+	r.close(stopped.In(time.FixedZone("", 3600)))
+
+	want.State, want.Stopped = NetflowStateStopped, &stopped
+	if diff := cmp.Diff(want, r.capture()); diff != "" {
+		t.Errorf("capture() after close mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A replaced recorder does not unregister the one that replaced it.
+//
+//nolint:paralleltest // uses the netflow recorder registry
+func TestNetflowRecorderForgetKeepsAReplacement(t *testing.T) {
+	first, _ := newTestRecorder(t, "replaced", 1<<20)
+	second, _ := newTestRecorder(t, "replaced", 1<<20)
+
+	first.forget()
+
+	if live := liveRecorder("replaced"); live != second {
+		t.Errorf("liveRecorder(replaced) after the first forgot = %p, want the second %p", live, second)
+	}
+
+	second.forget()
+
+	if live := liveRecorder("replaced"); live != nil {
+		t.Errorf("liveRecorder(replaced) after the second forgot = %v, want nil", live)
+	}
+}
+
+// Only a small regular file that parses is a capture's metadata.
+func TestReadNetflowSidecar(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	good := `{"version":1,"experiment":"a","started":"2026-01-01T00:00:00Z","flows":2,"truncated":true,"maxSize":10}`
+
+	writeCaptureFiles(t, dir, map[string]string{
+		"good.json":  good,
+		"bad.json":   `{"version":`,
+		"empty.json": "",
+		"big.json":   good + strings.Repeat(" ", netflowMaxSidecar),
+	})
+
+	if err := os.Symlink(filepath.Join(dir, "good.json"), filepath.Join(dir, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Mkdir(filepath.Join(dir, "dir.json"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := map[string]*netflowSidecar{
+		"good.json":    {Version: 1, Experiment: "a", Started: started, Flows: 2, Truncated: true, MaxSize: 10},
+		"bad.json":     nil,
+		"empty.json":   nil,
+		"big.json":     nil,
+		"link.json":    nil,
+		"dir.json":     nil,
+		"missing.json": nil,
+	}
+
+	for name, want := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := readNetflowSidecar(filepath.Join(dir, name))
+			if ok != (want != nil) {
+				t.Fatalf("readNetflowSidecar(%s) ok = %t, want %t", name, ok, want != nil)
+			}
+
+			if ok {
+				if diff := cmp.Diff(*want, got); diff != "" {
+					t.Errorf("readNetflowSidecar(%s) mismatch (-want +got):\n%s", name, diff)
+				}
+			}
+		})
+	}
+}
+
+// Opening the capture that is recording describes it as the live recorder does.
+//
+//nolint:paralleltest // replaces the store and the experiment files directory
+func TestOpenNetflowCaptureRecording(t *testing.T) {
+	useNetflows(t, "a")
+	dir := useNetflowBase(t)
+
+	r, err := newNetflowRecorder("a", dir, 1<<20, netflowTestStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(r.discard)
+
+	r.record([]string{"one"})
+
+	f, c, err := OpenNetflowCapture("a", netflowTestID)
+	if err != nil {
+		t.Fatalf("OpenNetflowCapture(a, %s) error = %v", netflowTestID, err)
+	}
+
+	defer f.Close()
+
+	if diff := cmp.Diff(r.capture(), c); diff != "" || c.State != NetflowStateRecording {
+		t.Errorf("OpenNetflowCapture(a, %s) capture mismatch (-live +got), state %s:\n%s", netflowTestID, c.State, diff)
+	}
+}
+
+// A capture phenix cannot open is not found.
+//
+//nolint:paralleltest // replaces the store and the experiment files directory
+func TestOpenNetflowCaptureUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a file of any mode")
+	}
+
+	useNetflows(t, "a")
+	dir := useNetflowBase(t)
+
+	writeCaptureFiles(t, dir, map[string]string{netflowTestID + ".txt": "line\n"})
+
+	if err := os.Chmod(filepath.Join(dir, netflowTestID+".txt"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	f, _, err := OpenNetflowCapture("a", netflowTestID)
+	if f != nil {
+		_ = f.Close()
+	}
+
+	if !errors.Is(err, ErrNetflowCaptureNotFound) {
+		t.Errorf("OpenNetflowCapture(a, %s) of an unreadable capture error = %v, want %v", netflowTestID, err, ErrNetflowCaptureNotFound)
 	}
 }

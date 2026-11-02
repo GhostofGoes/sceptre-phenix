@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -16,6 +17,8 @@ import (
 )
 
 func TestParseNetflowRecord(t *testing.T) {
+	t.Parallel()
+
 	var (
 		v4    = netip.MustParseAddr
 		start = time.Date(2026, 10, 28, 15, 30, 12, 0, time.FixedZone("", -6*60*60))
@@ -60,10 +63,16 @@ func TestParseNetflowRecord(t *testing.T) {
 		{name: "zone", line: "2026-10-28T15:30:12Z 1s 6 [fe80::1%eth0]:1 <-> 10.0.0.2:2 1 1"},
 		{name: "missing <->", line: "2026-10-28T15:30:12Z 1s 6 10.0.0.1:1 -> 10.0.0.2:2 1 1"},
 		{name: "live view placeholder times", line: "0 0 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1"},
+		{name: "bad duration", line: "2026-10-28T15:30:12Z 1x 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1"},
+		{name: "a duration too long", line: "2026-10-28T15:30:12Z 9999999999h 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1"},
+		{name: "empty", line: ""},
+		{name: "blank", line: " \t "},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, ok := parseNetflowRecord(test.line)
 			if ok != (test.want != nil) {
 				t.Fatalf("parseNetflowRecord(%q) ok = %t, want %t", test.line, ok, test.want != nil)
@@ -104,6 +113,8 @@ const netflowExportInput = "2026-10-28T15:30:12-06:00\t1.5s\t6\t10.0.0.1:1234\t<
 	"2026-10-28T21:30:12Z 1s 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1"
 
 func TestExportNetflow(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]struct {
 		in, format string
 		want       string
@@ -144,6 +155,8 @@ func TestExportNetflow(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			got, stats, started, err := exportNetflow(t.Context(), tt.in, tt.format)
 			if err != nil || !started {
 				t.Fatalf("ExportNetflow(%s) error = %v, started %t; want nil, started", tt.format, err, started)
@@ -162,18 +175,34 @@ func TestExportNetflow(t *testing.T) {
 
 // A bad format, or a canceled request, writes nothing.
 func TestExportNetflowRefuses(t *testing.T) {
-	if _, _, started, err := exportNetflow(t.Context(), "", NetflowFormatText); !errors.Is(err, ErrInvalidNetflowFormat) ||
-		started {
-		t.Errorf("ExportNetflow(text) = %v, started %t; want %v, not started", err, started, ErrInvalidNetflowFormat)
-	}
+	t.Parallel()
 
-	ctx, cancel := context.WithCancel(t.Context())
+	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	in := strings.Repeat("2026-10-28T21:30:12Z 1s 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1\n", 2*netflowCancelCheck)
 
-	if _, _, started, err := exportNetflow(ctx, in, NetflowFormatJSONL); !errors.Is(err, context.Canceled) || started {
-		t.Errorf("ExportNetflow canceled = %v, started %t; want %v, not started", err, started, context.Canceled)
+	tests := []struct {
+		name   string
+		ctx    context.Context //nolint:containedctx // each case's context
+		format string
+		want   error
+	}{
+		{name: "text", ctx: t.Context(), format: NetflowFormatText, want: ErrInvalidNetflowFormat},
+		{name: "no format", ctx: t.Context(), format: "", want: ErrInvalidNetflowFormat},
+		{name: "a format in capitals", ctx: t.Context(), format: "CSV", want: ErrInvalidNetflowFormat},
+		{name: "canceled csv", ctx: canceled, format: NetflowFormatCSV, want: context.Canceled},
+		{name: "canceled jsonl", ctx: canceled, format: NetflowFormatJSONL, want: context.Canceled},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, _, started, err := exportNetflow(tc.ctx, in, tc.format); !errors.Is(err, tc.want) || started {
+				t.Errorf("ExportNetflow(%q) = %v, started %t; want %v, not started", tc.format, err, started, tc.want)
+			}
+		})
 	}
 }
 
@@ -232,6 +261,8 @@ func TestParseNetflowRecordProperties(t *testing.T) {
 
 // A request that ends mid-export stops it.
 func TestExportNetflowStopsWhenCanceled(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -255,6 +286,8 @@ func TestExportNetflowStopsWhenCanceled(t *testing.T) {
 
 // The fuzz target's line count holds for lines around the read buffer's size.
 func TestNetflowExportLinesAtBufferSize(t *testing.T) {
+	t.Parallel()
+
 	for _, n := range []int{netflowLineBuffer - 2, netflowLineBuffer - 1, netflowLineBuffer, netflowLineBuffer + 1} {
 		for _, in := range []string{strings.Repeat(" ", n), strings.Repeat(" ", n) + "\n", strings.Repeat("x", n)} {
 			_, stats, _, err := exportNetflow(t.Context(), in, NetflowFormatCSV)
@@ -263,5 +296,167 @@ func TestNetflowExportLinesAtBufferSize(t *testing.T) {
 					netflowExportLines(in))
 			}
 		}
+	}
+}
+
+// netflowExportFlow is a line that parses, and netflowExportRow its CSV row.
+const (
+	netflowExportFlow = "2026-10-28T21:30:12Z 1s 6 10.0.0.1:1 <-> 10.0.0.2:2 1 1\n"
+	netflowExportRow  = "2026-10-28T21:30:12Z,2026-10-28T21:30:13Z,1000000000,10.0.0.1,1,10.0.0.2,2,tcp,6,1,1\n"
+)
+
+// A capture that cannot be read fails the export, before or after the output starts.
+func TestExportNetflowReadErrors(t *testing.T) {
+	t.Parallel()
+
+	broken := errors.New("disk read failed")
+
+	tests := []struct {
+		name        string
+		src         io.Reader
+		wantStarted bool
+	}{
+		{name: "at once", src: iotest.ErrReader(broken)},
+		{
+			name: "after a flow", src: io.MultiReader(strings.NewReader(netflowExportFlow), iotest.ErrReader(broken)),
+		},
+		{
+			name: "within a line over the buffer",
+			src:  io.MultiReader(strings.NewReader(strings.Repeat("x", 2*netflowLineBuffer)), iotest.ErrReader(broken)),
+		},
+		{
+			name: "after the output started",
+			src: io.MultiReader(strings.NewReader(strings.Repeat(netflowExportFlow, 2*netflowOutputBuffer/len(netflowExportRow))),
+				iotest.ErrReader(broken)),
+			wantStarted: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			started := false
+
+			_, err := ExportNetflow(t.Context(), func() io.Writer {
+				started = true
+
+				return io.Discard
+			}, tc.src, NetflowFormatCSV)
+
+			if !errors.Is(err, broken) || !strings.Contains(err.Error(), "reading netflow capture") {
+				t.Errorf("ExportNetflow() error = %v, want a reading error wrapping %v", err, broken)
+			}
+
+			if started != tc.wantStarted {
+				t.Errorf("ExportNetflow() started the output %t, want %t", started, tc.wantStarted)
+			}
+		})
+	}
+}
+
+// netflowExportFailing is a writer that takes ok bytes, then fails every write with err.
+type netflowExportFailing struct {
+	ok      int
+	err     error
+	written int
+}
+
+func (w *netflowExportFailing) Write(p []byte) (int, error) {
+	if w.written+len(p) > w.ok {
+		n := max(0, w.ok-w.written)
+		w.written += n
+
+		return n, w.err
+	}
+
+	w.written += len(p)
+
+	return len(p), nil
+}
+
+// An output that fails stops the export with its error, whether it fails on the last bytes or partway.
+func TestExportNetflowWriteErrors(t *testing.T) {
+	t.Parallel()
+
+	failed := errors.New("client went away")
+	header := len(strings.Join(netflowColumns, ",")) + 1
+
+	// flows whose CSV is just past the output buffer, so the final flush of the CSV rows overflows it
+	justPast := (netflowOutputBuffer + 2048 - header) / len(netflowExportRow)
+
+	tests := []struct {
+		name   string
+		format string
+		flows  int
+		ok     int
+	}{
+		{name: "csv header", format: NetflowFormatCSV},
+		{name: "small csv", format: NetflowFormatCSV, flows: 3},
+		{name: "small jsonl", format: NetflowFormatJSONL, flows: 3},
+		{name: "empty jsonl", format: NetflowFormatJSONL},
+		{name: "csv just past the buffer", format: NetflowFormatCSV, flows: justPast},
+		{name: "large csv", format: NetflowFormatCSV, flows: 4 * justPast},
+		{name: "large jsonl", format: NetflowFormatJSONL, flows: 4 * justPast},
+		{name: "large csv failing partway", format: NetflowFormatCSV, flows: 4 * justPast, ok: netflowOutputBuffer + 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			out := &netflowExportFailing{ok: tc.ok, err: failed}
+			in := strings.NewReader(strings.Repeat(netflowExportFlow, tc.flows))
+
+			stats, err := ExportNetflow(t.Context(), func() io.Writer { return out }, in, tc.format)
+
+			if tc.format == NetflowFormatJSONL && tc.flows == 0 {
+				// nothing to write, so nothing fails
+				if err != nil || stats != (NetflowExport{}) {
+					t.Errorf("ExportNetflow(empty jsonl) = %+v, %v; want nothing and nil", stats, err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, failed) || !strings.Contains(err.Error(), "writing netflow export") {
+				t.Errorf("ExportNetflow(%s, %d flows) error = %v, want a writing error wrapping %v", tc.format, tc.flows, err, failed)
+			}
+
+			if stats.Flows > int64(tc.flows) || stats.Skipped != 0 {
+				t.Errorf("ExportNetflow(%s, %d flows) stats = %+v, want at most %d flows and none skipped",
+					tc.format, tc.flows, stats, tc.flows)
+			}
+		})
+	}
+}
+
+// The lazy writer asks for its writer once, on the first write.
+func TestLazyWriter(t *testing.T) {
+	t.Parallel()
+
+	var (
+		out   bytes.Buffer
+		calls int
+	)
+
+	lazy := &lazyWriter{start: func() io.Writer {
+		calls++
+
+		return &out
+	}}
+
+	if calls != 0 {
+		t.Fatalf("start calls before a write = %d, want 0", calls)
+	}
+
+	for _, chunk := range []string{"a", "", "bc"} {
+		if n, err := lazy.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Errorf("Write(%q) = %d, %v; want %d, nil", chunk, n, err, len(chunk))
+		}
+	}
+
+	if calls != 1 || out.String() != "abc" {
+		t.Errorf("after three writes: start calls %d, output %q; want 1, %q", calls, out.String(), "abc")
 	}
 }

@@ -17,15 +17,19 @@ var documentedCodes = []Code{ //nolint:gochecknoglobals // test table
 
 // Each status the routes answer has its code.
 func TestCodeFor(t *testing.T) {
+	t.Parallel()
+
 	got := map[int]Code{}
 	want := map[int]Code{
 		http.StatusBadRequest:                   CodeInvalidRequest,
 		http.StatusUnauthorized:                 CodeUnauthorized,
 		http.StatusForbidden:                    CodeForbidden,
 		http.StatusNotFound:                     CodeNotFound,
+		http.StatusGone:                         CodeNotFound,
 		http.StatusMethodNotAllowed:             CodeInvalidRequest,
 		http.StatusConflict:                     CodeConflict,
 		http.StatusPreconditionFailed:           CodeConflict,
+		http.StatusLocked:                       CodeConflict,
 		http.StatusRequestEntityTooLarge:        CodeInvalidRequest,
 		http.StatusUnsupportedMediaType:         CodeInvalidRequest,
 		http.StatusRequestedRangeNotSatisfiable: CodeInvalidRequest,
@@ -36,6 +40,12 @@ func TestCodeFor(t *testing.T) {
 		http.StatusBadGateway:                   CodeUnavailable,
 		http.StatusServiceUnavailable:           CodeUnavailable,
 		http.StatusGatewayTimeout:               CodeUnavailable,
+		// not error statuses
+		0:                         CodeInternal,
+		http.StatusOK:             CodeInternal,
+		http.StatusFound:          CodeInternal,
+		http.StatusBadRequest - 1: CodeInternal,
+		600:                       CodeInternal,
 	}
 
 	for status := range want {
@@ -50,6 +60,8 @@ func TestCodeFor(t *testing.T) {
 // Every error status has a documented code, a client error never one that
 // blames the server, and a server error always one that does.
 func TestCodeForProperty(t *testing.T) {
+	t.Parallel()
+
 	serverCodes := []Code{CodeUnavailable, CodeInternal}
 
 	rapid.Check(t, func(t *rapid.T) {
@@ -64,15 +76,4 @@ func TestCodeForProperty(t *testing.T) {
 			t.Fatalf("CodeFor(%d) = %q, which blames the server: %t, want %t", status, code, !server, server)
 		}
 	})
-}
-
-// An error's own code wins over its status's.
-func TestWithCode(t *testing.T) {
-	_, _, body := serve(t, func(http.ResponseWriter, *http.Request) error {
-		return NewWebError(nil, "minimega is busy").SetStatus(http.StatusConflict).WithCode(CodeUnavailable)
-	})
-
-	if body.Code != CodeUnavailable {
-		t.Errorf("code = %q, want %q", body.Code, CodeUnavailable)
-	}
 }

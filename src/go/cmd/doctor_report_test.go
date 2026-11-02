@@ -11,9 +11,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"pgregory.net/rapid"
 
 	"phenix/util/termcolor"
+	"phenix/version"
 )
 
 // doctorReportLines is the text output of report, each line with its runs of
@@ -312,20 +314,23 @@ func TestPrintDoctorChecksAlignment(t *testing.T) {
 	})
 }
 
-// -o json and --report never color, even when --color asks for it.
+// -o json and --report never color, even when --color asks for it, and
+// --report puts the output in a fenced block.
 func TestWriteDoctorReportColors(t *testing.T) {
 	t.Parallel()
 
-	report := doctorReportBase(doctorWarn, doctorResult{ID: "a", Group: "g", Name: "a", Status: doctorWarn, Detail: "d", Hint: "h"})
+	report := doctorReportBase(doctorWarn,
+		doctorResult{ID: "a", Group: "g", Name: "a", Status: doctorWarn, Detail: "<host-1> d", Hint: "h"})
 
 	tests := map[string]struct {
 		opts      doctorOptions
 		wantColor bool
+		fence     string // the start of the block; "" for none
 	}{
 		"text":            {opts: doctorOptions{output: "text", palette: termcolor.New(true)}, wantColor: true},
-		"text, report":    {opts: doctorOptions{output: "text", report: true, palette: termcolor.New(true)}},
+		"text, report":    {opts: doctorOptions{output: "text", report: true, palette: termcolor.New(true)}, fence: "```text\nphenix:"},
 		"json":            {opts: doctorOptions{output: FormatJSON, palette: termcolor.New(true)}},
-		"json, report":    {opts: doctorOptions{output: FormatJSON, report: true, palette: termcolor.New(true)}},
+		"json, report":    {opts: doctorOptions{output: FormatJSON, report: true, palette: termcolor.New(true)}, fence: "```json\n{\n"},
 		"text, colorless": {opts: doctorOptions{output: "text", palette: termcolor.New(false)}},
 	}
 
@@ -340,6 +345,15 @@ func TestWriteDoctorReportColors(t *testing.T) {
 
 			if got := strings.Contains(out.String(), "\x1b["); got != tc.wantColor {
 				t.Errorf("output has escape codes = %v, want %v:\n%q", got, tc.wantColor, out.String())
+			}
+
+			fenced := strings.HasPrefix(out.String(), tc.fence) && strings.HasSuffix(out.String(), "\n```\n")
+			if (tc.fence != "" && !fenced) || (tc.fence == "" && strings.Contains(out.String(), "```")) {
+				t.Errorf("writeDoctorReport() = %q, want a block that starts %q: %t", out.String(), tc.fence, tc.fence != "")
+			}
+
+			if !strings.Contains(out.String(), "<host-1> d") {
+				t.Errorf("writeDoctorReport() = %q, want the detail %q unescaped", out.String(), "<host-1> d")
 			}
 		})
 	}
@@ -380,6 +394,220 @@ func TestDoctorCommandColors(t *testing.T) { //nolint:paralleltest // sets envir
 
 			if got := strings.Contains(out.String(), "\x1b["); got != tc.wantColor {
 				t.Errorf("doctor output has escape codes = %v, want %v:\n%q", got, tc.wantColor, out.String())
+			}
+		})
+	}
+}
+
+// newDoctorReport takes its header from the input, the minimega version from
+// the minimega row that passed, and the settings with secrets redacted, or
+// none with -x. A container marker or cgroup marks the report.
+func TestDoctorReportNew(t *testing.T) {
+	t.Parallel()
+
+	results := []doctorResult{
+		{ID: minimegaCheckName, Group: "minimega", Name: "minimega", Status: doctorPass, Detail: "minimega 3.0.1"},
+		{ID: "disk", Group: "host", Name: "disk", Status: doctorWarn, Detail: "low"},
+	}
+
+	tests := map[string]struct {
+		results       []doctorResult
+		host          doctorHostFS
+		noSettings    bool
+		wantStatus    doctorStatus
+		wantMinimega  string
+		wantContainer string
+	}{
+		"minimega answered": {results: results, wantStatus: doctorWarn, wantMinimega: "minimega 3.0.1"},
+		"minimega failed": {
+			results:    []doctorResult{{ID: minimegaCheckName, Name: "minimega", Status: doctorFail, Detail: "no answer"}},
+			wantStatus: doctorFail, noSettings: true,
+		},
+		"no results": {wantStatus: doctorPass},
+		"docker":     {host: doctorHostFS{"/.dockerenv": ""}, wantStatus: doctorPass, wantContainer: "/.dockerenv"},
+		"podman cgroup": {
+			host:       doctorHostFS{"/proc/1/cgroup": "0::/machine.slice/libpod-1.scope\n"},
+			wantStatus: doctorPass, wantContainer: "cgroup libpod",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), nil)
+			tc.host.apply(&in.env)
+
+			got := newDoctorReport(in, tc.results, doctorOptions{output: "text", noSettings: tc.noSettings})
+
+			want := doctorReport{
+				SchemaVersion: doctorSchemaVersion, Status: tc.wantStatus, Time: "2026-10-30T12:00:00Z",
+				Version: doctorVersion{
+					Phenix: version.API(), Label: version.Label(), Commit: version.Commit, Date: version.Date,
+					Minimega: tc.wantMinimega,
+				},
+				Environment: doctorEnvironment{
+					OS: "linux", Kernel: "6.8.0-49-generic", Arch: "amd64", UID: 1000, GID: 1000, User: "alice",
+					WorkingDir: "/home/alice", ConfigFile: in.config.used,
+					Container: tc.wantContainer != "", ContainerHint: tc.wantContainer,
+				},
+				Checks: tc.results,
+			}
+
+			if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(doctorReport{}, "Settings"), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("newDoctorReport() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got.Settings == nil {
+				t.Fatalf("newDoctorReport() settings = nil, want a list, which JSON writes as []")
+			}
+
+			if tc.noSettings {
+				if len(got.Settings) != 0 {
+					t.Errorf("newDoctorReport(-x) settings = %v, want none", got.Settings)
+				}
+
+				return
+			}
+
+			values := make(map[string]any, len(got.Settings))
+			for _, s := range got.Settings {
+				values[s.Key] = s.Value
+			}
+
+			if len(got.Settings) != len(in.known) {
+				t.Errorf("newDoctorReport() has %d settings, want the %d known", len(got.Settings), len(in.known))
+			}
+
+			for key, want := range map[string]any{
+				"ui.jwt-signing-key": redacted, "ui.users": redacted, "log.level": "info",
+			} {
+				if values[key] != want {
+					t.Errorf("newDoctorReport() setting %s = %v, want %v", key, values[key], want)
+				}
+			}
+		})
+	}
+}
+
+// doctorProblems keeps the rows that warn or fail, in order, and counts the
+// rest.
+func TestDoctorReportProblems(t *testing.T) {
+	t.Parallel()
+
+	rows := func(statuses ...doctorStatus) []doctorResult {
+		results := make([]doctorResult, 0, len(statuses))
+		for i, s := range statuses {
+			results = append(results, doctorResult{ID: strconv.Itoa(i), Status: s})
+		}
+
+		return results
+	}
+
+	tests := map[string]struct {
+		checks     []doctorResult
+		wantIDs    []string
+		wantHidden int
+	}{
+		"none":         {},
+		"all problems": {checks: rows(doctorFail, doctorWarn), wantIDs: []string{"0", "1"}},
+		"mixed":        {checks: rows(doctorPass, doctorFail, doctorSkip, doctorWarn), wantIDs: []string{"1", "3"}, wantHidden: 2},
+		"no problems":  {checks: rows(doctorPass, doctorSkip), wantHidden: 2},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			problems, hidden := doctorProblems(tc.checks)
+
+			ids := make([]string, 0, len(problems))
+			for _, p := range problems {
+				ids = append(ids, p.ID)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, ids, cmpopts.EquateEmpty()); diff != "" || hidden != tc.wantHidden {
+				t.Errorf("doctorProblems() hidden %d, want %d; rows mismatch (-want +got):\n%s", hidden, tc.wantHidden, diff)
+			}
+
+			if problems == nil {
+				t.Errorf("doctorProblems() = nil, want a list, which JSON writes as []")
+			}
+		})
+	}
+}
+
+// -o json -p writes only the problem rows and counts the others, and a
+// report that does not encode writes nothing.
+func TestDoctorReportWrite(t *testing.T) {
+	t.Parallel()
+
+	report := doctorReportBase(doctorWarn,
+		doctorResult{ID: "a", Group: "g", Name: "a", Status: doctorPass, Detail: "<host-1> ok"},
+		doctorResult{ID: "b", Group: "g", Name: "b", Status: doctorWarn, Detail: "w"},
+	)
+
+	t.Run("json, problems", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		if err := writeDoctorReport(&out, report, doctorOptions{output: FormatJSON, problems: true}); err != nil {
+			t.Fatalf("writeDoctorReport() error = %v", err)
+		}
+
+		var got doctorReport
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+
+		want := report
+		want.Checks, want.HiddenChecks = report.Checks[1:], 1
+
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("writeDoctorReport(-o json -p) mismatch (-want +got):\n%s", diff)
+		}
+
+		if len(report.Checks) != 2 {
+			t.Errorf("writeDoctorReport() changed the report's checks to %v", report.Checks)
+		}
+	})
+
+	t.Run("does not encode", func(t *testing.T) {
+		t.Parallel()
+
+		bad := report
+		bad.Settings = []doctorSetting{{Key: "k", Value: make(chan int), Source: sourceDefault}}
+
+		var out bytes.Buffer
+
+		err := writeDoctorReport(&out, bad, doctorOptions{output: FormatJSON})
+		if err == nil || !strings.Contains(err.Error(), "encoding report") || out.Len() != 0 {
+			t.Errorf("writeDoctorReport(channel setting) = %q, %v; want nothing and an encoding error", out.String(), err)
+		}
+	})
+}
+
+// Each status has its color, and text of any other status keeps none.
+func TestDoctorReportStatusColor(t *testing.T) {
+	t.Parallel()
+
+	palette := termcolor.New(true)
+
+	tests := map[doctorStatus]string{
+		doctorPass: palette.Green("x"), doctorWarn: palette.Yellow("x"), doctorFail: palette.BoldRed("x"),
+		doctorSkip: palette.Faint("x"), "other": "x",
+	}
+
+	for status, want := range tests {
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+
+			if got := doctorStatusColor(palette, status, "x"); got != want {
+				t.Errorf("doctorStatusColor(%s) = %q, want %q", status, got, want)
+			}
+
+			if got := doctorStatusColor(termcolor.New(false), status, "x"); got != "x" {
+				t.Errorf("doctorStatusColor(%s) without colors = %q, want %q", status, got, "x")
 			}
 		})
 	}

@@ -48,6 +48,8 @@ func run(t *testing.T, fn func(r *recorder)) string {
 // Until returns when its condition holds, and fails with the condition's name
 // when it does not hold in time.
 func TestUntil(t *testing.T) {
+	t.Parallel()
+
 	var polls atomic.Int32
 
 	holdsLater := func() bool { return polls.Add(1) >= 3 }
@@ -63,6 +65,8 @@ func TestUntil(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			got := run(t, func(r *recorder) { until(r, "the flag is set", tc.cond, 20*time.Millisecond) })
 
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -75,6 +79,8 @@ func TestUntil(t *testing.T) {
 // Within returns when its work returns, and fails with the work's name and
 // the timeout when the work takes too long.
 func TestWithin(t *testing.T) {
+	t.Parallel()
+
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 
@@ -88,6 +94,8 @@ func TestWithin(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			got := run(t, func(r *recorder) { within(r, "the work", tc.fn, 20*time.Millisecond) })
 
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -95,4 +103,42 @@ func TestWithin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The exported Until and Within return without a failure when the condition
+// holds or the work returns, after polling or running it.
+func TestExportedWaits(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Until", func(t *testing.T) {
+		t.Parallel()
+
+		var polls atomic.Int32
+
+		got := run(t, func(r *recorder) { Until(r, "the third poll", func() bool { return polls.Add(1) >= 3 }) })
+
+		if diff := cmp.Diff("", got); diff != "" {
+			t.Errorf("Until() fatal message mismatch (-want +got):\n%s", diff)
+		}
+
+		if n := polls.Load(); n != 3 {
+			t.Errorf("Until() polled %d times, want 3", n)
+		}
+	})
+
+	t.Run("Within", func(t *testing.T) {
+		t.Parallel()
+
+		var ran atomic.Bool
+
+		got := run(t, func(r *recorder) { Within(r, "the work", func() { ran.Store(true) }) })
+
+		if diff := cmp.Diff("", got); diff != "" {
+			t.Errorf("Within() fatal message mismatch (-want +got):\n%s", diff)
+		}
+
+		if !ran.Load() {
+			t.Error("Within() returned without running its work")
+		}
+	})
 }

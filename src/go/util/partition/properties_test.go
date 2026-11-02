@@ -143,11 +143,17 @@ func checkTable(t interface {
 			t.Fatalf("partition %d has no file system after Inspect", p.Number)
 		}
 	}
+
+	if probed > partition.MaxProbes {
+		t.Fatalf("Inspect read %d file systems, want at most %d", probed, partition.MaxProbes)
+	}
 }
 
 // Read and Inspect never panic, keep every read inside the disk, and return partitions inside it, whatever the disk
 // holds.
 func TestReadProperties(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		disk := genDisk().Draw(t, "disk")
 

@@ -2,10 +2,12 @@ package diskchain_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"phenix/util/diskchain"
 	dct "phenix/util/diskchain/diskchaintest"
@@ -34,6 +36,27 @@ func TestWalkAll(t *testing.T) {
 	got := diskchain.WalkAll(t.Context(), paths, map[string]bool{iso: true})
 
 	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("WalkAll mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// WalkAll walks every path when there are more paths than workers, each image of its own chain.
+func TestWalkAllMorePathsThanWorkers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	paths := make([]string, 3*diskchain.MaxWorkers)
+	want := make(map[string]diskchain.Result, len(paths))
+
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("top%d.qc2", i))
+		base := filepath.Join(dir, fmt.Sprintf("base%d.img", i))
+		dct.Chain(t, paths[i], base)
+		want[paths[i]] = diskchain.Result{Members: []string{paths[i], base}}
+	}
+
+	got := diskchain.WalkAll(t.Context(), paths, nil)
+	if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("WalkAll mismatch (-want +got):\n%s", diff)
 	}
 }

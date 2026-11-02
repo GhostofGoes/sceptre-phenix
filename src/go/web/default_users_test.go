@@ -33,6 +33,19 @@ func TestParseDefaultUser(t *testing.T) {
 			want:    DefaultUser{Name: "carol"},
 			wantErr: `default user 3 ("carol") is not name:password:role[:resource...]`,
 		},
+		"empty password": {
+			entry:   "carol:",
+			want:    DefaultUser{Name: "carol"},
+			wantErr: `default user 3 ("carol") is not name:password:role[:resource...]`,
+		},
+		"empty resource": {
+			entry: "dave:pw:vm-viewer:",
+			want:  DefaultUser{Name: "dave", Password: "pw", Role: "vm-viewer", Resources: []string{""}},
+		},
+		"empty role": {
+			entry: "erin:pw::exp1",
+			want:  DefaultUser{Name: "erin", Password: "pw", Role: "", Resources: []string{"exp1"}},
+		},
 		"one field": {entry: "secret", want: DefaultUser{}, wantErr: `default user 3 ("") is not name:password:role[:resource...]`},
 		"empty":     {entry: "", want: DefaultUser{}, wantErr: `default user 3 ("") is not name:password:role[:resource...]`},
 	}

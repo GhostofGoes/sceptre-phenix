@@ -209,3 +209,40 @@ func TestEveryRouteChecksPermissions(t *testing.T) {
 		}
 	}
 }
+
+// concrete fills each path parameter, and each query parameter, with the
+// contract fixture's value; the segment before a parameter, as filled,
+// decides first.
+func TestServedRouteConcrete(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		route servedRoute
+		want  string
+	}{
+		"no parameters": {servedRoute{path: "/version"}, "/version"},
+		"experiment":    {servedRoute{path: "/api/v1/experiments/{name}"}, "/api/v1/experiments/" + contractExp},
+		"VM of an experiment": {
+			servedRoute{path: "/api/v1/experiments/{exp}/vms/{name}"},
+			"/api/v1/experiments/" + contractExp + "/vms/" + contractVM,
+		},
+		"after a filled parameter": {servedRoute{path: "/api/v1/configs/{kind}/{name}"}, "/api/v1/configs/topology/" + contractTopo},
+		"unknown segment":          {servedRoute{path: "/api/v1/hosts/{name}"}, "/api/v1/hosts/none"},
+		"pattern dropped":          {servedRoute{path: "/api/v1/console/{pid:[0-9]+}"}, "/api/v1/console/1"},
+		"job":                      {servedRoute{path: "/api/v1/jobs/{id}"}, "/api/v1/jobs/{job}"},
+		"queries": {
+			servedRoute{path: "/api/v1/console/{pid}/size", queries: []string{"cols={cols:[0-9]+}", "rows={rows:[0-9]+}"}},
+			"/api/v1/console/1/size?cols=80&rows=24",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.route.concrete(); got != tc.want {
+				t.Errorf("servedRoute{%s %v}.concrete() = %q, want %q", tc.route.path, tc.route.queries, got, tc.want)
+			}
+		})
+	}
+}

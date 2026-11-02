@@ -11,6 +11,8 @@ const secretChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456
 
 // TestGenerateSecretDiffers checks that back-to-back IPsec preshared keys differ.
 func TestGenerateSecretDiffers(t *testing.T) {
+	t.Parallel()
+
 	a, b := generateSecret(ipsecSecretLength), generateSecret(ipsecSecretLength)
 	if a == b {
 		t.Errorf("generateSecret(%d) returned %q twice", ipsecSecretLength, a)
@@ -20,6 +22,8 @@ func TestGenerateSecretDiffers(t *testing.T) {
 // TestGenerateSecretProperties checks that a secret has the length asked for
 // and holds only letters and digits.
 func TestGenerateSecretProperties(t *testing.T) {
+	t.Parallel()
+
 	rapid.Check(t, func(t *rapid.T) {
 		n := rapid.IntRange(0, 128).Draw(t, "n")
 

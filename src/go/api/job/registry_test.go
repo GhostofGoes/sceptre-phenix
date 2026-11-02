@@ -1197,3 +1197,656 @@ func TestRegistryProperties(t *testing.T) {
 		})
 	})
 }
+
+// registrySettings are the fields of a Registry that its options set.
+type registrySettings struct {
+	MaxFinished, PerOwner, Global, QueuedPerOwner, QueuedGlobal int
+	Retention, Interval                                         time.Duration
+	ArtifactDir                                                 string
+	// whether a notifier is set, and the time the clock reads
+	Notify bool
+	Now    time.Time
+}
+
+func registrySettingsOf(r *Registry) registrySettings {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return registrySettings{
+		MaxFinished: r.maxFinished, PerOwner: r.perOwner, Global: r.global,
+		QueuedPerOwner: r.queuedPerOwner, QueuedGlobal: r.queuedGlobal,
+		Retention: r.retention, Interval: r.interval, ArtifactDir: r.artifactDir,
+		Notify: r.notify != nil, Now: r.now(),
+	}
+}
+
+// NewRegistry starts from the defaults, and each option, given to NewRegistry
+// or later to Configure, changes only its own setting.
+func TestRegistryOptions(t *testing.T) {
+	t.Parallel()
+
+	clock := newFakeClock()
+	defaults := registrySettings{
+		MaxFinished: DefaultMaxFinished, PerOwner: DefaultPerOwner, Global: DefaultGlobal,
+		QueuedPerOwner: DefaultQueuedPerOwner, QueuedGlobal: DefaultQueuedGlobal,
+		Retention: DefaultRetention, Interval: NotifyInterval, Now: clock.Now(),
+	}
+
+	for name, tc := range map[string]struct {
+		opts   []Option
+		change func(*registrySettings)
+	}{
+		"none": {change: func(*registrySettings) {}},
+		"notifier": {
+			opts:   []Option{WithNotifier(func(Job, bool) {})},
+			change: func(s *registrySettings) { s.Notify = true },
+		},
+		"max finished": {opts: []Option{WithMaxFinished(3)}, change: func(s *registrySettings) { s.MaxFinished = 3 }},
+		"limits": {
+			opts:   []Option{WithLimits(1, 2)},
+			change: func(s *registrySettings) { s.PerOwner, s.Global = 1, 2 },
+		},
+		"queue limits": {
+			opts:   []Option{WithQueueLimits(0, 5)},
+			change: func(s *registrySettings) { s.QueuedPerOwner, s.QueuedGlobal = 0, 5 },
+		},
+		"artifact dir": {opts: []Option{WithArtifactDir("/jobs")}, change: func(s *registrySettings) { s.ArtifactDir = "/jobs" }},
+		"notify interval": {
+			opts:   []Option{WithNotifyInterval(time.Second)},
+			change: func(s *registrySettings) { s.Interval = time.Second },
+		},
+		"the last of two wins": {
+			opts:   []Option{WithMaxFinished(3), WithMaxFinished(0)},
+			change: func(s *registrySettings) { s.MaxFinished = 0 },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			want := defaults
+			tc.change(&want)
+
+			created := NewRegistry(append([]Option{WithClock(clock.Now)}, tc.opts...)...)
+			if diff := cmp.Diff(want, registrySettingsOf(created)); diff != "" {
+				t.Errorf("NewRegistry(%s) settings mismatch (-want +got):\n%s", name, diff)
+			}
+
+			configured := NewRegistry(WithClock(clock.Now))
+			configured.Configure(tc.opts...)
+
+			if diff := cmp.Diff(want, registrySettingsOf(configured)); diff != "" {
+				t.Errorf("Configure(%s) settings mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// Limits given to Configure apply to the jobs started after it.
+func TestConfigureChangesLimits(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRegistry(t)
+	release := make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	r.Configure(WithLimits(1, 1), WithQueueLimits(1, 1))
+
+	var got []string
+
+	for range 3 {
+		j, err := r.Start(Spec{Kind: "test", Owner: "alice", Run: func(context.Context, *Run) error {
+			<-release
+
+			return nil
+		}})
+		if err != nil {
+			got = append(got, err.Error())
+
+			continue
+		}
+
+		got = append(got, string(j.Status))
+	}
+
+	want := []string{string(StatusRunning), string(StatusQueued), ErrQueueFull.Error()}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Start() three times after Configure(limits 1, 1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestStartWithoutWork(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRegistry(t)
+
+	if j, err := r.Start(Spec{Kind: "test", Owner: "alice"}); err == nil {
+		t.Errorf("Start(no Run) = %+v, nil; want an error", j)
+	}
+
+	if jobs := r.List(Filter{}); len(jobs) != 0 {
+		t.Errorf("List() after Start(no Run) = %d jobs, want none", len(jobs))
+	}
+}
+
+// Jobs created at the same time list newest first, and the oldest of jobs
+// that finished at the same time is the first forgotten.
+func TestJobsAtTheSameTimeOrderByStart(t *testing.T) {
+	t.Parallel()
+
+	clock := newFakeClock()
+	r := newTestRegistry(t, WithClock(clock.Now), WithMaxFinished(2))
+
+	ids := make([]string, 0, 3)
+
+	for range 3 {
+		j, err := r.Start(Spec{Kind: "test", Owner: "alice", Run: outcomes(nil, nil)})
+		if err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+
+		wait(t, r, j.ID)
+
+		ids = append(ids, j.ID)
+	}
+
+	got := make([]string, 0, 2)
+	for _, j := range r.List(Filter{}) {
+		got = append(got, j.ID)
+	}
+
+	if diff := cmp.Diff([]string{ids[2], ids[1]}, got); diff != "" {
+		t.Errorf("List() of three jobs at the same time, two kept, mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Many owners starting jobs at once never run more than the limits allow,
+// and every job runs in the end (run with -race).
+func TestConcurrentStartsKeepTheLimits(t *testing.T) {
+	t.Parallel()
+
+	const perOwner, global = 2, 3
+
+	var (
+		mu                sync.Mutex
+		running, peak     int
+		runningBy, peakBy = map[string]int{}, map[string]int{}
+		release           = make(chan struct{})
+	)
+
+	r := newTestRegistry(t, WithLimits(perOwner, global))
+
+	work := func(owner string) RunFunc {
+		return func(context.Context, *Run) error {
+			mu.Lock()
+			running++
+			runningBy[owner]++
+			peak, peakBy[owner] = max(peak, running), max(peakBy[owner], runningBy[owner])
+			mu.Unlock()
+
+			<-release
+
+			mu.Lock()
+			running--
+			runningBy[owner]--
+			mu.Unlock()
+
+			return nil
+		}
+	}
+
+	var (
+		wg  sync.WaitGroup
+		ids = make(chan string, 30)
+	)
+
+	for i := range 30 {
+		owner := []string{"alice", "bob", "carol"}[i%3]
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			j, err := r.Start(Spec{Kind: "test", Owner: owner, Run: work(owner)})
+			if err != nil {
+				t.Errorf("Start(%s's job) error = %v", owner, err)
+
+				return
+			}
+
+			ids <- j.ID
+		}()
+	}
+
+	wg.Wait()
+	close(ids)
+
+	if active := r.List(Filter{Active: true}); len(active) != 30 {
+		t.Errorf("List(active) after 30 starts = %d jobs, want 30", len(active))
+	}
+
+	close(release)
+
+	for id := range ids {
+		if j := wait(t, r, id); j.Status != StatusSucceeded {
+			t.Errorf("job %s Status = %s, want %s", id, j.Status, StatusSucceeded)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if peak > global {
+		t.Errorf("most jobs running at once = %d, want at most %d", peak, global)
+	}
+
+	for owner, n := range peakBy {
+		if n > perOwner {
+			t.Errorf("most of %s's jobs running at once = %d, want at most %d", owner, n, perOwner)
+		}
+	}
+}
+
+// RemoveStaleArtifacts does nothing without an artifact folder, and reports
+// a folder it cannot read and a stale folder it cannot delete.
+func TestRemoveStaleArtifactsErrors(t *testing.T) {
+	t.Parallel()
+
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		dir string
+		// a read-only folder holding a stale folder, in place of dir
+		readOnly bool
+		wantErr  bool
+	}{
+		"none configured": {},
+		"missing":         {dir: filepath.Join(t.TempDir(), "missing")},
+		"a file":          {dir: file, wantErr: true},
+		"read-only":       {readOnly: true, wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := tc.dir
+
+			if tc.readOnly {
+				if os.Geteuid() == 0 {
+					t.Skip("root deletes from a read-only folder")
+				}
+
+				dir = t.TempDir()
+				if err := os.Mkdir(filepath.Join(dir, "j0123456789abcdef"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+
+				if err := os.Chmod(dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			}
+
+			r := newTestRegistry(t, WithArtifactDir(dir))
+
+			removed, err := r.RemoveStaleArtifacts()
+			if removed != 0 || (err != nil) != tc.wantErr {
+				t.Errorf("RemoveStaleArtifacts() in %s folder = %d, %v; want 0, error %t", name, removed, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// removeArtifact deletes a job's file and its folder, and only warns about
+// what it cannot delete.
+func TestRemoveArtifact(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		// the artifact path, relative to the artifact folder, if any
+		artifact string
+		// whether the artifact is a folder that is not empty
+		nonEmpty bool
+		noDir    bool
+		// whether the artifact folder is read-only, so its job folders stay
+		readOnly bool
+		// what is left, relative to the artifact folder
+		want []string
+	}{
+		"file and folder":    {artifact: "j1/out.zip", want: []string{}},
+		"no artifact":        {want: []string{}},
+		"artifact gone":      {artifact: "j1/gone.zip", want: []string{}},
+		"no artifact folder": {artifact: "j1/out.zip", noDir: true, want: []string{"j1"}},
+		"job folder kept":    {readOnly: true, want: []string{"j1"}},
+		"artifact not a file": {
+			artifact: "other/out.zip", nonEmpty: true, want: []string{"other", "other/out.zip", "other/out.zip/x"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "j1"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+
+			j := Job{ID: "j1"}
+
+			if tc.artifact != "" {
+				path := filepath.Join(dir, tc.artifact)
+				j.Artifact = &Artifact{Name: "out.zip", Path: path}
+
+				switch {
+				case tc.nonEmpty:
+					if err := os.MkdirAll(filepath.Join(path, "x"), 0o750); err != nil {
+						t.Fatal(err)
+					}
+				case filepath.Base(path) != "gone.zip":
+					if err := os.WriteFile(path, []byte("zip"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			if tc.readOnly {
+				if os.Geteuid() == 0 {
+					t.Skip("root deletes from a read-only folder")
+				}
+
+				if err := os.Chmod(dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			}
+
+			folder := dir
+			if tc.noDir {
+				folder = ""
+			}
+
+			removeArtifact(folder, j)
+
+			got := []string{}
+
+			_ = filepath.WalkDir(dir, func(path string, _ os.DirEntry, err error) error {
+				if rel, _ := filepath.Rel(dir, path); err == nil && rel != "." {
+					got = append(got, filepath.ToSlash(rel))
+				}
+
+				return nil
+			})
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("removeArtifact(%s) left mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// forceCancel leaves alone a job the registry does not hold or that has
+// finished.
+func TestForceCancelSkipsFinishedJobs(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRegistry(t)
+
+	started, err := r.Start(Spec{Kind: "test", Owner: "alice", Run: outcomes(nil, nil)})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	before := wait(t, r, started.ID)
+
+	r.forceCancel(started.ID)
+	r.forceCancel("jnope")
+
+	after, _ := r.Get(started.ID)
+	if diff := cmp.Diff(before, after); diff != "" {
+		t.Errorf("forceCancel(finished job) changed it (-before +after):\n%s", diff)
+	}
+}
+
+// registryNotifications waits for want notifications of the job, and returns
+// them by revision, since they may arrive out of order.
+func registryNotifications(t *testing.T, n *recorder, id string, want int) []Job {
+	t.Helper()
+
+	var jobs []Job
+
+	polltest.Until(t, fmt.Sprintf("%d notifications of job %s", want, id), func() bool {
+		jobs = n.of(id)
+
+		return len(jobs) >= want
+	})
+
+	slices.SortFunc(jobs, func(a, b Job) int {
+		switch {
+		case a.Revision < b.Revision:
+			return -1
+		case a.Revision > b.Revision:
+			return 1
+		default:
+			return 0
+		}
+	})
+
+	return jobs
+}
+
+// Without a throttle, every progress change is sent at once.
+func TestProgressWithoutThrottleIsSentAtOnce(t *testing.T) {
+	t.Parallel()
+
+	n := new(recorder)
+	r := newTestRegistry(t, WithNotifier(n.notify), WithNotifyInterval(0))
+
+	started, err := r.Start(Spec{Kind: "test", Owner: "alice", Run: func(_ context.Context, run *Run) error {
+		for range 3 {
+			run.AddBytes(1)
+		}
+
+		return nil
+	}})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	wait(t, r, started.ID)
+
+	// running, three progress updates, then succeeded
+	jobs := registryNotifications(t, n, started.ID, 5)
+
+	got := make([]int64, 0, len(jobs))
+	for _, j := range jobs {
+		got = append(got, j.Progress.Bytes)
+	}
+
+	if diff := cmp.Diff([]int64{0, 1, 2, 3, 3}, got); diff != "" {
+		t.Errorf("notified Progress.Bytes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A change sent at once, such as a cancel, carries the progress the throttle
+// held back and replaces its later notification.
+func TestCancelSendsHeldBackProgress(t *testing.T) {
+	t.Parallel()
+
+	n := new(recorder)
+	r := newTestRegistry(t, WithNotifier(n.notify), WithNotifyInterval(time.Hour))
+	reported := make(chan struct{})
+
+	started, err := r.Start(Spec{Kind: "test", Owner: "alice", Cancelable: true, Run: func(ctx context.Context, run *Run) error {
+		run.AddBytes(1)
+		run.AddBytes(1)
+		close(reported)
+		<-ctx.Done()
+
+		return ctx.Err()
+	}})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	<-reported
+
+	if _, err := r.Cancel(started.ID); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+
+	j := wait(t, r, started.ID)
+
+	type note struct {
+		Status          Status
+		CancelRequested bool
+		Bytes           int64
+	}
+
+	jobs := registryNotifications(t, n, started.ID, 3)
+
+	got := make([]note, 0, len(jobs))
+	for _, j := range jobs {
+		got = append(got, note{j.Status, j.CancelRequested, j.Progress.Bytes})
+	}
+
+	want := []note{{StatusRunning, false, 0}, {StatusRunning, true, 2}, {StatusCanceled, true, 2}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("notifications of a canceled job mismatch (-want +got):\n%s", diff)
+	}
+
+	if j.Status != StatusCanceled {
+		t.Errorf("canceled job Status = %s, want %s", j.Status, StatusCanceled)
+	}
+}
+
+// flush sends nothing once the throttle has nothing to send or the job has
+// finished.
+func TestFlushSendsNothingWhenNothingIsHeldBack(t *testing.T) {
+	t.Parallel()
+
+	n := new(recorder)
+	r := newTestRegistry(t, WithNotifier(n.notify))
+
+	started, err := r.Start(Spec{Kind: "test", Owner: "alice", Run: outcomes(nil, nil)})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	wait(t, r, started.ID)
+
+	// running, then succeeded
+	before := len(registryNotifications(t, n, started.ID, 2))
+
+	r.mu.Lock()
+	e := r.jobs[started.ID]
+	r.mu.Unlock()
+
+	r.flush(e)
+
+	r.mu.Lock()
+	e.timer = time.NewTimer(time.Hour)
+	r.mu.Unlock()
+
+	r.flush(e)
+
+	r.mu.Lock()
+	e.timer.Stop()
+	r.mu.Unlock()
+
+	if after := len(n.of(started.ID)); after != before {
+		t.Errorf("flush() of a finished job sent %d notifications, want none", after-before)
+	}
+}
+
+func TestCountItems(t *testing.T) {
+	t.Parallel()
+
+	items := []Item{
+		{Status: ItemPending}, {Status: ItemRunning}, {Status: ItemSucceeded}, {Status: ItemSucceeded},
+		{Status: ItemFailed}, {Status: ItemSkipped}, {Status: ItemCanceled},
+	}
+
+	for name, tc := range map[string]struct {
+		items []Item
+		count func([]Item) int
+		want  int
+	}{
+		"succeeded":      {items, func(i []Item) int { return countStatus(i, ItemSucceeded) }, 2},
+		"pending":        {items, func(i []Item) int { return countStatus(i, ItemPending) }, 1},
+		"terminal":       {items, countTerminal, 5},
+		"none, status":   {nil, func(i []Item) int { return countStatus(i, ItemFailed) }, 0},
+		"none, terminal": {nil, countTerminal, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.count(tc.items); got != tc.want {
+				t.Errorf("count of %s items = %d, want %d", name, got, tc.want)
+			}
+		})
+	}
+}
+
+// finalStatus of a job whose cancel was asked for is canceled, whatever its
+// items and work returned.
+func TestFinalStatusOfJob(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		job    Job
+		err    error
+		status Status
+		jobErr string
+	}{
+		"cancel asked, with an error": {
+			job: Job{CancelRequested: true, Items: []Item{{Status: ItemSucceeded}}}, err: errors.New("x"),
+			status: StatusCanceled,
+		},
+		"every item skipped": {
+			job:    Job{Items: []Item{{Status: ItemSkipped}, {Status: ItemSkipped}}},
+			status: StatusFailed, jobErr: "every item failed",
+		},
+		"items succeeded, then an error": {
+			job: Job{Items: []Item{{Status: ItemSucceeded}}}, err: errors.New("late"),
+			status: StatusPartial, jobErr: "late",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			status, jobErr := finalStatus(tc.job, tc.err)
+			if status != tc.status || jobErr != tc.jobErr {
+				t.Errorf("finalStatus(%s) = %s, %q; want %s, %q", name, status, jobErr, tc.status, tc.jobErr)
+			}
+		})
+	}
+}
+
+// Job IDs are "j" and 16 hex digits, as artifact folders are named, and
+// differ.
+func TestNewID(t *testing.T) {
+	t.Parallel()
+
+	seen := make(map[string]bool, 1000)
+
+	for range 1000 {
+		id, err := newID()
+		if err != nil {
+			t.Fatalf("newID() error = %v", err)
+		}
+
+		if !artifactDirName.MatchString(id) {
+			t.Fatalf("newID() = %q, want j and 16 hex digits", id)
+		}
+
+		if seen[id] {
+			t.Fatalf("newID() = %q twice", id)
+		}
+
+		seen[id] = true
+	}
+}

@@ -75,6 +75,34 @@ func TestDownloadConfigsArchive(t *testing.T) {
 		t.Errorf("POST %s %s archive files mismatch (-want +got):\n%s", path, all, diff)
 	}
 
+	for i, f := range archive.File {
+		r, err := f.Open()
+		if err != nil {
+			t.Fatalf("opening %s in POST %s %s: %v", f.Name, path, all, err)
+		}
+
+		content, err := io.ReadAll(r)
+		_ = r.Close()
+
+		if want := "name: " + []string{"a", "b"}[min(i, 1)]; err != nil || !strings.Contains(string(content), want) {
+			t.Errorf("POST %s %s %s = %q, %v; want the config, holding %q", path, all, f.Name, content, err, want)
+		}
+	}
+
+	for header, want := range map[string]string{"Accept-Ranges": "none", "Cache-Control": "no-store"} {
+		if got := resp.Header.Get(header); got != want {
+			t.Errorf("POST %s %s %s = %q, want %q, as the archive is built as it is sent", path, all, header, got, want)
+		}
+	}
+
+	resp = do(t, http.MethodPost, server.URL+path, "Topology/a")
+
+	got := errorMessage(t, resp.StatusCode, readBody(t, resp))
+	if resp.StatusCode != http.StatusBadRequest || got != "unable to parse request" {
+		t.Errorf("POST %s of a body not a JSON list = %d %q, want %d %q",
+			path, resp.StatusCode, got, http.StatusBadRequest, "unable to parse request")
+	}
+
 	const unknown = `["Topology/a", "Topology/none"]`
 
 	resp = do(t, http.MethodPost, server.URL+path, unknown)

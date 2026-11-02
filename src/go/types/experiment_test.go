@@ -1,15 +1,23 @@
 package types
 
 import (
+	"errors"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/activeshadow/structs"
+	"github.com/golang/mock/gomock"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"pgregory.net/rapid"
 
 	"phenix/store"
+	"phenix/store/storetest"
+	ifaces "phenix/types/interfaces"
+	"phenix/util/common"
 )
 
 func TestExperimentRunningAndDryRun(t *testing.T) {
@@ -17,10 +25,12 @@ func TestExperimentRunningAndDryRun(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		noStatus    bool
 		startTime   string
 		wantRunning bool
 		wantDryRun  bool
 	}{
+		{name: "no status", noStatus: true},
 		{name: "stopped", startTime: ""},
 		{name: "started", startTime: "2024-01-01T00:00:00Z", wantRunning: true},
 		{name: "started as a dry run", startTime: "2024-01-01T00:00:00Z-DRYRUN", wantRunning: true, wantDryRun: true},
@@ -32,6 +42,10 @@ func TestExperimentRunningAndDryRun(t *testing.T) {
 
 			exp := NewExperiment(store.ConfigMetadata{Name: "exp"})
 			exp.Status.SetStartTime(test.startTime)
+
+			if test.noStatus {
+				exp.Status = nil
+			}
 
 			if got := exp.Running(); got != test.wantRunning {
 				t.Errorf("Running() with start time %q = %t, want %t", test.startTime, got, test.wantRunning)
@@ -113,4 +127,355 @@ func TestExperimentPendingStartsRoundTrip(t *testing.T) {
 				got.Status.PostStartPending(), got.Status.Interrupted(), post, reason)
 		}
 	})
+}
+
+// experimentStoredConfig returns a stored v1 Experiment config named name,
+// started at startTime when it is not empty.
+func experimentStoredConfig(name, startTime string) *store.Config {
+	status := map[string]any{}
+	if startTime != "" {
+		status["startTime"] = startTime
+	}
+
+	return &store.Config{
+		Version:  "phenix.sandia.gov/v1",
+		Kind:     "Experiment",
+		Metadata: store.ConfigMetadata{Name: name, Annotations: store.Annotations{"stored": "yes"}},
+		Spec: map[string]any{
+			"experimentName": name,
+			"baseDir":        "/stored/" + name,
+			"scenario": map[string]any{
+				"apps": []map[string]any{{"name": "ntp"}, {"name": "soh"}},
+			},
+		},
+		Status: status,
+	}
+}
+
+// experimentCreate puts c in the test's store.
+func experimentCreate(t *testing.T, c *store.Config) {
+	t.Helper()
+
+	if err := store.Create(c); err != nil {
+		t.Fatalf("store.Create(%s) error = %v", c.Metadata.Name, err)
+	}
+}
+
+func TestExperimentReload(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	storetest.UseBolt(t)
+	experimentCreate(t, experimentStoredConfig("exp", "2024-01-01T00:00:00Z"))
+
+	exp := NewExperiment(store.ConfigMetadata{Name: "exp"})
+	if err := exp.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+
+	if got := exp.Spec.BaseDir(); got != "/stored/exp" {
+		t.Errorf("Spec.BaseDir() after Reload() = %q, want %q", got, "/stored/exp")
+	}
+
+	if got := exp.Status.StartTime(); got != "2024-01-01T00:00:00Z" {
+		t.Errorf("Status.StartTime() after Reload() = %q, want %q", got, "2024-01-01T00:00:00Z")
+	}
+
+	if got := exp.Metadata.Annotations["stored"]; got != "yes" {
+		t.Errorf("Metadata.Annotations[stored] after Reload() = %q, want %q", got, "yes")
+	}
+
+	for _, test := range []struct {
+		name, exp, want string
+	}{
+		{name: "invalid name", exp: "a/b", want: "getting experiment:"},
+		{name: "not stored", exp: "missing", want: "getting experiment missing from store"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := NewExperiment(store.ConfigMetadata{Name: test.exp}).Reload()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("Reload() of %q error = %v, want one containing %q", test.exp, err, test.want)
+			}
+		})
+	}
+}
+
+func TestExperimentReloadDecodeError(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	ctrl := gomock.NewController(t)
+	st := store.NewMockStore(ctrl)
+	storetest.Use(t, st)
+
+	st.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+		c.Version = "phenix.sandia.gov/v9"
+
+		return nil
+	})
+
+	err := NewExperiment(store.ConfigMetadata{Name: "exp"}).Reload()
+	if err == nil || !strings.Contains(err.Error(), "decoding experiment exp") {
+		t.Errorf("Reload() of an unknown version error = %v, want a decoding error", err)
+	}
+}
+
+func TestExperimentWriteToStore(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	for _, statusOnly := range []bool{false, true} {
+		t.Run("statusOnly "+strconv.FormatBool(statusOnly), func(t *testing.T) {
+			storetest.UseBolt(t)
+			experimentCreate(t, experimentStoredConfig("exp", ""))
+
+			exp := NewExperiment(store.ConfigMetadata{
+				Name:        "exp",
+				Annotations: store.Annotations{"written": "yes"},
+			})
+			exp.Spec.SetBaseDir("/written")
+			exp.Status.SetStartTime("2025-01-01T00:00:00Z")
+
+			if err := exp.WriteToStore(statusOnly); err != nil {
+				t.Fatalf("WriteToStore(%t) error = %v", statusOnly, err)
+			}
+
+			got := NewExperiment(store.ConfigMetadata{Name: "exp"})
+			if err := got.Reload(); err != nil {
+				t.Fatalf("Reload() after WriteToStore(%t) error = %v", statusOnly, err)
+			}
+
+			wantBaseDir := "/written"
+			if statusOnly {
+				wantBaseDir = "/stored/exp"
+			}
+
+			if diff := cmp.Diff(store.Annotations{"written": "yes"}, got.Metadata.Annotations); diff != "" {
+				t.Errorf("annotations after WriteToStore(%t) mismatch (-want +got):\n%s", statusOnly, diff)
+			}
+
+			if got.Spec.BaseDir() != wantBaseDir || got.Status.StartTime() != "2025-01-01T00:00:00Z" {
+				t.Errorf("BaseDir(), StartTime() after WriteToStore(%t) = %q, %q; want %q, %q",
+					statusOnly, got.Spec.BaseDir(), got.Status.StartTime(), wantBaseDir, "2025-01-01T00:00:00Z")
+			}
+		})
+	}
+}
+
+func TestExperimentWriteToStoreErrors(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	errUpdate := errors.New("update failed")
+
+	for _, test := range []struct {
+		name      string
+		getErr    error
+		updateErr error
+		wantErr   error
+		want      string
+	}{
+		{name: "not stored", getErr: store.ErrNotExist, wantErr: store.ErrNotExist, want: "getting experiment exp from store"},
+		{name: "update fails", updateErr: errUpdate, wantErr: errUpdate, want: "saving experiment config"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			st := store.NewMockStore(ctrl)
+			storetest.Use(t, st)
+
+			st.EXPECT().Get(gomock.Any()).Return(test.getErr)
+
+			if test.getErr == nil {
+				st.EXPECT().Update(gomock.Any()).Return(test.updateErr)
+			}
+
+			err := NewExperiment(store.ConfigMetadata{Name: "exp"}).WriteToStore(false)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("WriteToStore(false) error = %v, want one containing %q", err, test.want)
+			}
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("WriteToStore(false) error = %v, want it to wrap %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestExperiments(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	storetest.UseBolt(t)
+	experimentCreate(t, experimentStoredConfig("running", "2024-01-01T00:00:00Z"))
+	experimentCreate(t, experimentStoredConfig("stopped", ""))
+
+	for _, test := range []struct {
+		running bool
+		want    []string
+	}{
+		{running: false, want: []string{"running", "stopped"}},
+		{running: true, want: []string{"running"}},
+	} {
+		t.Run("running "+strconv.FormatBool(test.running), func(t *testing.T) {
+			exps, err := Experiments(test.running)
+			if err != nil {
+				t.Fatalf("Experiments(%t) error = %v", test.running, err)
+			}
+
+			names := make([]string, 0, len(exps))
+			for _, exp := range exps {
+				names = append(names, exp.Metadata.Name)
+			}
+
+			if diff := cmp.Diff(test.want, names, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Errorf("Experiments(%t) names mismatch (-want +got):\n%s", test.running, diff)
+			}
+		})
+	}
+}
+
+func TestExperimentsErrors(t *testing.T) { //nolint:paralleltest // replaces the phenix store
+	errList := errors.New("list failed")
+
+	bad := *experimentStoredConfig("bad", "")
+	bad.Version = "phenix.sandia.gov/v9"
+
+	for _, test := range []struct {
+		name    string
+		configs store.Configs
+		listErr error
+		want    string
+	}{
+		{name: "list fails", listErr: errList, want: "getting list of experiment configs"},
+		{name: "unknown version", configs: store.Configs{bad}, want: "decoding experiment bad from config"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			st := store.NewMockStore(ctrl)
+			storetest.Use(t, st)
+
+			st.EXPECT().List("Experiment").Return(test.configs, test.listErr)
+
+			exps, err := Experiments(false)
+			if err == nil || !strings.Contains(err.Error(), test.want) || exps != nil {
+				t.Errorf("Experiments(false) = %v, %v; want nil and an error containing %q", exps, err, test.want)
+			}
+		})
+	}
+}
+
+func TestDecodeExperimentFromConfigErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		config func(*store.Config)
+		want   string
+	}{
+		{
+			name:   "unknown version",
+			config: func(c *store.Config) { c.Version = "phenix.sandia.gov/v9" },
+			want:   "getting versioned spec for config",
+		},
+		{
+			name:   "spec of the wrong type",
+			config: func(c *store.Config) { c.Spec = map[string]any{"baseDir": []int{1}} },
+			want:   "decoding versioned spec for experiment exp",
+		},
+		{
+			name: "spec of another kind",
+			config: func(c *store.Config) {
+				c.Kind = "Topology"
+				c.Spec = map[string]any{}
+			},
+			want: "invalid spec in config",
+		},
+		{
+			name:   "status of the wrong type",
+			config: func(c *store.Config) { c.Status = map[string]any{"startTime": []int{1}} },
+			want:   "decoding versioned status",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := experimentStoredConfig("exp", "")
+			test.config(c)
+
+			exp, err := DecodeExperimentFromConfig(*c)
+			if err == nil || !strings.Contains(err.Error(), test.want) || exp != nil {
+				t.Errorf("DecodeExperimentFromConfig() = %v, %v; want nil and an error containing %q", exp, err, test.want)
+			}
+		})
+	}
+}
+
+// experimentNoScenarioSpec is an experiment spec with no scenario at all.
+type experimentNoScenarioSpec struct {
+	ifaces.ExperimentSpec
+}
+
+func (experimentNoScenarioSpec) Scenario() ifaces.ScenarioSpec { return nil } //nolint:ireturn // interface
+
+func TestExperimentApps(t *testing.T) {
+	t.Parallel()
+
+	withApps, err := DecodeExperimentFromConfig(*experimentStoredConfig("exp", ""))
+	if err != nil {
+		t.Fatalf("DecodeExperimentFromConfig() error = %v", err)
+	}
+
+	noApps := NewExperiment(store.ConfigMetadata{Name: "exp"})
+
+	noScenario := NewExperiment(store.ConfigMetadata{Name: "exp"})
+	noScenario.SetSpec(experimentNoScenarioSpec{noScenario.Spec})
+
+	tests := []struct {
+		name  string
+		exp   *Experiment
+		apps  []string
+		found string // the app App("soh") finds
+	}{
+		{name: "scenario with apps", exp: withApps, apps: []string{"ntp", "soh"}, found: "soh"},
+		{name: "empty scenario", exp: noApps},
+		{name: "no scenario", exp: noScenario},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var names []string
+			for _, app := range test.exp.Apps() {
+				names = append(names, app.Name())
+			}
+
+			if diff := cmp.Diff(test.apps, names); diff != "" {
+				t.Errorf("Apps() names mismatch (-want +got):\n%s", diff)
+			}
+
+			var found string
+			if app := test.exp.App("soh"); app != nil {
+				found = app.Name()
+			}
+
+			if found != test.found {
+				t.Errorf("App(soh) name = %q, want %q", found, test.found)
+			}
+
+			if app := test.exp.App("missing"); app != nil {
+				t.Errorf("App(missing) = %v, want nil", app)
+			}
+		})
+	}
+}
+
+func TestExperimentSetSpec(t *testing.T) {
+	t.Parallel()
+
+	exp := NewExperiment(store.ConfigMetadata{Name: "exp"})
+	other := NewExperiment(store.ConfigMetadata{Name: "other"})
+
+	exp.SetSpec(other.Spec)
+
+	if exp.Spec != other.Spec {
+		t.Errorf("Spec after SetSpec(other) = %p, want %p", exp.Spec, other.Spec)
+	}
+}
+
+func TestExperimentFilesDir(t *testing.T) {
+	t.Parallel()
+
+	exp := NewExperiment(store.ConfigMetadata{Name: "exp"})
+
+	if got, want := exp.FilesDir(), filepath.Join(common.PhenixBase, "images", "exp", "files"); got != want {
+		t.Errorf("FilesDir() = %q, want %q", got, want)
+	}
 }

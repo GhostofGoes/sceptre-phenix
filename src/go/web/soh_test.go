@@ -1,11 +1,16 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -13,9 +18,14 @@ import (
 
 	"phenix/api/soh"
 	"phenix/store"
+	"phenix/types"
+	"phenix/util/freshness"
+	"phenix/util/mm"
 	"phenix/util/mm/mmtest"
 	"phenix/web/cache"
+	"phenix/web/middleware"
 	"phenix/web/rbac"
+	"phenix/web/weberror"
 )
 
 func TestGetExperimentSoHNeedsExperimentGet(t *testing.T) {
@@ -323,5 +333,272 @@ func TestGetSoHSummaryUnknownWhileBusyWithoutStates(t *testing.T) {
 
 	if got := sums[1].VMsObservedAt; got != "" {
 		t.Errorf("GET /api/v1/soh while busy with no states read zeta vms_observed_at = %q, want none", got)
+	}
+}
+
+// sohBrokenApp is the running experiment name whose soh app status is not an object, as no soh app writes it.
+func sohBrokenApp(name string) store.Config {
+	exp := sohSummaryExperiment(name, true, "soh")
+	exp.Status["apps"] = map[string]any{"soh": "broken"}
+
+	return exp
+}
+
+// sohUnencodable is the running experiment name whose soh result for vm-a holds a number JSON cannot.
+func sohUnencodable(name string) store.Config {
+	exp := sohSummaryExperiment(name, true, "soh")
+	exp.Status["apps"] = map[string]any{"soh": map[string]any{"hosts": []any{map[string]any{
+		"hostname":   "vm-a",
+		"networking": []any{map[string]any{"metadata": map[string]any{"rtt": math.NaN()}}},
+	}}}}
+
+	return exp
+}
+
+// GET /experiments/{name}/soh answers the experiment's network, or a 500 for a status it cannot read.
+func TestGetExperimentSoH(t *testing.T) {
+	tests := map[string]struct {
+		exp         store.Config
+		wantCode    int
+		wantStarted bool
+		wantInit    bool
+		wantNodes   []string // each node's label and status
+		wantMessage string
+	}{
+		"running": {
+			exp: sohSummaryExperiment("exp", true, "soh"), wantCode: http.StatusOK, wantStarted: true, wantInit: true,
+			wantNodes: []string{"vm-a running"}, // minimega lacks vm-b, so it was not deployed
+		},
+		"stopped": {
+			exp: sohSummaryExperiment("exp", false, "soh"), wantCode: http.StatusOK,
+			wantNodes: []string{"vm-a notdeploy", "vm-b notdeploy"},
+		},
+		"an undecodable soh status": {
+			exp: sohBrokenApp("exp"), wantCode: http.StatusInternalServerError,
+			wantMessage: "unable to decode state of health details",
+		},
+		"a result JSON cannot hold": {
+			exp: sohUnencodable("exp"), wantCode: http.StatusInternalServerError, wantMessage: "unsupported value: NaN",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestStore(t, tc.exp)
+			useTestMM(t, &testMM{
+				vms:    mm.VMs{{Name: "vm-a", State: "RUNNING", Running: true}},
+				states: map[string]string{"vm-a": "RUNNING"},
+			})
+
+			resp := do(t, http.MethodGet, serveAs(t, "alice", testRole("experiments", "get", "exp")).URL+"/api/v1/experiments/exp/soh", "")
+			body := readBody(t, resp)
+
+			if resp.StatusCode != tc.wantCode {
+				t.Fatalf("GET /api/v1/experiments/exp/soh = %d, want %d: %s", resp.StatusCode, tc.wantCode, body)
+			}
+
+			if tc.wantCode != http.StatusOK {
+				if got := errorMessage(t, resp.StatusCode, body); !strings.Contains(got, tc.wantMessage) {
+					t.Errorf("GET /api/v1/experiments/exp/soh message = %q, want it to contain %q", got, tc.wantMessage)
+				}
+
+				return
+			}
+
+			if got := resp.Header.Get("Content-Type"); got != mimeJSON {
+				t.Errorf("GET /api/v1/experiments/exp/soh Content-Type = %q, want %q", got, mimeJSON)
+			}
+
+			var network soh.Network
+			if err := json.Unmarshal([]byte(body), &network); err != nil {
+				t.Fatalf("GET /api/v1/experiments/exp/soh = %s, not a network: %v", body, err)
+			}
+
+			if network.ExpStarted != tc.wantStarted || network.SOHInitialized != tc.wantInit {
+				t.Errorf("GET /api/v1/experiments/exp/soh started, soh_initialized = %t, %t; want %t, %t",
+					network.ExpStarted, network.SOHInitialized, tc.wantStarted, tc.wantInit)
+			}
+
+			var nodes []string
+			for _, n := range network.Nodes {
+				nodes = append(nodes, n.Label+" "+n.Status)
+			}
+
+			if diff := cmp.Diff(tc.wantNodes, nodes); diff != "" {
+				t.Errorf("GET /api/v1/experiments/exp/soh nodes mismatch (-want +got):\n%s", diff)
+			}
+
+			if network.Nodes == nil || network.Edges == nil || network.Hosts == nil || network.HostFlows == nil {
+				t.Errorf("GET /api/v1/experiments/exp/soh = %s, want lists, not null", body)
+			}
+		})
+	}
+}
+
+// The summary of an experiment whose soh status cannot be read carries the error beside the others' summaries.
+func TestGetSoHSummaryReportsSummaryErrors(t *testing.T) {
+	useTestStore(t, sohBrokenApp("broken"), sohSummaryExperiment("fine", false))
+	useTestMM(t, &testMM{states: map[string]string{"vm-a": "RUNNING"}})
+
+	t.Cleanup(func() { lastVMStates.Delete("broken") })
+
+	code, sums := getSohSummary(t, sohSummaryRole("*"))
+	if code != http.StatusOK || len(sums) != 2 {
+		t.Fatalf("GET /api/v1/soh = %d %+v, want %d and two summaries", code, sums, http.StatusOK)
+	}
+
+	if got := sums[0]; got.Name != "broken" || !strings.Contains(got.Error, "unexpected type string") {
+		t.Errorf("GET /api/v1/soh first summary = %s with error %q, want broken with the soh status's", got.Name, got.Error)
+	}
+
+	if got := sums[1]; got.Name != "fine" || got.Error != "" {
+		t.Errorf("GET /api/v1/soh second summary = %s with error %q, want fine with none", got.Name, got.Error)
+	}
+}
+
+// A store that holds an undecodable experiment still gives the summaries of the others, and logs the error.
+func TestGetSoHSummaryServesWhatTheStoreDecodes(t *testing.T) {
+	useTestStore(t, sohSummaryExperiment("fine", false))
+
+	server := serveAs(t, "alice", sohSummaryRole("*")).URL
+
+	s, _ := store.DefaultStore.(*testStore)
+	store.DefaultStore = undecodableStore{testStore: s} //nolint:reassign // useTestStore restores it
+
+	records := captureRecords(t)
+
+	resp := do(t, http.MethodGet, server+"/api/v1/soh", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/soh with an undecodable experiment = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var body struct {
+		Experiments []soh.Summary `json:"experiments"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding GET /api/v1/soh: %v", err)
+	}
+
+	sums := body.Experiments
+
+	names := make([]string, 0, len(sums))
+	for _, sum := range sums {
+		names = append(names, sum.Name)
+	}
+
+	if diff := cmp.Diff([]string{"fine"}, names); diff != "" {
+		t.Errorf("GET /api/v1/soh with an undecodable experiment summaries mismatch (-want +got):\n%s", diff)
+	}
+
+	if !slices.ContainsFunc(records(), func(r string) bool { return strings.Contains(r, `"msg":"getting experiments"`) }) {
+		t.Error("GET /api/v1/soh with an undecodable experiment logged no error getting experiments")
+	}
+}
+
+// A summary whose client leaves while its minimega read waits for the shared connection gives the read up and
+// writes nothing.
+func TestGetSoHSummaryGivesUpWhenTheClientLeaves(t *testing.T) {
+	useTestStore(t, sohSummaryExperiment("exp", true, "soh"))
+
+	received := holdMinimega(t)
+
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), middleware.ContextKeyRole, sohSummaryRole("*")))
+
+	var (
+		rec  = httptest.NewRecorder()
+		done = make(chan struct{})
+	)
+
+	go func() {
+		defer close(done)
+
+		weberror.ErrorHandler(GetSoHSummary).ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/soh", nil))
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GET /soh kept waiting for minimega after its client left")
+	}
+
+	if rec.Body.Len() != 0 {
+		t.Errorf("GET /soh wrote %q (status %d) to a client that left, want nothing", rec.Body.String(), rec.Code)
+	}
+
+	got := slices.DeleteFunc(mmtest.Bases(received()), func(base string) bool { return base == "args" })
+	if diff := cmp.Diff([]string{"hold"}, got); diff != "" {
+		t.Errorf("GET /soh minimega commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// sohVMStates asks minimega nothing about an experiment that is stopped or a dry run, and forgets its last states.
+func TestSohVMStatesOfExperimentsNotRunning(t *testing.T) {
+	tests := map[string]string{"stopped": "", "dry run": "2026-09-28T14:00:00Z-DRYRUN"}
+
+	for name, started := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := sohSummaryExperiment("soh-not-running", started != "")
+			if started != "" {
+				config.Status["startTime"] = started
+			}
+
+			exp, err := types.DecodeExperimentFromConfig(config)
+			if err != nil {
+				t.Fatalf("types.DecodeExperimentFromConfig(%s) error = %v", name, err)
+			}
+
+			fake := useTestMM(t, &testMM{states: map[string]string{"vm-a": "RUNNING"}})
+
+			lastVMStates.Store("soh-not-running", vmStatesRead{states: map[string]string{"vm-a": "RUNNING"}, at: time.Now()})
+			t.Cleanup(func() { lastVMStates.Delete("soh-not-running") })
+
+			for _, busy := range []bool{false, true} {
+				states, obs, err := sohVMStates(t.Context(), *exp, busy)
+				if states != nil || obs != freshness.Unobserved() || err != nil {
+					t.Errorf("sohVMStates(%s, busy %t) = %v, %+v, %v; want nil, unobserved, nil", name, busy, states, obs, err)
+				}
+			}
+
+			if _, ok := lastVMStates.Load("soh-not-running"); ok {
+				t.Errorf("sohVMStates(%s) kept the experiment's last VM states, want them forgotten", name)
+			}
+
+			if n := fake.stateReads.Load(); n != 0 {
+				t.Errorf("sohVMStates(%s) read minimega VM states %d times, want none", name, n)
+			}
+		})
+	}
+}
+
+// A summary JSON cannot hold, as of a start whose progress is not a number, answers 500 and is logged.
+func TestGetSoHSummaryCannotEncode(t *testing.T) {
+	useTestStore(t, sohSummaryExperiment("starting", false, "soh"))
+	useTestMM(t, &testMM{})
+
+	if err := cache.LockExperimentForStarting("starting"); err != nil {
+		t.Fatalf("cache.LockExperimentForStarting(starting) error = %v", err)
+	}
+
+	startProgress.Store("starting", math.NaN())
+
+	t.Cleanup(func() {
+		startProgress.Delete("starting")
+		cache.UnlockExperiment("starting")
+	})
+
+	records := captureRecords(t)
+
+	code, _ := getSohSummary(t, sohSummaryRole("*"))
+	if code != http.StatusInternalServerError {
+		t.Errorf("GET /api/v1/soh with a start at NaN%% = %d, want %d", code, http.StatusInternalServerError)
+	}
+
+	if !slices.ContainsFunc(records(), func(r string) bool {
+		return strings.Contains(r, `"msg":"marshaling state of health summary"`)
+	}) {
+		t.Error("GET /api/v1/soh with a summary JSON cannot hold logged no marshaling error")
 	}
 }

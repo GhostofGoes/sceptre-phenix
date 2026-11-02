@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"pgregory.net/rapid"
 
 	"phenix/api/experiment"
 	"phenix/store"
@@ -107,6 +110,26 @@ func TestExperimentCreateAnnotationFlags(t *testing.T) {
 			},
 		},
 		{
+			name: "keeps a JSON object, a spaced boolean and a number as a string",
+			args: []string{
+				"--node-annotation", `ports={"http": 80}`,
+				"--node-annotation", "enabled= true ",
+				"--node-annotation", "count=5",
+				"--node-annotation", "count=6",
+			},
+			wantAnnotations: map[string]string{"topology": "vm-topo"},
+			wantNode: map[string]any{
+				"ports":   map[string]any{"http": float64(80)},
+				"enabled": true,
+				"count":   "6",
+			},
+		},
+		{
+			name:            "keeps the last of repeated annotations",
+			args:            []string{"--annotation", "note=a", "--annotation", "note=b"},
+			wantAnnotations: map[string]string{"topology": "vm-topo", "note": "b"},
+		},
+		{
 			name:    "rejects an annotation without =",
 			args:    []string{"--annotation", "no-equals"},
 			wantErr: `"no-equals" is not of the form key=value`,
@@ -167,4 +190,85 @@ func TestExperimentCreateAnnotationFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+// experimentAnnotationValue draws a flag value: key=value with a key that can
+// be blank, or text that can lack the =.
+func experimentAnnotationValue(t *rapid.T) string {
+	value := rapid.OneOf(
+		rapid.Map(rapid.Bool(), strconv.FormatBool),
+		rapid.SampledFrom([]string{" true ", "[1,2]", `{"a":1}`, "[bad", "{", "5", "", "a=b", "null"}),
+		rapid.String(),
+	)
+
+	return rapid.OneOf(
+		rapid.Map(rapid.StringMatching(`[ a-z/.-]{0,6}`), func(key string) string {
+			return key + "=" + value.Draw(t, "value")
+		}),
+		rapid.StringMatching(`[ a-z=]{0,6}`),
+	).Draw(t, "flag")
+}
+
+// Whatever the flag values, the annotations are the text before and after
+// each value's first =, the last value of a key winning, and a value with no
+// = or a blank key fails. A node annotation keeps true, false and a JSON
+// list or object as that value, and any other text as it is.
+func TestExperimentAnnotationParseProperty(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		values := rapid.SliceOf(rapid.Custom(experimentAnnotationValue)).Draw(t, "values")
+
+		want, wantNode := map[string]string{}, map[string]any{}
+		bad, refused := "", false
+
+		for _, value := range values {
+			key, val, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				bad, refused = value, true
+
+				break
+			}
+
+			want[key] = val
+
+			var node any = val
+
+			yes, no := strconv.FormatBool(true), strconv.FormatBool(false)
+
+			switch trimmed := strings.TrimSpace(val); {
+			case trimmed == yes, trimmed == no:
+				node = trimmed == yes
+			case (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)):
+				_ = json.Unmarshal([]byte(trimmed), &node)
+			}
+
+			wantNode[key] = node
+		}
+
+		got, err := parseAnnotationFlags(values)
+		gotNode, nodeErr := parseNodeAnnotationFlags(values)
+
+		if refused {
+			for _, e := range []error{err, nodeErr} {
+				if e == nil || !strings.Contains(e.Error(), strconv.Quote(bad)) {
+					t.Fatalf("parsing %q error = %v, want one naming %q", values, e, bad)
+				}
+			}
+
+			return
+		}
+
+		if err != nil || nodeErr != nil {
+			t.Fatalf("parsing %q errors = %v, %v", values, err, nodeErr)
+		}
+
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("parseAnnotationFlags(%q) mismatch (-want +got):\n%s", values, diff)
+		}
+
+		if diff := cmp.Diff(wantNode, gotNode); diff != "" {
+			t.Fatalf("parseNodeAnnotationFlags(%q) mismatch (-want +got):\n%s", values, diff)
+		}
+	})
 }

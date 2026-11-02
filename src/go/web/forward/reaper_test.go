@@ -19,6 +19,7 @@ import (
 	"phenix/store/storetest"
 	v1 "phenix/types/version/v1"
 	"phenix/util/mm"
+	"phenix/web/broker"
 	ft "phenix/web/forward/forwardtypes"
 	"phenix/web/middleware"
 	"phenix/web/rbac"
@@ -245,17 +246,7 @@ func TestReapingAsksMinimegaOnlyWhenNeeded(t *testing.T) {
 func reapAll() []string {
 	reapForwards()
 
-	forwardsMu.Lock()
-	defer forwardsMu.Unlock()
-
-	keys := make([]string, 0, len(forwards))
-	for key := range forwards {
-		keys = append(keys, key)
-	}
-
-	slices.Sort(keys)
-
-	return keys
+	return reaperKeys()
 }
 
 // A VM's forwards are its own, not those of a VM whose name starts with its
@@ -342,4 +333,135 @@ func TestForwardExistsProperties(t *testing.T) {
 			t.Fatalf("forwardExists(%+v, %v) = false, want true with its own tunnel listed", l, listed)
 		}
 	})
+}
+
+// reaperQueued returns how many broadcasts wait for the broker, which no test
+// in this package starts.
+func reaperQueued() int {
+	return broker.CurrentStats().Queued
+}
+
+// announceDeleted broadcasts one delete for each forward.
+//
+//nolint:paralleltest // counts the broker's shared queue
+func TestAnnounceDeletedBroadcastsEachForward(t *testing.T) {
+	for name, tc := range map[string]struct {
+		forwards []ft.Listener
+		want     int
+	}{
+		"none": {want: 0},
+		"two": {
+			forwards: []ft.Listener{{Exp: "exp", VM: "a", DstPort: 22}, {Exp: "exp", VM: "b", DstPort: 80}},
+			want:     2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := reaperQueued()
+
+			announceDeleted(tc.forwards)
+
+			if got := reaperQueued() - before; got != tc.want {
+				t.Errorf("announceDeleted(%d forwards) queued %d broadcasts, want %d", len(tc.forwards), got, tc.want)
+			}
+		})
+	}
+}
+
+// reaperChangingMM lists no tunnels, and while it does replaces the forward
+// with key with changed, as a user recreating it would.
+type reaperChangingMM struct {
+	mm.MM
+
+	key     string
+	changed ft.Listener
+}
+
+func (m *reaperChangingMM) GetTunnels(...mm.Option) []map[string]string {
+	forwardsMu.Lock()
+	forwards[m.key] = m.changed
+	forwardsMu.Unlock()
+
+	return nil
+}
+
+// Reaping drops a closed forward and announces it, but keeps one that
+// changed while minimega was asked about it.
+//
+//nolint:paralleltest // replaces the store, minimega and the forwards, and counts the broker's queue
+func TestReapingKeepsAForwardChangedMeanwhile(t *testing.T) {
+	closed := ft.Listener{Exp: "exp", VM: "a", DstHost: "127.0.0.1", DstPort: 22, Owner: "u"}
+	changed := closed
+	changed.ClusterPort = 50001
+
+	for name, tc := range map[string]struct {
+		change    bool
+		want      []string
+		announced int
+	}{
+		"closed":            {want: []string{}, announced: 1},
+		"changed meanwhile": {change: true, want: []string{changed.ToKey()}, announced: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			useForwards(t, []string{"exp"}, nil, closed)
+
+			if tc.change {
+				fake := &reaperChangingMM{key: closed.ToKey(), changed: changed}
+				mm.DefaultMM = fake //nolint:reassign // install test double; useForwards restores minimega
+			}
+
+			before := reaperQueued()
+
+			reapVMForwards("exp", "a")
+
+			if got := reaperQueued() - before; got != tc.announced {
+				t.Errorf("reapVMForwards(exp, a) announced %d deletes, want %d", got, tc.announced)
+			}
+
+			forwardsMu.Lock()
+			kept, ok := forwards[closed.ToKey()]
+			forwardsMu.Unlock()
+
+			if tc.change && (!ok || kept != changed) {
+				t.Errorf("reapVMForwards(exp, a) left %+v, %t; want the changed forward %+v", kept, ok, changed)
+			}
+
+			if diff := cmp.Diff(tc.want, reaperKeys(), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("reapVMForwards(exp, a) forwards left mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// reaperKeys returns the keys of the forwards held, sorted.
+func reaperKeys() []string {
+	forwardsMu.Lock()
+	defer forwardsMu.Unlock()
+
+	keys := make([]string, 0, len(forwards))
+	for key := range forwards {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	return keys
+}
+
+// removeLocked forgets only the given forward.
+//
+//nolint:paralleltest // replaces the forwards
+func TestRemoveLockedForgetsOneForward(t *testing.T) {
+	a := ft.Listener{Exp: "exp", VM: "a", DstPort: 22}
+	b := ft.Listener{Exp: "exp", VM: "b", DstPort: 22}
+
+	useForwards(t, nil, nil, a, b)
+
+	forwardsMu.Lock()
+	removeLocked(a)
+	removeLocked(ft.Listener{Exp: "exp", VM: "c", DstPort: 22})
+	forwardsMu.Unlock()
+
+	if diff := cmp.Diff([]string{b.ToKey()}, reaperKeys()); diff != "" {
+		t.Errorf("removeLocked(a) forwards left mismatch (-want +got):\n%s", diff)
+	}
 }

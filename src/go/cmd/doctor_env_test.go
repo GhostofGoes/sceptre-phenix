@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,6 +137,12 @@ func TestEnvChecks(t *testing.T) {
 				row("PHENIX_LOG_SYSTEM_MAX_SIZE", doctorFail, "-1 is negative, so every write to the system log fails"),
 			},
 		},
+		"zero log size": {
+			vars: map[string]string{"PHENIX_LOG_SYSTEM_MAX_SIZE": "0"},
+			want: []doctorCheck{
+				row("PHENIX_LOG_SYSTEM_MAX_SIZE", doctorPass, "0, so the system log rotates at 100 MB"),
+			},
+		},
 		"misread log settings": {
 			vars: map[string]string{"PHENIX_LOG_SYSTEM_MAX_SIZE": "big", "PHENIX_LOG_LEVEL": "loud"},
 			want: []doctorCheck{
@@ -255,6 +263,12 @@ func TestEnvChecks(t *testing.T) {
 			vars: map[string]string{"PHENIX_UI_BASE_PATH": "//a//"},
 			want: []doctorCheck{row("PHENIX_UI_BASE_PATH", doctorPass, "//a//")},
 		},
+		"base path with a space": {
+			vars: map[string]string{"PHENIX_UI_BASE_PATH": "/my phenix/"},
+			want: []doctorCheck{
+				row("PHENIX_UI_BASE_PATH", doctorWarn, `"/my phenix/" has characters a URL path cannot hold as they are`),
+			},
+		},
 		"base path URL": {
 			vars: map[string]string{"PHENIX_UI_BASE_PATH": "https://example.com/phenix"},
 			want: []doctorCheck{
@@ -289,6 +303,10 @@ func TestEnvChecks(t *testing.T) {
 			vars: map[string]string{"PHENIX_UI_FEATURES": "vm-mount,webshark"},
 			want: []doctorCheck{row("PHENIX_UI_FEATURES", doctorFail,
 				`"vm-mount,webshark" holds a comma. phenix splits PHENIX_UI_FEATURES on spaces, so separate features with spaces`)},
+		},
+		"known features": {
+			vars: map[string]string{"PHENIX_UI_FEATURES": " vm-mount   webshark "},
+			want: []doctorCheck{row("PHENIX_UI_FEATURES", doctorPass, "vm-mount webshark")},
 		},
 		"unknown feature": {
 			vars: map[string]string{"PHENIX_UI_FEATURES": "vm-mount webshrak"},
@@ -444,6 +462,10 @@ func TestEnvChecks(t *testing.T) {
 			vars: map[string]string{"PATH": "/usr/bin:/bin"},
 			want: []doctorCheck{row("PATH", doctorPass, "2 directories")},
 		},
+		"empty path": {
+			vars: map[string]string{"PATH": ""},
+			want: []doctorCheck{row("PATH", doctorWarn, "empty, so phenix finds no apps or tools")},
+		},
 		"editor": {
 			vars: map[string]string{"EDITOR": "code -w"},
 			want: []doctorCheck{
@@ -453,10 +475,6 @@ func TestEnvChecks(t *testing.T) {
 					`"code -w" is not a program on PATH, so phenix cannot open an editor. phenix runs EDITOR as one program, without arguments`,
 				),
 			},
-		},
-		"empty editor": {
-			vars: map[string]string{"EDITOR": ""},
-			want: []doctorCheck{row("EDITOR", doctorPass, "empty, so phenix uses /usr/bin/vim")},
 		},
 		"sudo, not root": {
 			vars: map[string]string{"SUDO_USER": "alice", "SUDO_COMMAND": "/usr/bin/phenix ui"},
@@ -569,6 +587,10 @@ func TestSettingValueCheckCoversEverySetting(t *testing.T) {
 			t.Errorf("settingValueCheck(%s) has no check for the setting", key)
 		}
 	}
+
+	if check, ok := settingValueCheck(env, "no.such-setting", "x"); ok || check.Status != doctorFail {
+		t.Errorf("settingValueCheck(no.such-setting) = %+v, %t, want a failed row and false", check, ok)
+	}
 }
 
 // The int, bool and duration checks read a value as viper does: what they
@@ -622,12 +644,18 @@ func TestUnknownEnvDetail(t *testing.T) {
 		"PHENIX_SOMETHING":  "matches no phenix setting, so phenix ignores it",
 		"PHENIX_FILES_DIR":  "phenix sets it for the apps it runs, and ignores it itself",
 		"PHENIX_LOG_CONSOL": "matches no phenix setting, so phenix ignores it (did you mean PHENIX_LOG_CONSOLE?)",
+		"PHENIX_WEB_AUTH":   "a build argument of the phenix image, which phenix ignores when it runs",
+		"PHENIX_LOG_LEVEL_": "matches no phenix setting, so phenix ignores it (did you mean PHENIX_LOG_LEVEL?)",
 	}
 
 	for name, want := range tests {
-		if got := unknownEnvDetail(name, known); got != want {
-			t.Errorf("unknownEnvDetail(%s) = %q, want %q", name, got, want)
-		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := unknownEnvDetail(name, known); got != want {
+				t.Errorf("unknownEnvDetail(%s) = %q, want %q", name, got, want)
+			}
+		})
 	}
 }
 
@@ -716,6 +744,366 @@ func TestSocketCheckUnwritableDir(t *testing.T) {
 
 			if diff := cmp.Diff(tc.want, env.socketCheck(path)); diff != "" {
 				t.Errorf("socketCheck() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// osDoctorEnv reads this host: its lookups are set, it knows the built-in roles, the page size and whether this
+// process is root, and its groups hold the effective group.
+func TestOSDoctorEnv(t *testing.T) {
+	t.Parallel()
+
+	env := osDoctorEnv()
+
+	for name, set := range map[string]bool{
+		"lookup": env.lookup != nil, "environ": env.environ != nil, "lookPath": env.lookPath != nil,
+		"lookupPort": env.lookupPort != nil, "lookupUser": env.lookupUser != nil, "lookupGroup": env.lookupGroup != nil,
+		"lookupUID": env.lookupUID != nil, "stat": env.stat != nil, "lstat": env.lstat != nil,
+		"access": env.access != nil, "readFile": env.readFile != nil, "readAt": env.readAt != nil,
+		"readDir": env.readDir != nil, "fsType": env.fsType != nil, "socketPeer": env.socketPeer != nil,
+		"groups": env.groups != nil,
+	} {
+		if !set {
+			t.Errorf("osDoctorEnv().%s = nil", name)
+		}
+	}
+
+	if diff := cmp.Diff(builtinRoles(), env.roles); diff != "" || len(env.roles) == 0 {
+		t.Errorf("osDoctorEnv().roles = %q, want the built-in roles (-want +got):\n%s", env.roles, diff)
+	}
+
+	if env.pageSize != os.Getpagesize() || env.root != (os.Getuid() == 0) {
+		t.Errorf("osDoctorEnv() pageSize, root = %d, %t, want %d, %t", env.pageSize, env.root, os.Getpagesize(),
+			os.Getuid() == 0)
+	}
+
+	if groups, err := env.groups(); err != nil || !slices.Contains(groups, os.Getegid()) {
+		t.Errorf("osDoctorEnv().groups() = %v, %v, want the effective group %d", groups, err, os.Getegid())
+	}
+
+	if value, ok := env.lookup("PATH"); !ok || value != os.Getenv("PATH") {
+		t.Errorf("osDoctorEnv().lookup(PATH) = %q, %t, want this process's PATH", value, ok)
+	}
+}
+
+// lookupTCPPort gives the port of a number or a well-known TCP service, and an error for an unknown service.
+func TestLookupTCPPort(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		service string
+		want    int
+		wantErr bool
+	}{
+		"http":    {service: "http", want: 80},
+		"https":   {service: "https", want: 443},
+		"number":  {service: "8080", want: 8080},
+		"unknown": {service: "no-such-phenix-service", wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := lookupTCPPort(tc.service)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("lookupTCPPort(%q) = %d, %v, want %d and an error %t", tc.service, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// builtinRoles holds the roles that phenix ui gives the default users.
+func TestBuiltinRoles(t *testing.T) {
+	t.Parallel()
+
+	roles := builtinRoles()
+
+	for _, role := range []string{"global-admin", "global-viewer", "experiment-viewer"} {
+		if !slices.Contains(roles, role) {
+			t.Errorf("builtinRoles() = %q, want it to hold %s", roles, role)
+		}
+	}
+}
+
+// The status helpers give a row of their status with the detail and no name.
+func TestDoctorEnvStatusRows(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		got  doctorCheck
+		want doctorCheck
+	}{
+		"pass": {got: passCheck("a"), want: doctorCheck{Name: "", Status: doctorPass, Detail: "a"}},
+		"warn": {got: warnCheck("b"), want: doctorCheck{Name: "", Status: doctorWarn, Detail: "b"}},
+		"fail": {got: failCheck(""), want: doctorCheck{Name: "", Status: doctorFail, Detail: ""}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, tc.got); diff != "" {
+				t.Errorf("%sCheck() mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// envChecks gives one row for a variable that environ lists twice, and none for one that lookup does not find.
+func TestEnvChecksEnviron(t *testing.T) {
+	t.Parallel()
+
+	env := fakeDoctorEnv(map[string]string{"PHENIX_LOG_LEVEL": "debug"}, false)
+	env.environ = func() []string {
+		return []string{"PHENIX_LOG_LEVEL=debug", "PHENIX_GONE=1", "PHENIX_LOG_LEVEL=debug", "NOEQUALS"}
+	}
+
+	want := []doctorCheck{row("PHENIX_LOG_LEVEL", doctorPass, "debug")}
+	if diff := cmp.Diff(want, envChecks(env, map[string]string{"log.level": sourceEnv})); diff != "" {
+		t.Errorf("envChecks() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// editDistance is the Levenshtein distance between two names.
+func TestEditDistance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0}, {"", "abc", 3}, {"abc", "", 3}, {"abc", "abc", 0}, {"abc", "abx", 1},
+		{"kitten", "sitting", 3}, {"PHENIX_LOG_LEVL", "PHENIX_LOG_LEVEL", 1}, {"ab", "ba", 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.a+"/"+tc.b, func(t *testing.T) {
+			t.Parallel()
+
+			if got := editDistance(tc.a, tc.b); got != tc.want {
+				t.Errorf("editDistance(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// editDistance is 0 only between equal names, the same both ways, at least the difference in length, at most the
+// longer length, and never more than the distances through a third name.
+func TestEditDistanceProperty(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		word := rapid.StringMatching(`[A-C_]{0,8}`)
+		a, b, c := word.Draw(t, "a"), word.Draw(t, "b"), word.Draw(t, "c")
+		d := editDistance(a, b)
+
+		switch {
+		case (d == 0) != (a == b):
+			t.Fatalf("editDistance(%q, %q) = %d", a, b, d)
+		case d != editDistance(b, a):
+			t.Fatalf("editDistance(%q, %q) = %d, but %d the other way", a, b, d, editDistance(b, a))
+		case d < max(len(a), len(b))-min(len(a), len(b)) || d > max(len(a), len(b)):
+			t.Fatalf("editDistance(%q, %q) = %d, out of its bounds", a, b, d)
+		case d > editDistance(a, c)+editDistance(c, b):
+			t.Fatalf("editDistance(%q, %q) = %d, more than through %q", a, b, d, c)
+		}
+	})
+}
+
+// gidCheck fails a value that is not a number, and when it cannot list this user's groups, it passes a group that has
+// a name and fails one that has none.
+func TestGidCheckEdges(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		value     string
+		groupsErr bool
+		want      doctorCheck
+	}{
+		"not a number":          {value: "staff", want: failCheck(`"staff" is not a whole number, so phenix reads it as 0`)},
+		"groups unknown, named": {value: "200", groupsErr: true, want: passCheck("200")},
+		"groups unknown, no name": {
+			value:     "4242",
+			groupsErr: true,
+			want:      failCheck("no group has id 4242, so phenix ui exits when it sets the socket's group"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			if tc.groupsErr {
+				env.groups = func() ([]int, error) { return nil, errors.New("getgroups: not permitted") }
+			}
+
+			if diff := cmp.Diff(tc.want, gidCheck(env, tc.value)); diff != "" {
+				t.Errorf("gidCheck(%q) mismatch (-want +got):\n%s", tc.value, diff)
+			}
+		})
+	}
+}
+
+// socketCheck passes an empty path, fails when the directory of the socket is a file or cannot be read, and warns
+// about a relative path.
+func TestSocketCheckDirectory(t *testing.T) {
+	t.Parallel()
+
+	file := writeTestFile(t, t.TempDir(), "plain", "")
+
+	tests := map[string]struct {
+		path    string
+		statErr error
+		want    doctorCheck
+	}{
+		"empty":            {path: "", want: passCheck("empty, so phenix ui serves no unix socket")},
+		"directory a file": {path: filepath.Join(file, "phenix.sock"), want: failCheck(file + " is not a directory")},
+		"directory not readable": {
+			path: "/srv/phenix/phenix.sock", statErr: errors.New("stat /srv/phenix: input/output error"),
+			want: failCheck("stat /srv/phenix: input/output error"),
+		},
+		"relative": {
+			path: "phenix.sock", want: warnCheck("phenix.sock is relative, so it depends on the working directory"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.access = func(string, uint32) error { return nil }
+			env.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+
+			if tc.statErr != nil {
+				env.stat = func(string) (os.FileInfo, error) { return nil, tc.statErr }
+			}
+
+			if diff := cmp.Diff(tc.want, env.socketCheck(tc.path)); diff != "" {
+				t.Errorf("socketCheck(%q) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+// basePathCheck gives the path phenix ui serves under, with a leading and a trailing slash, and warns about a URL or
+// a character that a URL path cannot hold.
+func TestBasePathCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]doctorCheck{
+		"":          passCheck("/"),
+		"/":         passCheck("/"),
+		"phenix":    passCheck("/phenix/"),
+		"/a/b":      passCheck("/a/b/"),
+		"a b":       warnCheck(`"a b" has characters a URL path cannot hold as they are`),
+		"a\tb":      warnCheck(`"a\tb" has characters a URL path cannot hold as they are`),
+		"/x?y":      warnCheck(`"/x?y" has characters a URL path cannot hold as they are`),
+		"/x#y":      warnCheck(`"/x#y" has characters a URL path cannot hold as they are`),
+		"ftp://a/b": warnCheck(`"ftp://a/b" is a URL, but phenix ui uses it as a path`),
+	}
+
+	for value, want := range tests {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(want, basePathCheck(value)); diff != "" {
+				t.Errorf("basePathCheck(%q) mismatch (-want +got):\n%s", value, diff)
+			}
+		})
+	}
+}
+
+// readableFileCheck passes a readable regular file, gives the missing status to one that does not exist or cannot be
+// read, and fails a directory or a file it cannot stat.
+func TestReadableFileCheck(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	file := writeTestFile(t, dir, "key.pem", "")
+	missing := filepath.Join(dir, "missing")
+
+	tests := map[string]struct {
+		path       string
+		missing    doctorStatus
+		statErr    error
+		unreadable bool
+		want       doctorCheck
+	}{
+		"readable":         {path: file, missing: doctorFail, want: passCheck(file)},
+		"missing, warn":    {path: missing, missing: doctorWarn, want: warnCheck(missing + " does not exist")},
+		"missing, fail":    {path: missing, missing: doctorFail, want: failCheck(missing + " does not exist")},
+		"directory":        {path: dir, missing: doctorWarn, want: failCheck(dir + " is not a regular file")},
+		"unreadable, warn": {path: file, missing: doctorWarn, unreadable: true, want: warnCheck(file + " is not readable by this user")},
+		"cannot stat":      {path: file, missing: doctorWarn, statErr: unix.EIO, want: failCheck(unix.EIO.Error())},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+
+			if tc.statErr != nil {
+				env.stat = func(string) (os.FileInfo, error) { return nil, tc.statErr }
+			}
+
+			if tc.unreadable {
+				env.access = func(string, uint32) error { return unix.EACCES }
+			}
+
+			if diff := cmp.Diff(tc.want, env.readableFileCheck(tc.path, tc.missing)); diff != "" {
+				t.Errorf("readableFileCheck(%q) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+// editorCheck finds EDITOR, or vim when it is empty, on PATH. A missing editor fails, or warns when EDITOR is empty,
+// and an EDITOR with arguments says that phenix runs it as one program.
+func TestEditorCheck(t *testing.T) {
+	t.Parallel()
+
+	const notFound = " is not a program on PATH, so phenix cannot open an editor"
+
+	tests := map[string]struct {
+		value string
+		path  []string // the programs on PATH
+		want  doctorCheck
+	}{
+		"empty":         {value: "", path: []string{"vim"}, want: passCheck("empty, so phenix uses /usr/bin/vim")},
+		"empty, no vim": {value: "", want: warnCheck(`empty, and "vim"` + notFound)},
+		"found":         {value: "nano", path: []string{"nano"}, want: passCheck("/usr/bin/nano")},
+		"not found":     {value: "nano", path: []string{"vim"}, want: failCheck(`"nano"` + notFound)},
+		"with arguments": {
+			value: "code -w",
+			path:  []string{"code"},
+			want:  failCheck(`"code -w"` + notFound + ". phenix runs EDITOR as one program, without arguments"),
+		},
+		"with a tab": {
+			value: "emacs\t-nw",
+			want:  failCheck(`"emacs\t-nw"` + notFound + ". phenix runs EDITOR as one program, without arguments"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.lookPath = func(name string) (string, error) {
+				if slices.Contains(tc.path, name) {
+					return "/usr/bin/" + name, nil
+				}
+
+				return "", exec.ErrNotFound
+			}
+
+			if diff := cmp.Diff(tc.want, editorCheck(env, tc.value)); diff != "" {
+				t.Errorf("editorCheck(%q) mismatch (-want +got):\n%s", tc.value, diff)
 			}
 		})
 	}

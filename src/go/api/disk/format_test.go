@@ -480,3 +480,422 @@ func TestFormatIssueNamesItsImage(t *testing.T) {
 		}
 	})
 }
+
+// headerIssue gives the issue of a problem that qemu refuses or phenix cannot read first, then a corrupt mark, then
+// the first note that needs care, and nil when nothing does.
+func TestHeaderIssue(t *testing.T) {
+	t.Parallel()
+
+	const path = "/f/my kali.qc2"
+
+	quoted := "'" + path + "'"
+	note := func(kind diskchain.NoteKind) diskchain.Note { return diskchain.Note{Path: path, Kind: kind} }
+	encrypted := "Write a copy without encryption. The Image Format Versions section of the disks docs shows how"
+	convert := "qemu-img convert -O qcow2 -o compat=1.1 " + quoted + " <new image>"
+	repair := "qemu-img check -r all " + quoted
+
+	tests := map[string]struct {
+		res  diskchain.Result
+		want *FormatIssue
+	}{
+		"a whole image": {res: diskchain.Result{Members: []string{path}}},
+		"a version qemu refuses": {
+			res: diskchain.Result{Problem: diskchain.BadVersion, At: path, Detail: "4"},
+			want: &FormatIssue{
+				Level: IssueError, Problem: path + " is a qcow2 version 4 image, which qemu cannot open",
+				Fix: "If a newer qemu made it, write a copy with the qemu-img of that qemu", Command: convert,
+			},
+		},
+		"unknown features": {
+			res: diskchain.Result{Problem: diskchain.UnknownFeatures, At: path, Detail: "0x20"},
+			want: &FormatIssue{
+				Level:   IssueError,
+				Problem: path + " uses qcow2 features that qemu does not know (incompatible feature bits 0x20)",
+				Fix:     "A newer qemu made it. Write a copy with the qemu-img of that qemu", Command: convert,
+			},
+		},
+		"AES encryption": {
+			res: diskchain.Result{Problem: diskchain.AESEncrypted, At: path},
+			want: &FormatIssue{
+				Level: IssueError, Problem: path + " uses the old qcow AES encryption, which qemu does not open for VMs",
+				Fix: encrypted,
+			},
+		},
+		"LUKS encryption": {
+			res: diskchain.Result{Problem: diskchain.LUKSEncrypted, At: path},
+			want: &FormatIssue{
+				Level: IssueError, Problem: path + " uses LUKS encryption, and phenix cannot give qemu its key", Fix: encrypted,
+			},
+		},
+		"an unreadable header": {
+			res: diskchain.Result{Problem: diskchain.Unreadable, At: path, Detail: "cluster bits 30"},
+			want: &FormatIssue{
+				Level: IssueWarning, Problem: "phenix cannot read the header of " + path + " (cluster bits 30)",
+				Fix: "Examine it with qemu-img", Command: "qemu-img check " + quoted,
+			},
+		},
+		"a corrupt mark wins over an earlier note": {
+			res: diskchain.Result{Notes: []diskchain.Note{note(diskchain.Dirty), note(diskchain.Corrupt)}},
+			want: &FormatIssue{
+				Level: IssueError, Problem: "qemu marked " + path + " as corrupt", Fix: "Copy the image, then repair it",
+				Command: repair,
+			},
+		},
+		"the first note that needs care wins": {
+			res: diskchain.Result{Notes: []diskchain.Note{note(diskchain.Zstd), note(diskchain.Qcow2V2), note(diskchain.Dirty)}},
+			want: &FormatIssue{
+				Level: IssueWarning, Problem: path + " is a qcow2 version 2 image, an old version of the format",
+				Fix:     "Stop each VM that uses it, then upgrade it to version 3",
+				Command: "qemu-img amend -f qcow2 -o compat=1.1 " + quoted,
+			},
+		},
+		"a qcow version 1 image": {
+			res: diskchain.Result{Problem: diskchain.Missing, At: "/f/gone", Notes: []diskchain.Note{note(diskchain.QcowV1)}},
+			want: &FormatIssue{
+				Level:   IssueWarning,
+				Problem: path + " is a qcow version 1 image, an old format that some qemu builds cannot open",
+				Fix:     "Convert it to qcow2, then rebase each image that it backs onto the copy",
+				Command: "qemu-img convert -f qcow -O qcow2 " + quoted + " <new image>",
+			},
+		},
+		"a dirty image": {
+			res: diskchain.Result{Notes: []diskchain.Note{note(diskchain.Dirty)}},
+			want: &FormatIssue{
+				Level: IssueWarning, Problem: "qemu did not close " + path + " cleanly",
+				Fix: "Copy the image, then repair it", Command: repair,
+			},
+		},
+		"a qed image": {
+			res:  diskchain.Result{Notes: []diskchain.Note{note(diskchain.QED)}},
+			want: uncheckedIssue(path, quoted, "qed"),
+		},
+		"a vmdk image": {
+			res:  diskchain.Result{Notes: []diskchain.Note{note(diskchain.VMDK)}},
+			want: uncheckedIssue(path, quoted, "vmdk"),
+		},
+		"only recent features": {
+			res: diskchain.Result{Problem: diskchain.DataFile, At: path, Notes: []diskchain.Note{note(diskchain.ExtendedL2)}},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tt.want, headerIssue(path, quoted, tt.res)); diff != "" {
+				t.Errorf("headerIssue(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// formatIssue prefers what the header shows, and otherwise warns about a format whose chain phenix does not check.
+func TestFormatIssue(t *testing.T) {
+	t.Parallel()
+
+	const path = "/f/a.img"
+
+	dirty := imageHeader{
+		header: diskchain.Header{Format: diskchain.FormatQcow2, Version: 3},
+		check:  diskchain.Result{Notes: []diskchain.Note{{Path: path, Kind: diskchain.Dirty}}},
+		read:   true,
+	}
+	// a check that was not read is not looked at
+	unread := imageHeader{check: dirty.check}
+
+	tests := map[string]struct {
+		format string
+		ih     imageHeader
+		want   *FormatIssue
+	}{
+		"an unread raw image":          {format: "raw", ih: unread},
+		"an unread image of no format": {format: "", ih: unread},
+		"an unread qcow image":         {format: "qcow", ih: unread},
+		"an unread vdi image":          {format: "vdi", ih: unread, want: uncheckedIssue(path, path, "vdi")},
+		"a dirty vdi image":            {format: "vdi", ih: dirty, want: headerIssue(path, path, dirty.check)},
+		"a read raw image":             {format: "raw", ih: imageHeader{read: true}},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tt.want, formatIssue(path, tt.format, tt.ih)); diff != "" {
+				t.Errorf("formatIssue(%s, %q) mismatch (-want +got):\n%s", path, tt.format, diff)
+			}
+		})
+	}
+}
+
+// setFormat keeps the format qemu-img or minimega gave, takes the header's when none was given, and sets the version
+// only from a header it read.
+func TestSetFormat(t *testing.T) {
+	t.Parallel()
+
+	v2 := imageHeader{header: diskchain.Header{Format: diskchain.FormatQcow2, Version: 2}, read: true}
+
+	tests := map[string]struct {
+		format string
+		ih     imageHeader
+		want   formatFields
+	}{
+		"no format given": {
+			ih: v2,
+			want: formatFields{Format: "qcow2", FormatVersion: 2, FormatIssue: &FormatIssue{
+				Level: IssueWarning, Problem: "/f/a.qc2 is a qcow2 version 2 image, an old version of the format",
+				Fix:     "Stop each VM that uses it, then upgrade it to version 3",
+				Command: "qemu-img amend -f qcow2 -o compat=1.1 /f/a.qc2",
+			}},
+		},
+		"a format given": {format: "raw", ih: imageHeader{read: true}, want: formatFields{Format: "raw"}},
+		"no header read": {
+			format: "qcow2",
+			ih:     imageHeader{header: v2.header},
+			want:   formatFields{Format: "qcow2", FormatVersion: 9},
+		},
+		"no format given or header read": {ih: imageHeader{header: v2.header}, want: formatFields{FormatVersion: 9}},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			d := Details{FullPath: "/f/a.qc2", FormatVersion: 9}
+			if tt.ih.read {
+				tt.ih.check = diskchain.Check(d.FullPath, tt.ih.header, nil)
+			}
+
+			d.setFormat(tt.format, tt.ih)
+
+			if diff := cmp.Diff(tt.want, formatOfDetails(d)); diff != "" {
+				t.Errorf("setFormat(%q) mismatch (-want +got):\n%s", tt.format, diff)
+			}
+		})
+	}
+}
+
+// qcowFormat names the two formats whose images have a backing chain, as qemu-img names them.
+func TestQcowFormat(t *testing.T) {
+	t.Parallel()
+
+	for format, want := range map[string]bool{
+		"qcow2": true, "qcow": true, "raw": false, "": false, "QCOW2": false, "qed": false, "vmdk": false,
+	} {
+		if got := qcowFormat(format); got != want {
+			t.Errorf("qcowFormat(%q) = %t, want %t", format, got, want)
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"/f/win10.qcow2":       "/f/win10.qcow2",
+		"/f/a_b-c+d:e@f%g=h,i": "/f/a_b-c+d:e@f%g=h,i",
+		"":                     "''",
+		"/f/my kali.qc2":       "'/f/my kali.qc2'",
+		"/f/it's.qc2":          `'/f/it'\''s.qc2'`,
+		"/f/$HOME;rm":          "'/f/$HOME;rm'",
+		"/f/a\nb":              "'/f/a\nb'",
+		"''":                   `''\'''\'''`,
+	}
+
+	for s, want := range tests {
+		if got := shellQuote(s); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", s, got, want)
+		}
+	}
+}
+
+// setRefusedBacking records a backing image that qemu refuses, unless the image already has an error of its own or
+// the refusal is the image's own.
+func TestSetRefusedBacking(t *testing.T) {
+	t.Parallel()
+
+	const image, base = "/f/a.qc2", "/f/base.qc2"
+
+	refused := diskchain.Result{Problem: diskchain.AESEncrypted, At: base}
+	warning := &FormatIssue{Level: IssueWarning, Problem: "old"}
+	own := &FormatIssue{Level: IssueError, Problem: "own"}
+
+	tests := map[string]struct {
+		issue *FormatIssue
+		res   diskchain.Result
+		want  *FormatIssue
+	}{
+		"a refused backing image":   {res: refused, want: headerIssue(base, base, refused)},
+		"over a warning of its own": {issue: warning, res: refused, want: headerIssue(base, base, refused)},
+		"under an error of its own": {issue: own, res: refused, want: own},
+		"a refusal of the image itself": {
+			issue: warning,
+			res:   diskchain.Result{Problem: diskchain.AESEncrypted, At: image},
+			want:  warning,
+		},
+		"a backing image that is not refused": {issue: warning, res: diskchain.Result{Problem: diskchain.Missing, At: base}, want: warning},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			d := Details{FullPath: image, FormatIssue: tt.issue}
+			d.setRefusedBacking(tt.res)
+
+			if diff := cmp.Diff(tt.want, d.FormatIssue); diff != "" {
+				t.Errorf("setRefusedBacking(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// setRefusedBackings gives each image of a chain the nearest refused image below it, and the base nothing.
+func TestSetRefusedBackings(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{"/f/top.qc2", "/f/mid.qc2", "/f/low.qc2", "/f/base.qc2"}
+	refuse := func(path string, problem diskchain.Kind) imageHeader {
+		return imageHeader{check: diskchain.Result{Members: []string{path}, Problem: problem, At: path}, read: true}
+	}
+
+	headers := []imageHeader{
+		{read: true},
+		refuse(paths[1], diskchain.LUKSEncrypted),
+		// a header that was not read is not looked at
+		{check: diskchain.Result{Problem: diskchain.AESEncrypted, At: paths[2]}},
+		refuse(paths[3], diskchain.AESEncrypted),
+	}
+
+	chain := make([]Details, len(paths))
+	for i, p := range paths {
+		chain[i] = Details{FullPath: p}
+	}
+
+	setRefusedBackings(chain, headers)
+
+	got := make([]*FormatIssue, len(chain))
+	for i, d := range chain {
+		got[i] = d.FormatIssue
+	}
+
+	want := []*FormatIssue{
+		headerIssue(paths[1], paths[1], headers[1].check),
+		headerIssue(paths[3], paths[3], headers[3].check),
+		headerIssue(paths[3], paths[3], headers[3].check),
+		nil,
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("setRefusedBackings() issues mismatch (-want +got):\n%s", diff)
+	}
+
+	setRefusedBackings(nil, nil)
+}
+
+// The warning about an unchecked format quotes the format in its command, as it does the path.
+func TestUncheckedIssue(t *testing.T) {
+	t.Parallel()
+
+	want := &FormatIssue{
+		Level:   IssueWarning,
+		Problem: "/f/a b is a my fmt image, a format whose backing chain phenix does not check",
+		Fix:     "Convert it to qcow2",
+		Command: "qemu-img convert -f 'my fmt' -O qcow2 -o compat=1.1 '/f/a b' <new image>",
+	}
+
+	if diff := cmp.Diff(want, uncheckedIssue("/f/a b", "'/f/a b'", "my fmt")); diff != "" {
+		t.Errorf("uncheckedIssue() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// readHeader reads the header of a file it can open, a header it cannot parse included, and nothing else.
+func TestReadHeader(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := func(name string) string { return filepath.Join(dir, name) }
+
+	diskchaintest.WriteQcow2(t, path("v2.qc2"), diskchaintest.Qcow2{Version: 2})
+	diskchaintest.WriteQcow2(t, path("v9.qc2"), diskchaintest.Qcow2{Version: 9})
+	diskchaintest.WriteFile(t, path("bad.qc2"), badClusterBits())
+	diskchaintest.WriteFile(t, path("raw.img"), []byte("raw"))
+
+	if err := os.Mkdir(path("sub"), 0o750); err != nil {
+		t.Fatalf("os.Mkdir(sub) error = %v", err)
+	}
+
+	type view struct {
+		Read    bool
+		Format  diskchain.Format
+		Version int
+		Problem diskchain.Kind
+		At      string
+	}
+
+	tests := map[string]view{
+		"v2.qc2":  {Read: true, Format: diskchain.FormatQcow2, Version: 2, At: ""},
+		"v9.qc2":  {Read: true, Format: diskchain.FormatQcow2, Version: 9, Problem: diskchain.BadVersion, At: "/shown"},
+		"bad.qc2": {Read: true, Format: diskchain.FormatQcow2, Version: 3, Problem: diskchain.Unreadable, At: "/shown"},
+		"raw.img": {Read: true, Format: diskchain.FormatOther},
+		"gone":    {},
+		"sub":     {},
+	}
+
+	for name, want := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ih := readHeader(path(name), "/shown")
+			got := view{Read: ih.read, Format: ih.header.Format, Version: ih.header.Version, Problem: ih.check.Problem, At: ih.check.At}
+
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("readHeader(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// refusedImage lists, from its header alone, only an image that qemu refuses, marked in use when its inode is locked.
+func TestRefusedImage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := func(name string) string { return filepath.Join(dir, name) }
+
+	diskchaintest.WriteQcow2(t, path("new.qc2"), diskchaintest.Qcow2{Features: 1 << 6})
+	diskchaintest.WriteQcow2(t, path("ok.qc2"), diskchaintest.Qcow2{})
+	diskchaintest.WriteFile(t, path("bad.qc2"), badClusterBits())
+
+	stamp, err := stat(path("new.qc2"))
+	if err != nil {
+		t.Fatalf("stat(new.qc2) error = %v", err)
+	}
+
+	for name, locked := range map[string]map[uint64]bool{"free": nil, "in use": {stamp.inode: true}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := refusedImage(path("new.qc2"), locked)
+			want := Details{
+				Kind: VMImage, Name: "new.qc2", FullPath: path("new.qc2"), Size: humanReadableBytes(stamp.size),
+				BackingImages: []string{}, InUse: locked != nil, Format: "qcow2", FormatVersion: 3,
+				FormatIssue: &FormatIssue{
+					Level:   IssueError,
+					Problem: path("new.qc2") + " uses qcow2 features that qemu does not know (incompatible feature bits 0x40)",
+					Fix:     "A newer qemu made it. Write a copy with the qemu-img of that qemu",
+					Command: "qemu-img convert -O qcow2 -o compat=1.1 " + path("new.qc2") + " <new image>",
+				},
+			}
+
+			if diff := cmp.Diff(want, got); diff != "" || !ok {
+				t.Errorf("refusedImage(new.qc2) = _, %t, want true; mismatch (-want +got):\n%s", ok, diff)
+			}
+		})
+	}
+
+	for _, name := range []string{"ok.qc2", "bad.qc2", "gone.qc2"} {
+		if got, ok := refusedImage(path(name), nil); ok || !cmp.Equal(Details{}, got) {
+			t.Errorf("refusedImage(%s) = %+v, %t; want nothing, false", name, got, ok)
+		}
+	}
+}

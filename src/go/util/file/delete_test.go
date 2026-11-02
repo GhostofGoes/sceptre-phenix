@@ -1,12 +1,15 @@
 package file
 
 import (
+	"errors"
+	"fmt"
 	"path"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
 	"pgregory.net/rapid"
 
@@ -88,6 +91,47 @@ func TestDeleteExistingFiles(t *testing.T) { //nolint:paralleltest // shares the
 				"file delete snap",
 			},
 		},
+		"sends nothing for no names": {names: nil, want: nil},
+		"deletes a directory found by the files in it": {
+			answers: map[string][]*minicli.Response{
+				"mesh send all file list /exp/dir*": {fileListing("n1", "exp/dir/a", "exp/dir/b"), fileListing("n2", "exp/dir2/a")},
+				"file list /exp/dir*":               {fileListing("head", "exp/dir/a")},
+			},
+			names: []string{"exp/dir"},
+			want: []string{
+				"mesh send all file list /exp/dir*",
+				"file list /exp/dir*",
+				"mesh send n1 file delete exp/dir",
+				"file delete exp/dir",
+			},
+		},
+		"lists each directory on its own, in the order named": {
+			answers: map[string][]*minicli.Response{
+				"file list /b/y*": {fileListing("head", "b/y")},
+				"file list /a/x*": {fileListing("head", "a/x")},
+			},
+			names: []string{"b/y", "a/x", "b/../a/x2"},
+			want: []string{
+				"mesh send all file list /b/y*",
+				"file list /b/y*",
+				"file delete b/y",
+				"mesh send all file list /a/x*",
+				"file list /a/x*",
+				"file delete a/x",
+			},
+		},
+		"deletes everywhere when the headnode cannot list": {
+			answers: map[string][]*minicli.Response{
+				"file list /snap*": {{Host: "head", Error: "busy"}},
+			},
+			names: []string{"snap"},
+			want: []string{
+				"mesh send all file list /snap*",
+				"file list /snap*",
+				"mesh send all file delete snap",
+				"file delete snap",
+			},
+		},
 		"deletes everywhere when the directory cannot be globbed": {
 			names: []string{"ex p/a"},
 			want:  []string{"mesh send all file delete ex p/a", "file delete ex p/a"},
@@ -100,6 +144,23 @@ func TestDeleteExistingFiles(t *testing.T) { //nolint:paralleltest // shares the
 			names:   []string{"snap"},
 			want:    []string{"mesh send all file list /snap*", "file list /snap*", "file delete snap"},
 			wantErr: `(?s)^deleting file snap from headnode: .*permission denied`,
+		},
+		"reports a failed mesh delete and stops": {
+			answers: map[string][]*minicli.Response{
+				"mesh send all file list /snap*": {fileListing("n1", "snap1", "snap2")},
+				"mesh send n1 file delete snap1": {{Host: "n1", Error: "read-only"}},
+			},
+			names:   []string{"snap1", "snap2"},
+			want:    []string{"mesh send all file list /snap*", "file list /snap*", "mesh send n1 file delete snap1"},
+			wantErr: `(?s)^deleting file snap1 from cluster nodes: .*read-only`,
+		},
+		"reports a failed delete everywhere and stops": {
+			answers: map[string][]*minicli.Response{
+				"mesh send all file delete ex p/a": {{Host: "n1", Error: "read-only"}},
+			},
+			names:   []string{"ex p/a", "ex p/b"},
+			want:    []string{"mesh send all file delete ex p/a"},
+			wantErr: `(?s)^deleting file ex p/a: .*read-only`,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -118,7 +179,7 @@ func TestDeleteExistingFiles(t *testing.T) { //nolint:paralleltest // shares the
 
 			cmds := received()
 
-			if diff := cmp.Diff(tc.want, mmtest.Bases(cmds)); diff != "" {
+			if diff := cmp.Diff(tc.want, mmtest.Bases(cmds), cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("DeleteExistingFiles(%q) commands mismatch (-want +got):\n%s", tc.names, diff)
 			}
 
@@ -128,6 +189,91 @@ func TestDeleteExistingFiles(t *testing.T) { //nolint:paralleltest // shares the
 				}
 			}
 		})
+	}
+}
+
+// deleteFailingFiles is a ClusterFiles that cannot tell where files are and fails
+// to delete the file named fail; other methods panic through the nil embedded interface.
+type deleteFailingFiles struct {
+	ClusterFiles
+
+	fail    string
+	deleted []string
+}
+
+func (f *deleteFailingFiles) DeleteFile(path string) error {
+	f.deleted = append(f.deleted, path)
+
+	if path == f.fail {
+		return errors.New("permission denied")
+	}
+
+	return nil
+}
+
+// Without a way to find the files, DeleteExistingFiles deletes each in turn and
+// stops at the first failure; it drops the cached listings unless given no names.
+//
+//nolint:paralleltest // replaces package globals
+func TestDeleteExistingFilesThroughDeleteFile(t *testing.T) {
+	for name, tc := range map[string]struct {
+		names       []string
+		wantDeleted []string
+		wantErr     string
+		wantCached  int
+	}{
+		"no names":       {names: nil, wantDeleted: nil, wantCached: 1},
+		"empty names":    {names: []string{}, wantDeleted: nil, wantCached: 1},
+		"all deleted":    {names: []string{"x", "z"}, wantDeleted: []string{"x", "z"}},
+		"stops at fails": {names: []string{"x", "fails", "z"}, wantDeleted: []string{"x", "fails"}, wantErr: "deleting file fails: permission denied"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			installListing(t, Files{{Name: "a", Path: "a"}})
+
+			original := DefaultClusterFiles
+
+			t.Cleanup(func() { DefaultClusterFiles = original })
+
+			files := &deleteFailingFiles{ClusterFiles: nil, fail: "fails", deleted: nil}
+			DefaultClusterFiles = files
+
+			err := DeleteExistingFiles(tc.names)
+			if got := fmt.Sprint(err); tc.wantErr != "" && got != tc.wantErr || tc.wantErr == "" && err != nil {
+				t.Errorf("DeleteExistingFiles(%q) error = %v, want %q", tc.names, err, tc.wantErr)
+			}
+
+			if diff := cmp.Diff(tc.wantDeleted, files.deleted); diff != "" {
+				t.Errorf("DeleteExistingFiles(%q) deleted mismatch (-want +got):\n%s", tc.names, diff)
+			}
+
+			experimentListings.mu.Lock()
+			defer experimentListings.mu.Unlock()
+
+			if n := len(experimentListings.entries); n != tc.wantCached {
+				t.Errorf("cached listings after DeleteExistingFiles(%q) = %d, want %d", tc.names, n, tc.wantCached)
+			}
+		})
+	}
+}
+
+// present finds a file, or a directory by a file under it, but not a file that
+// only shares its prefix.
+func TestPresent(t *testing.T) {
+	t.Parallel()
+
+	listed := map[string]bool{"exp/a": true, "exp/dir/b": true, "exp/dir2": true}
+
+	for name, want := range map[string]bool{
+		"exp/a": true, "exp/dir": true, "exp/dir2": true, "exp": true,
+		"exp/a/b": false, "exp/di": false, "exp/dir/b/c": false, "other": false, "": false,
+	} {
+		if got := present(listed, name); got != want {
+			t.Errorf("present(%v, %q) = %t, want %t", listed, name, got, want)
+		}
+	}
+
+	if present(nil, "exp/a") {
+		t.Error("present(nil, exp/a) = true, want false")
 	}
 }
 

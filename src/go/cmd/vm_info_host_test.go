@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/spf13/cobra"
 	"pgregory.net/rapid"
 
 	"phenix/util/mm"
@@ -131,19 +132,38 @@ func TestVMHostNames(t *testing.T) {
 		{Name: "e", Host: ""},
 	}
 
-	tests := []struct {
+	tests := map[string]struct {
+		vms    []mm.VM
 		prefix string
 		want   []string
 	}{
-		{prefix: "", want: []string{"compute1", "compute2", "gpu1"}},
-		{prefix: "comp", want: []string{"compute1", "compute2"}},
-		{prefix: "x", want: nil},
+		"every host":         {vms: vms, prefix: "", want: []string{"compute1", "compute2", "gpu1"}},
+		"prefix":             {vms: vms, prefix: "comp", want: []string{"compute1", "compute2"}},
+		"whole name":         {vms: vms, prefix: "gpu1", want: []string{"gpu1"}},
+		"case sensitive":     {vms: vms, prefix: "GPU", want: nil},
+		"no match":           {vms: vms, prefix: "x", want: nil},
+		"no VMs":             {vms: nil, prefix: "", want: nil},
+		"only VMs, no hosts": {vms: []mm.VM{{Name: "e"}}, prefix: "", want: nil},
 	}
 
-	for _, tt := range tests {
-		if diff := cmp.Diff(tt.want, vmHostNames(vms, tt.prefix)); diff != "" {
-			t.Errorf("vmHostNames(%q) mismatch (-want +got):\n%s", tt.prefix, diff)
-		}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tt.want, vmHostNames(tt.vms, tt.prefix)); diff != "" {
+				t.Errorf("vmHostNames(%q) mismatch (-want +got):\n%s", tt.prefix, diff)
+			}
+		})
+	}
+}
+
+// Without an experiment argument, --host completion offers nothing and no files, before it reads any VM.
+func TestVMHostCompletionWithoutExperiment(t *testing.T) {
+	t.Parallel()
+
+	got, directive := vmHostCompletion(newVMInfoCmd(), nil, "comp")
+	if got != nil || directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("vmHostCompletion(no args) = %v, %v, want nil, %v", got, directive, cobra.ShellCompDirectiveNoFileComp)
 	}
 }
 

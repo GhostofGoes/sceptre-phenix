@@ -4,22 +4,32 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/gorilla/mux"
 	"pgregory.net/rapid"
 
 	"phenix/store"
+	"phenix/util/mm"
+	"phenix/util/polltest"
+	"phenix/web/audit"
 	"phenix/web/capability"
+	"phenix/web/middleware"
 	"phenix/web/rbac"
+	"phenix/web/weberror"
 )
 
 // testJWTKey is the JWT signing key of servers that sign users in.
@@ -367,6 +377,7 @@ func TestCreateCaptureTokenRefuses(t *testing.T) {
 			sharkRole(), `{"path":"saved.pcap","operations":["stream"]}`, http.StatusBadRequest,
 		},
 		"no operations": {sharkRole(), `{"vm":"test-vm","interface":0}`, http.StatusBadRequest},
+		"invalid body":  {sharkRole(), `not json`, http.StatusBadRequest},
 		"empty operations": {
 			sharkRole(), `{"vm":"test-vm","interface":0,"operations":[]}`, http.StatusBadRequest,
 		},
@@ -764,5 +775,787 @@ func TestDeleteExperimentFileRevokesGrants(t *testing.T) {
 		if resp := do(t, http.MethodGet, urls[name], ""); resp.StatusCode != want {
 			t.Errorf("GET the capture of %s = %d, want %d", name, resp.StatusCode, want)
 		}
+	}
+}
+
+// capabilityFailingStore is the test store, counting the gets of experiments
+// and failing them while failing is set.
+type capabilityFailingStore struct {
+	*testStore
+
+	failing atomic.Bool
+	gets    atomic.Int32
+}
+
+func (s *capabilityFailingStore) Get(c *store.Config) error {
+	if strings.EqualFold(c.Kind, "Experiment") {
+		s.gets.Add(1)
+
+		if s.failing.Load() {
+			return errors.New("store unreadable")
+		}
+	}
+
+	return s.testStore.Get(c)
+}
+
+// capabilityUseFailingStore makes getting an experiment fail for the rest of
+// the test, or until failing is unset. Call it after storing the test's configs.
+func capabilityUseFailingStore(t *testing.T) *capabilityFailingStore {
+	t.Helper()
+
+	useTestStore(t)
+
+	s, _ := store.DefaultStore.(*testStore)
+	failing := &capabilityFailingStore{testStore: s}
+	failing.failing.Store(true)
+
+	store.DefaultStore = failing //nolint:reassign // useTestStore restores it
+
+	return failing
+}
+
+// capabilityMint gives alice a grant of ops on target under token, ending in
+// an hour.
+func capabilityMint(token string, target capability.Target, ops ...capability.Op) capability.Grant {
+	return captureGrants.Mint(token, capability.Grant{
+		User: "alice", Target: target, Ops: ops, Expires: time.Now().Add(time.Hour),
+	})
+}
+
+// capabilitySaved is test-experiment's saved capture a.pcap.
+func capabilitySaved() capability.Target {
+	return capability.Target{Exp: "test-experiment", File: "a.pcap"}
+}
+
+func TestSessionExpiry(t *testing.T) {
+	t.Parallel()
+
+	sign := func(claims jwt.MapClaims) string {
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(testJWTKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return signed
+	}
+
+	ends := time.Unix(1_900_000_000, 0)
+
+	tests := map[string]struct {
+		raw  string
+		want time.Time
+	}{
+		"no session":          {raw: "", want: time.Time{}},
+		"not a JWT":           {raw: "not.a.jwt", want: time.Time{}},
+		"no expiry":           {raw: sign(jwt.MapClaims{jwtClaimSub: "alice"}), want: time.Time{}},
+		"expiry not a number": {raw: sign(jwt.MapClaims{jwtClaimExp: "soon"}), want: time.Time{}},
+		"expiry":              {raw: sign(jwt.MapClaims{jwtClaimExp: ends.Unix()}), want: ends},
+		"already expired":     {raw: sign(jwt.MapClaims{jwtClaimExp: 1}), want: time.Unix(1, 0)},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := sessionExpiry(tc.raw); !got.Equal(tc.want) {
+				t.Errorf("sessionExpiry(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMinTime(t *testing.T) {
+	t.Parallel()
+
+	early, late := time.Unix(100, 0), time.Unix(200, 0)
+
+	tests := map[string]struct{ a, b, want time.Time }{
+		"first earlier":  {a: early, b: late, want: early},
+		"second earlier": {a: late, b: early, want: early},
+		"equal":          {a: late, b: late, want: late},
+		"zero first":     {a: time.Time{}, b: early, want: time.Time{}},
+		"zero second":    {a: early, b: time.Time{}, want: time.Time{}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := minTime(tc.a, tc.b); !got.Equal(tc.want) {
+				t.Errorf("minTime(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// The audit fields of a grant name its target, and, for a use, its user and
+// the route's template rather than the path, which may hold the token.
+func TestCaptureGrantAuditFields(t *testing.T) {
+	t.Parallel()
+
+	var (
+		iface0, iface2 = 0, 2
+		expires        = time.Date(2030, 1, 2, 3, 4, 5, 0, time.FixedZone("UTC+1", 3600))
+		live           = capability.Target{Exp: "exp", File: "live.pcap", VM: "vm", Interface: 2, Live: true}
+	)
+
+	t.Run("targets", func(t *testing.T) {
+		t.Parallel()
+
+		for name, tc := range map[string]struct {
+			target capability.Target
+			want   audit.Fields
+		}{
+			"saved file": {capabilitySaved(), audit.Fields{Experiment: "test-experiment", File: "a.pcap"}},
+			"live":       {live, audit.Fields{Experiment: "exp", VM: "vm", File: "live.pcap", Interface: &iface2}},
+			"interface 0": {
+				capability.Target{Exp: "exp", VM: "vm"}, audit.Fields{Experiment: "exp", VM: "vm", Interface: &iface0},
+			},
+			"empty": {capability.Target{}, audit.Fields{}},
+		} {
+			if diff := cmp.Diff(tc.want, targetAuditFields(tc.target)); diff != "" {
+				t.Errorf("targetAuditFields(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		}
+	})
+
+	t.Run("minted", func(t *testing.T) {
+		t.Parallel()
+
+		g := capability.Grant{
+			ID: "id", User: "alice", Target: live, Ops: []capability.Op{capability.OpView, capability.OpDownload},
+			Expires: expires,
+		}
+
+		want := audit.Fields{
+			Experiment: "exp", VM: "vm", File: "live.pcap", Interface: &iface2,
+			Extra: []any{
+				"phenix.capability.id", "id", "phenix.capability.ops", []string{"view", "download"},
+				"phenix.capability.expires", "2030-01-02T02:04:05Z", "phenix.webshark.live", true,
+			},
+		}
+		if diff := cmp.Diff(want, mintedAuditFields(g)); diff != "" {
+			t.Errorf("mintedAuditFields() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("actions", func(t *testing.T) {
+		t.Parallel()
+
+		for op, want := range map[capability.Op]audit.Action{
+			capability.OpStream:   audit.CaptureStream,
+			capability.OpView:     audit.CaptureWebSharkRead,
+			capability.OpDownload: audit.CaptureWebSharkRead,
+			capability.OpWatch:    audit.CaptureWebSharkRead,
+		} {
+			if got := grantAuditAction(op); got != want {
+				t.Errorf("grantAuditAction(%s) = %s, want %s", op, got, want)
+			}
+		}
+	})
+
+	t.Run("use", func(t *testing.T) {
+		t.Parallel()
+
+		g := capability.Grant{ID: "id", User: "alice", Target: capabilitySaved()}
+		want := audit.Fields{
+			User: "alice", URLPath: "/webshark/captures/{capture}", Experiment: "test-experiment", File: "a.pcap",
+			Extra: []any{"phenix.capability.id", "id", "phenix.capability.op", "view"},
+		}
+
+		var got audit.Fields
+
+		router := mux.NewRouter()
+		router.HandleFunc("/webshark/captures/{capture}", func(_ http.ResponseWriter, r *http.Request) {
+			got = grantAuditFields(r, g, capability.OpView)
+		})
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/webshark/captures/secret", nil))
+
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("grantAuditFields() on a route mismatch (-want +got):\n%s", diff)
+		}
+
+		// without a route, the path is left out
+		want.URLPath = "-"
+
+		got = grantAuditFields(httptest.NewRequest(http.MethodGet, "/webshark/captures/secret", nil), g, capability.OpView)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("grantAuditFields() without a route mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestNewCaptureToken(t *testing.T) {
+	t.Parallel()
+
+	var (
+		iface0   = 0
+		expires  = time.Date(2030, 1, 2, 3, 4, 5, 0, time.FixedZone("UTC+1", 3600))
+		lastUsed = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	)
+
+	tests := map[string]struct {
+		grant capability.Grant
+		want  captureToken
+	}{
+		"saved file": {
+			grant: capability.Grant{
+				ID: "a", Target: capabilitySaved(), Ops: viewOps, Expires: expires, LastUsed: lastUsed, Uses: 3,
+				Session: "secret-session",
+			},
+			want: captureToken{
+				ID: "a", Operations: viewOps, Expires: "2030-01-02T02:04:05Z", LastUsed: "2030-01-01T00:00:00Z",
+				Uses: 3, Experiment: "test-experiment", Target: captureTokenTarget{Path: "a.pcap"},
+			},
+		},
+		"live capture": {
+			grant: capability.Grant{
+				ID: "b", Target: capability.Target{Exp: "test-experiment", File: "live.pcap", VM: "test-vm", Live: true},
+				Ops: []capability.Op{capability.OpStream}, Expires: expires, UseBy: lastUsed, LastUsed: lastUsed,
+			},
+			want: captureToken{
+				ID: "b", Operations: []capability.Op{capability.OpStream}, Expires: "2030-01-02T02:04:05Z",
+				UseBy: "2030-01-01T00:00:00Z", LastUsed: "2030-01-01T00:00:00Z", Experiment: "test-experiment",
+				Target: captureTokenTarget{Path: "live.pcap", VM: "test-vm", Interface: &iface0},
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, newCaptureToken(tc.grant)); diff != "" {
+				t.Errorf("newCaptureToken() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A WebShark grant ends idle, after its lifetime, or with its session; a
+// stream grant starts streams within its window and ends with its session.
+func TestMintCaptureGrant(t *testing.T) {
+	const slack = 2 * time.Second
+
+	live := capability.Target{Exp: "test-experiment", VM: "test-vm", Live: true}
+	stream := []capability.Op{capability.OpStream}
+
+	tests := map[string]struct {
+		target  capability.Target
+		ops     []capability.Op
+		session time.Duration // until the session ends; 0 for none
+		expires time.Duration
+		useBy   time.Duration // 0 for none
+		idle    time.Duration
+	}{
+		"view":                  {capabilitySaved(), viewOps, 0, viewGrantLifetime, 0, viewGrantIdle},
+		"view, short session":   {capabilitySaved(), viewOps, time.Hour, time.Hour, 0, viewGrantIdle},
+		"view, long session":    {capabilitySaved(), viewOps, 48 * time.Hour, viewGrantLifetime, 0, viewGrantIdle},
+		"stream":                {live, stream, 0, streamGrantLifetime, streamGrantWindow, 0},
+		"stream, short session": {live, stream, time.Minute, time.Minute, time.Minute, 0},
+		"stream, long session":  {live, stream, 48 * time.Hour, 48 * time.Hour, streamGrantWindow, 0},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useCaptureGrants(t)
+
+			start := time.Now()
+			ctx := context.WithValue(t.Context(), middleware.ContextKeyUser, "alice")
+
+			var session string
+			if tc.session != 0 {
+				session = signedJWT(t, "alice", testJWTKey, start.Add(tc.session))
+				ctx = context.WithValue(ctx, middleware.ContextKeyJWT, session)
+			}
+
+			g, token := mintCaptureGrant(httptest.NewRequestWithContext(ctx, http.MethodPost, "/", nil), tc.target, tc.ops)
+
+			want := capability.Grant{
+				ID: capability.IDOf(token), User: "alice", Session: session, Target: tc.target, Ops: tc.ops, IdleTimeout: tc.idle,
+			}
+			if diff := cmp.Diff(want, g, grantCmp); diff != "" {
+				t.Errorf("mintCaptureGrant() mismatch (-want +got):\n%s", diff)
+			}
+
+			if d := g.Expires.Sub(start.Add(tc.expires)); d > slack || d < -slack {
+				t.Errorf("mintCaptureGrant() expires %v from now, want %v", g.Expires.Sub(start), tc.expires)
+			}
+
+			if tc.useBy == 0 && !g.UseBy.IsZero() {
+				t.Errorf("mintCaptureGrant() use-by = %v, want none", g.UseBy)
+			}
+
+			if d := g.UseBy.Sub(start.Add(tc.useBy)); tc.useBy != 0 && (d > slack || d < -slack) {
+				t.Errorf("mintCaptureGrant() use-by %v from now, want %v", g.UseBy.Sub(start), tc.useBy)
+			}
+
+			if isStream := strings.HasPrefix(token, streamTokenPrefix); isStream != (tc.useBy != 0) {
+				t.Errorf("mintCaptureGrant() token = %q, want a %s prefix only for a stream", token, streamTokenPrefix)
+			}
+
+			if diff := cmp.Diff([]capability.Grant{g}, captureGrants.List("alice", "test-experiment"), grantCmp); diff != "" {
+				t.Errorf("captureGrants.List(alice, test-experiment) mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// recheck tells why a grant's user may no longer read its capture, and fails
+// when it cannot tell.
+func TestGrantCheckerRecheck(t *testing.T) {
+	vm := capability.Target{Exp: "test-experiment", VM: "test-vm"}
+
+	tests := map[string]struct {
+		role       *rbac.Role // a dev user alice's role; nil for sign-in disabled
+		user       string
+		target     capability.Target
+		storeFails bool
+		want       string
+		wantErr    bool
+	}{
+		"allowed":         {user: "global-admin", target: capabilitySaved()},
+		"allowed capture": {role: ptr(sharkRole()), user: "alice", target: vm},
+		"another dev user": {
+			role: ptr(sharkRole()), user: "bob", target: vm, want: "session ended: user bob is not the dev auth user",
+		},
+		"file not allowed": {
+			role: ptr(testRole("experiments/files", "list", "test-experiment")), user: "alice", target: capabilitySaved(),
+			want: "file no longer allowed",
+		},
+		"capture not allowed": {
+			role: ptr(testRole("experiments/files", "get", "test-experiment")), user: "alice", target: vm,
+			want: "capture no longer allowed",
+		},
+		"experiment deleted": {
+			user: "global-admin", target: capability.Target{Exp: "gone-experiment"}, want: "experiment deleted",
+		},
+		"invalid experiment": {user: "global-admin", target: capability.Target{Exp: "a/b"}, wantErr: true},
+		"store unreadable":   {user: "global-admin", target: capabilitySaved(), storeFails: true, wantErr: true},
+		"store unreadable, VM": {
+			role: ptr(sharkRole()), user: "alice", target: vm, storeFails: true, wantErr: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestExperiment(t)
+			useGlobalAdmin(t)
+
+			var c grantChecker
+			if tc.role != nil {
+				c.jwtKey = devKey(t, "alice", *tc.role)
+			}
+
+			if tc.storeFails {
+				capabilityUseFailingStore(t)
+			}
+
+			reason, err := c.recheck(capability.Grant{User: tc.user, Target: tc.target})
+			if reason != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("recheck(%s) = %q, %v; want %q, error %t", name, reason, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Each use of a grant checks its operation and proxy user, and, unless it was
+// checked a moment ago, its user's access, revoking it once lost.
+func TestGrantCheckerUse(t *testing.T) {
+	tests := map[string]struct {
+		target     capability.Target
+		op         capability.Op
+		proxyUser  string // the X-Remote-User header, with a proxy that names users
+		recheck    bool
+		storeFails bool
+		want       int
+		wantKept   bool
+		reason     string // of the refusal audited
+	}{
+		"checked a moment ago": {target: capabilitySaved(), op: capability.OpView, storeFails: true, want: 0, wantKept: true},
+		"access kept":          {target: capabilitySaved(), op: capability.OpView, recheck: true, want: 0, wantKept: true},
+		"operation not granted": {
+			target: capabilitySaved(), op: capability.OpStream, want: http.StatusForbidden, wantKept: true,
+			reason: "operation not granted",
+		},
+		"another proxy user": {
+			target: capabilitySaved(), op: capability.OpView, proxyUser: "bob", want: http.StatusForbidden, wantKept: true,
+			reason: "another proxy user",
+		},
+		"the grant's proxy user": {target: capabilitySaved(), op: capability.OpView, proxyUser: "alice", want: 0, wantKept: true},
+		"store unreadable": {
+			target: capabilitySaved(), op: capability.OpView, recheck: true, storeFails: true,
+			want: http.StatusServiceUnavailable, wantKept: true,
+		},
+		"access lost": {
+			target: capability.Target{Exp: "gone-experiment"}, op: capability.OpView, recheck: true, want: http.StatusNotFound,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useCaptureGrants(t)
+			useTestExperiment(t)
+			useGlobalAdmin(t)
+
+			if tc.recheck {
+				useCapRecheck(t)
+			}
+
+			var failing *capabilityFailingStore
+			if tc.storeFails {
+				failing = capabilityUseFailingStore(t)
+			}
+
+			c := grantChecker{jwtKey: "", proxyAuthHeader: ""}
+			if tc.proxyUser != "" {
+				c.proxyAuthHeader = "X-Remote-User"
+			}
+
+			g := capabilityMint("token", tc.target, viewOps...)
+			before := time.Now()
+			events := captureAudit(t)
+
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/webshark/captures/token", nil)
+			r.Header.Set("X-Remote-User", tc.proxyUser)
+
+			used, status := c.use(r, "token", tc.op)
+			if status != tc.want || used.ID != g.ID {
+				t.Errorf("use(%s) = grant %q, %d; want grant %q, %d", tc.op, used.ID, status, g.ID, tc.want)
+			}
+
+			list := captureGrants.List("alice", tc.target.Exp)
+			if kept := len(list) == 1; kept != tc.wantKept {
+				t.Errorf("use(%s) left the grant kept = %t, want %t", tc.op, kept, tc.wantKept)
+			}
+
+			if tc.recheck && tc.want == 0 && len(list) == 1 && list[0].Checked.Before(before) {
+				t.Errorf("use(%s) left the grant checked at %v, want it checked again", tc.op, list[0].Checked)
+			}
+
+			if failing != nil && !tc.recheck && failing.gets.Load() != 0 {
+				t.Errorf("use(%s) of a grant checked a moment ago got the experiment %d times, want 0", tc.op, failing.gets.Load())
+			}
+
+			if tc.reason != "" {
+				wantAudit(t, events(), string(grantAuditAction(tc.op)), "failure", map[string]any{
+					"user.name": "alice", "event.reason": tc.reason, "phenix.capability.id": g.ID,
+				})
+			} else if got := events(); len(got) != 0 {
+				t.Errorf("use(%s) audit events = %v, want none", tc.op, got)
+			}
+		})
+	}
+
+	t.Run("unknown token", func(t *testing.T) {
+		useCaptureGrants(t)
+
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/webshark/streams/pcs_unknown", nil)
+		if _, status := (grantChecker{}).use(r, "pcs_unknown", capability.OpStream); status != http.StatusNotFound {
+			t.Errorf("use(pcs_unknown) = %d, want %d", status, http.StatusNotFound)
+		}
+	})
+}
+
+// An open stream or watch ends when its grant is revoked or its user's access
+// is lost, and keeps going, checked again and again, while the store fails.
+func TestUntilRevoked(t *testing.T) {
+	// each case ends the goroutine untilRevoked starts before the fakes it reads are put back
+	t.Run("grant revoked", func(t *testing.T) {
+		useCaptureGrants(t)
+
+		g := capabilityMint("token", capabilitySaved(), viewOps...)
+
+		ctx, cancel := grantChecker{}.untilRevoked(t.Context(), g)
+		defer cancel()
+
+		captureGrants.Revoke(g.ID, "alice")
+
+		polltest.Within(t, "ending the context of a revoked grant", func() { <-ctx.Done() })
+	})
+
+	t.Run("access lost", func(t *testing.T) {
+		useCaptureGrants(t)
+		useCapRecheck(t)
+		useGlobalAdmin(t)
+
+		g := capabilityMint("token", capability.Target{Exp: "gone-experiment"}, viewOps...)
+
+		ctx, cancel := grantChecker{}.untilRevoked(t.Context(), g)
+		defer cancel()
+
+		polltest.Within(t, "ending the context of a grant whose experiment is gone", func() { <-ctx.Done() })
+
+		if list := captureGrants.List("alice", "gone-experiment"); len(list) != 0 {
+			t.Errorf("captureGrants.List(alice, gone-experiment) = %+v, want the grant revoked", list)
+		}
+	})
+
+	t.Run("store unreadable, then access kept, then lost", func(t *testing.T) {
+		useCaptureGrants(t)
+		useCapRecheck(t)
+		useTestExperiment(t)
+		useGlobalAdmin(t)
+
+		failing := capabilityUseFailingStore(t)
+		g := capabilityMint("token", capabilitySaved(), viewOps...)
+
+		ctx, cancel := grantChecker{}.untilRevoked(t.Context(), g)
+		defer cancel()
+
+		polltest.Until(t, "three checks of the grant", func() bool { return failing.gets.Load() >= 3 })
+
+		if ctx.Err() != nil {
+			t.Fatalf("untilRevoked context while the store fails = %v, want it open", ctx.Err())
+		}
+
+		before := time.Now()
+
+		failing.failing.Store(false)
+
+		polltest.Until(t, "the grant checked again", func() bool {
+			list := captureGrants.List("alice", "test-experiment")
+
+			return len(list) == 1 && list[0].Checked.After(before)
+		})
+
+		if ctx.Err() != nil {
+			t.Fatalf("untilRevoked context while access is kept = %v, want it open", ctx.Err())
+		}
+
+		if err := store.Delete(&store.Config{Kind: "Experiment", Metadata: store.ConfigMetadata{Name: "test-experiment"}}); err != nil {
+			t.Fatal(err)
+		}
+
+		polltest.Within(t, "ending the context once the experiment is deleted", func() { <-ctx.Done() })
+	})
+}
+
+// The stop hook ends only the stopped experiment's stream grants.
+func TestExperimentStopHookRevokesStreamGrants(t *testing.T) {
+	useTestStore(t, namedExperiment(t, "running", "2024-01-01T00:00:00Z"))
+	useCaptureGrants(t)
+
+	// a forced stop, as minimega cannot clear the namespace
+	fake := &teardownMM{testMM: &testMM{vms: mm.VMs{}}}
+	fake.failing.Store(true)
+
+	experimentStopUseMM(t, fake)
+
+	var (
+		view   = capabilityMint("view", capability.Target{Exp: "running", File: "a.pcap"}, viewOps...)
+		other  = capabilityMint("pcs_other", capability.Target{Exp: "other", VM: "vm", Live: true}, capability.OpStream)
+		stream = capabilityMint("pcs_stream", capability.Target{Exp: "running", VM: "vm", Live: true}, capability.OpStream)
+	)
+
+	stop := serveAs(t, "alice", testRole("experiments/stop", "update", "running")).URL +
+		"/api/v1/experiments/running/stop?force=true"
+	if resp := do(t, http.MethodPost, stop, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST stop = %d, want %d: %s", resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	got := append(captureGrants.List("alice", "running"), captureGrants.List("alice", "other")...)
+	if diff := cmp.Diff([]capability.Grant{view, other}, got, grantCmp); diff != "" {
+		t.Errorf("grants after stopping running (not %s) mismatch (-want +got):\n%s", stream.ID, diff)
+	}
+}
+
+// The revoke functions end the grants they name and no others.
+func TestRevokeCaptureGrants(t *testing.T) {
+	tests := map[string]struct {
+		revoke func()
+		want   []string // tokens of the grants left
+	}{
+		"file deleted": {
+			func() { revokeExperimentFileGrants("test-experiment", "a.pcap") }, []string{"b", "pcs_c", "d"},
+		},
+		"experiment stopped": {
+			func() { revokeOnExperimentStop("stop", "test-experiment") }, []string{"a", "b", "d"},
+		},
+		"experiment deleted": {
+			func() { revokeOnExperimentDelete("delete", "test-experiment") }, []string{"d"},
+		},
+		"no experiment matches": {
+			func() { revokeOnExperimentDelete("delete", "none") }, []string{"a", "b", "pcs_c", "d"},
+		},
+		"nothing matches": {
+			func() { revokeCaptureGrants("test", func(capability.Grant) bool { return false }) },
+			[]string{"a", "b", "pcs_c", "d"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useCaptureGrants(t)
+
+			capabilityMint("a", capabilitySaved(), viewOps...)
+			capabilityMint("b", capability.Target{Exp: "test-experiment", File: "b.pcap"}, viewOps...)
+			capabilityMint("pcs_c", capability.Target{Exp: "test-experiment", File: "live.pcap", VM: "vm", Live: true}, capability.OpStream)
+			capabilityMint("d", capability.Target{Exp: "other", File: "a.pcap"}, viewOps...)
+
+			tc.revoke()
+
+			left := append(captureGrants.List("alice", "test-experiment"), captureGrants.List("alice", "other")...)
+
+			got := make([]string, 0, len(left))
+			for _, g := range left {
+				got = append(got, g.ID)
+			}
+
+			want := make([]string, 0, len(tc.want))
+			for _, token := range tc.want {
+				want = append(want, capability.IDOf(token))
+			}
+
+			if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Errorf("grants left after %s mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// capabilityTokensRequest is user's request of the captureTokens route with
+// the route's variables vars.
+func capabilityTokensRequest(t *testing.T, method, user string, vars map[string]string) *http.Request {
+	t.Helper()
+
+	ctx := context.WithValue(t.Context(), middleware.ContextKeyUser, user)
+	r := httptest.NewRequestWithContext(ctx, method, "/api/v1/experiments/"+vars["exp"]+"/captureTokens", nil)
+
+	return mux.SetURLVars(r, vars)
+}
+
+// The user's own tokens of the experiment are listed, without the tokens.
+func TestListCaptureTokens(t *testing.T) {
+	useCaptureGrants(t)
+
+	mine := capabilityMint("secret-mine", capabilitySaved(), viewOps...)
+	capabilityMint("secret-other-exp", capability.Target{Exp: "other", File: "a.pcap"}, viewOps...)
+	captureGrants.Mint("secret-bobs", capability.Grant{
+		User: "bob", Target: capabilitySaved(), Ops: viewOps, Expires: time.Now().Add(time.Hour),
+	})
+
+	for user, want := range map[string][]captureToken{
+		"alice": {newCaptureToken(mine)},
+		"carol": {},
+	} {
+		w := httptest.NewRecorder()
+		ListCaptureTokens(w, capabilityTokensRequest(t, http.MethodGet, user, map[string]string{"exp": "test-experiment"}))
+
+		var body struct {
+			Tokens []captureToken `json:"tokens"`
+		}
+
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("ListCaptureTokens(%s) = %s, not JSON: %v", user, w.Body.String(), err)
+		}
+
+		if body.Tokens == nil {
+			t.Errorf("ListCaptureTokens(%s) = %s, want a list, not null", user, w.Body.String())
+		}
+
+		if diff := cmp.Diff(want, body.Tokens, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("ListCaptureTokens(%s) mismatch (-want +got):\n%s", user, diff)
+		}
+
+		if strings.Contains(w.Body.String(), "secret-") {
+			t.Errorf("ListCaptureTokens(%s) = %s, want no token", user, w.Body.String())
+		}
+
+		if got := w.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("ListCaptureTokens(%s) Content-Type = %q, want application/json", user, got)
+		}
+	}
+}
+
+// A user revokes only their own token, by the experiment it is for.
+func TestDeleteCaptureToken(t *testing.T) {
+	tests := map[string]struct {
+		user, exp string
+		id        func(g capability.Grant) string
+		want      int
+	}{
+		"own token":            {"alice", "test-experiment", func(g capability.Grant) string { return g.ID }, http.StatusNoContent},
+		"another user's token": {"bob", "test-experiment", func(g capability.Grant) string { return g.ID }, http.StatusNotFound},
+		"another experiment":   {"alice", "other", func(g capability.Grant) string { return g.ID }, http.StatusNotFound},
+		"unknown ID":           {"alice", "test-experiment", func(capability.Grant) string { return "unknown" }, http.StatusNotFound},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useCaptureGrants(t)
+
+			g := capabilityMint("token", capabilitySaved(), viewOps...)
+			events := captureAudit(t)
+
+			w := httptest.NewRecorder()
+			weberror.ErrorHandler(DeleteCaptureToken).ServeHTTP(w, capabilityTokensRequest(
+				t, http.MethodDelete, tc.user, map[string]string{"exp": tc.exp, "id": tc.id(g)},
+			))
+
+			if w.Code != tc.want {
+				t.Errorf("DeleteCaptureToken(%s) = %d, want %d: %s", name, w.Code, tc.want, w.Body.String())
+			}
+
+			revoked := tc.want == http.StatusNoContent
+			if left := len(captureGrants.List("alice", "test-experiment")); (left == 0) != revoked {
+				t.Errorf("DeleteCaptureToken(%s) left %d grants, want revoked = %t", name, left, revoked)
+			}
+
+			n := countAudit(events(), "capture-token-revoke", "success", map[string]any{"phenix.capability.id": g.ID})
+			if (n == 1) != revoked {
+				t.Errorf("DeleteCaptureToken(%s) audited %d revocations, want revoked = %t", name, n, revoked)
+			}
+		})
+	}
+}
+
+// A WebShark token links to the embedded WebShark when it may view the
+// capture, and to nothing when it may only download or watch it.
+func TestCreateCaptureTokenURLs(t *testing.T) {
+	useWebShark(t)
+	useExperimentFilesDir(t, map[string]string{"saved.pcap": string(testPcapHeader())})
+
+	server := serveAs(t, "alice", sharkRole()).URL
+
+	tests := map[string]struct {
+		ops      string
+		wantOps  []capability.Op
+		wantView bool
+	}{
+		"view":                   {`["view"]`, []capability.Op{capability.OpView}, true},
+		"download":               {`["download"]`, []capability.Op{capability.OpDownload}, false},
+		"watch and view, repeat": {`["watch","view","watch"]`, []capability.Op{capability.OpWatch, capability.OpView}, true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			resp, token := createCaptureToken(t, server, `{"path":"saved.pcap","operations":`+tc.ops+`}`)
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("POST captureTokens %s = %d, want %d: %s", tc.ops, resp.StatusCode, http.StatusCreated, readBody(t, resp))
+			}
+
+			if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+				t.Errorf("POST captureTokens %s Cache-Control = %q, want no-store", tc.ops, got)
+			}
+
+			var want map[string]string
+			if tc.wantView {
+				want = map[string]string{"view": "webshark/embed?capture=" + url.QueryEscape(token.Token)}
+			}
+
+			if diff := cmp.Diff(want, token.URLs); diff != "" {
+				t.Errorf("POST captureTokens %s URLs mismatch (-want +got):\n%s", tc.ops, diff)
+			}
+
+			if diff := cmp.Diff(tc.wantOps, token.Operations); diff != "" {
+				t.Errorf("POST captureTokens %s operations mismatch (-want +got):\n%s", tc.ops, diff)
+			}
+
+			if token.ID != capability.IDOf(token.Token) || strings.HasPrefix(token.Token, streamTokenPrefix) {
+				t.Errorf("POST captureTokens %s = ID %q, token %q; want the token's ID and a WebShark name", tc.ops, token.ID, token.Token)
+			}
+		})
 	}
 }

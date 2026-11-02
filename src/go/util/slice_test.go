@@ -8,6 +8,36 @@ import (
 	"pgregory.net/rapid"
 )
 
+func TestStringSliceContains(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		slice []string
+		s     string
+		want  bool
+	}{
+		{name: "nil", slice: nil, s: "a", want: false},
+		{name: "empty string in nil", slice: nil, s: "", want: false},
+		{name: "first", slice: []string{"a", "b"}, s: "a", want: true},
+		{name: "last", slice: []string{"a", "b"}, s: "b", want: true},
+		{name: "missing", slice: []string{"a", "b"}, s: "c", want: false},
+		{name: "empty string present", slice: []string{"a", ""}, s: "", want: true},
+		{name: "case differs", slice: []string{"A"}, s: "a", want: false},
+		{name: "prefix only", slice: []string{"abc"}, s: "ab", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := StringSliceContains(test.slice, test.s); got != test.want {
+				t.Errorf("StringSliceContains(%q, %q) = %t, want %t", test.slice, test.s, got, test.want)
+			}
+		})
+	}
+}
+
 func TestUnique(t *testing.T) {
 	t.Parallel()
 

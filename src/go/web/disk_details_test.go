@@ -2,8 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -11,6 +14,7 @@ import (
 
 	"phenix/api/disk"
 	"phenix/api/disk/disktest"
+	"phenix/store"
 	v1 "phenix/types/version/v1"
 	"phenix/web/rbac"
 )
@@ -124,6 +128,8 @@ func TestGetDiskDetailsRefuses(t *testing.T) {
 		"a path that leaves the files directory":    {role: expA, image: "../../etc/passwd", want: http.StatusBadRequest},
 		"an image outside that the role cannot see": {role: expA, image: outside + "/o.hdd", want: http.StatusBadRequest},
 		"an image outside that the role sees":       {role: expB, image: outside + "/o.hdd", want: http.StatusOK},
+		"a role that may list only the image":       {role: testRole("disks", "list", "kali.hdd"), image: "kali.hdd", want: http.StatusOK},
+		"a folder":                                  {role: expA, image: "exp-a", want: http.StatusNotFound},
 		"an image in a folder the list leaves out":  {role: expA, image: "exp-a/files/kali.hdd", want: http.StatusBadRequest},
 	}
 
@@ -131,5 +137,60 @@ func TestGetDiskDetailsRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			getDiskDetails(t, tt.role, tt.image, tt.want)
 		})
+	}
+}
+
+// diskDetailsNoExperiments is the test store, failing to list experiments.
+type diskDetailsNoExperiments struct {
+	*testStore
+}
+
+func (s diskDetailsNoExperiments) List(kinds ...string) (store.Configs, error) {
+	if slices.ContainsFunc(kinds, func(k string) bool { return strings.EqualFold(k, "Experiment") }) {
+		return nil, errors.New("experiments unreadable")
+	}
+
+	return s.testStore.List(kinds...)
+}
+
+// A disk's details are still served, without the VMs that use it, when the experiments cannot be read; the failure
+// is logged.
+//
+//nolint:paralleltest // replaces the disk files, the store and the logs
+func TestGetDiskDetailsWithoutTheExperiments(t *testing.T) {
+	dir := useDiskFilesDir(t).dir
+	disktest.WriteMBRImage(t, dir+"/kali.hdd")
+
+	useDiskFakeFiles(t, diskFakeFiles{images: func(string) ([]disk.Details, error) {
+		return []disk.Details{{Kind: disk.VMImage, Name: "kali.hdd", FullPath: dir + "/kali.hdd"}}, nil
+	}})
+
+	role := disksRole([]string{"*"}, "list")
+	server := serveAs(t, "alice", role).URL
+
+	s, _ := store.DefaultStore.(*testStore)
+	store.DefaultStore = diskDetailsNoExperiments{testStore: s} //nolint:reassign // useTestStore restores it
+
+	records := captureRecords(t)
+
+	resp := do(t, http.MethodGet, server+"/api/v1/disks/details?disk=kali.hdd", "")
+	body := readBody(t, resp)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/disks/details?disk=kali.hdd with an unreadable store = %d, want %d: %s",
+			resp.StatusCode, http.StatusOK, body)
+	}
+
+	var found disk.Inspection
+	if err := json.Unmarshal([]byte(body), &found); err != nil {
+		t.Fatalf("GET /api/v1/disks/details?disk=kali.hdd = %s, not disk details: %v", body, err)
+	}
+
+	if found.FullPath != dir+"/kali.hdd" || len(found.VMs) != 0 {
+		t.Errorf("GET /api/v1/disks/details?disk=kali.hdd = %s with VMs %v, want %s with none", found.FullPath, found.VMs, dir+"/kali.hdd")
+	}
+
+	if !slices.ContainsFunc(records(), func(r string) bool { return strings.Contains(r, `"msg":"cannot tell which VMs use a disk"`) }) {
+		t.Error("GET /api/v1/disks/details with an unreadable store logged no warning about the VMs")
 	}
 }

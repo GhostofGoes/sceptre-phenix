@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -572,4 +573,95 @@ func TestMigrationHelpersProperties(t *testing.T) {
 			}
 		})
 	})
+}
+
+// Each migration returns an error naming its step when the store fails to
+// list the roles or users, or to save one that the migration changed.
+//
+//nolint:paralleltest // replaces the store
+func TestMigrationsStoreErrors(t *testing.T) {
+	var (
+		capturer = role("Capturer", policy(captureSubnetResource, nil, "create"))
+		admin    = role(experimentAdminRole, policy("experiments", nil, "get"))
+		viewer   = role(experimentViewerRole,
+			policy("vms/*", []string{"exp-a/*"}, "list"), policy(mountResource, nil, "post"))
+		failRoles  = userFailingStore{list: map[string]bool{"Role": true}}
+		failUsers  = userFailingStore{list: map[string]bool{"User": true}}
+		failUpdate = userFailingStore{update: true}
+		nullNames  = map[string]any{
+			"roleName": "Legacy",
+			"policies": []any{map[string]any{"resources": []any{"vms"}, "resourceNames": nil, "verbs": []any{"get"}}},
+		}
+	)
+
+	tests := map[string]struct {
+		roles   []*v1.RoleSpec
+		users   []*v1.UserSpec
+		raw     map[string]any // a role/legacy spec stored as it is
+		fail    userFailingStore
+		migrate func() error
+		want    string
+	}{
+		"capture stop: listing roles": {
+			fail: failRoles, migrate: EnsureCaptureSubnetStopPermission, want: "getting roles: ",
+		},
+		"capture stop: saving a role": {
+			roles: []*v1.RoleSpec{capturer}, fail: failUpdate, migrate: EnsureCaptureSubnetStopPermission,
+			want: "saving role Capturer: ",
+		},
+		"capture stop: listing users": {
+			roles: []*v1.RoleSpec{admin}, fail: failUsers, migrate: EnsureCaptureSubnetStopPermission,
+			want: "getting users: ",
+		},
+		"capture stop: saving a user": {
+			users: []*v1.UserSpec{{Username: "cap", Role: capturer}}, fail: failUpdate,
+			migrate: EnsureCaptureSubnetStopPermission, want: "saving user cap: ",
+		},
+		"viewer mount scope: listing users": {
+			fail: failUsers, migrate: EnsureExperimentViewerMountScope, want: "getting users: ",
+		},
+		"viewer mount scope: saving a user": {
+			users: []*v1.UserSpec{{Username: "legacy", Role: viewer}}, fail: failUpdate,
+			migrate: EnsureExperimentViewerMountScope, want: "saving user legacy: ",
+		},
+		"null names: listing": {
+			fail: failUsers, migrate: DropNullResourceNames, want: "getting roles and users: ",
+		},
+		"null names: saving": {
+			raw: nullNames, fail: failUpdate, migrate: DropNullResourceNames, want: "updating Role/legacy: ",
+		},
+		"files: listing roles": {
+			fail: failRoles, migrate: EnsureExperimentFilesCreatePermission, want: "getting roles: ",
+		},
+		"files: saving a role": {
+			roles: []*v1.RoleSpec{admin}, fail: failUpdate, migrate: EnsureExperimentFilesCreatePermission,
+			want: "saving role Experiment Admin: ",
+		},
+		"files: listing users": {
+			roles: []*v1.RoleSpec{capturer}, fail: failUsers, migrate: EnsureExperimentFilesCreatePermission,
+			want: "getting users: ",
+		},
+		"files: saving a user": {
+			users: []*v1.UserSpec{{Username: "admin", Role: admin}}, fail: failUpdate,
+			migrate: EnsureExperimentFilesCreatePermission, want: "saving user admin: ",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useStore(t, tc.roles, tc.users)
+
+			if tc.raw != nil {
+				userStoreRaw(t, "role/legacy", tc.raw)
+			}
+
+			tc.fail.Store = store.DefaultStore
+			storetest.Use(t, tc.fail)
+
+			err := tc.migrate()
+			if !errors.Is(err, errUserStore) || !strings.HasPrefix(err.Error(), tc.want) {
+				t.Errorf("migration error = %v, want one starting %q that wraps %v", err, tc.want, errUserStore)
+			}
+		})
+	}
 }

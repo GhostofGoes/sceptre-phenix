@@ -144,72 +144,65 @@ func TestReadyzReportsMinimega(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // uses the process-wide fake minimega
-func TestReadyzFailsWithoutMinimega(t *testing.T) {
-	useTestStore(t)
-
-	mmtest.Use(t, func(mmtest.Command) []*minicli.Response { return mmtest.Disconnect() })
-
-	server := serveRouter(t, testPublic(), "")
-
-	resp, body := getHealth(t, server.URL+readyz)
-
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("GET %s without minimega = %d, want %d", readyz, resp.StatusCode, http.StatusServiceUnavailable)
-	}
-
-	if body.Status != string(health.Fail) {
-		t.Errorf("GET %s without minimega status = %q, want %q", readyz, body.Status, health.Fail)
-	}
-
-	r, ok := oneResult(body, health.KeyMinimegaTime)
-	if !ok {
-		t.Fatalf("GET %s without minimega %s = %+v, want one result", readyz, health.KeyMinimegaTime, body.Checks[health.KeyMinimegaTime])
-	}
-
-	if r.Status != health.Fail {
-		t.Errorf("GET %s without minimega %s status = %s, want %s", readyz, health.KeyMinimegaTime, r.Status, health.Fail)
-	}
-
-	if r.ObservedValue != nil {
-		t.Errorf("GET %s without minimega %s observed value = %v, want none", readyz, health.KeyMinimegaTime, r.ObservedValue)
-	}
-}
-
-// A minimega that never answers fails the check at its timeout, rather than
-// holding the probe.
+// A minimega that is gone, or never answers, fails the check, at its timeout
+// for the one that hangs rather than holding the probe.
 //
 //nolint:paralleltest // uses the process-wide fake minimega
-func TestReadyzAnswersWhenMinimegaHangs(t *testing.T) {
-	useTestStore(t)
+func TestReadyzFailsWithoutMinimega(t *testing.T) {
+	tests := map[string]func(release <-chan struct{}) mmtest.Handler{
+		"disconnected": func(<-chan struct{}) mmtest.Handler {
+			return func(mmtest.Command) []*minicli.Response { return mmtest.Disconnect() }
+		},
+		"hung": func(release <-chan struct{}) mmtest.Handler {
+			return func(mmtest.Command) []*minicli.Response {
+				<-release
 
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-
-	mmtest.Use(t, func(mmtest.Command) []*minicli.Response {
-		<-release
-
-		return nil
-	})
-
-	server := serveRouter(t, testPublic(), "")
-
-	start := time.Now()
-	resp, body := getHealth(t, server.URL+readyz)
-
-	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("GET %s with a hung minimega took %s, want about 3s", readyz, took)
+				return nil
+			}
+		},
 	}
 
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("GET %s with a hung minimega = %d, want %d", readyz, resp.StatusCode, http.StatusServiceUnavailable)
-	}
+	for name, handler := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestStore(t)
 
-	if r, ok := oneResult(body, health.KeyMinimegaTime); !ok {
-		t.Errorf("GET %s with a hung minimega %s = %+v, want one result",
-			readyz, health.KeyMinimegaTime, body.Checks[health.KeyMinimegaTime])
-	} else if r.Status != health.Fail {
-		t.Errorf("GET %s with a hung minimega %s status = %s, want %s", readyz, health.KeyMinimegaTime, r.Status, health.Fail)
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+
+			mmtest.Use(t, handler(release))
+
+			server := serveRouter(t, testPublic(), "")
+
+			start := time.Now()
+			resp, body := getHealth(t, server.URL+readyz)
+
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("GET %s with minimega %s took %s, want at most about 3s", readyz, name, took)
+			}
+
+			if resp.StatusCode != http.StatusServiceUnavailable {
+				t.Errorf("GET %s with minimega %s = %d, want %d", readyz, name, resp.StatusCode, http.StatusServiceUnavailable)
+			}
+
+			if body.Status != string(health.Fail) {
+				t.Errorf("GET %s with minimega %s status = %q, want %q", readyz, name, body.Status, health.Fail)
+			}
+
+			r, ok := oneResult(body, health.KeyMinimegaTime)
+			if !ok {
+				t.Fatalf("GET %s with minimega %s %s = %+v, want one result",
+					readyz, name, health.KeyMinimegaTime, body.Checks[health.KeyMinimegaTime])
+			}
+
+			if r.Status != health.Fail {
+				t.Errorf("GET %s with minimega %s %s status = %s, want %s", readyz, name, health.KeyMinimegaTime, r.Status, health.Fail)
+			}
+
+			if r.ObservedValue != nil {
+				t.Errorf("GET %s with minimega %s %s observed value = %v, want none",
+					readyz, name, health.KeyMinimegaTime, r.ObservedValue)
+			}
+		})
 	}
 }
 

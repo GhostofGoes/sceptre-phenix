@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,7 @@ type errorBody struct {
 	Cause    string            `json:"cause"`
 	Code     Code              `json:"code"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	Details  map[string]any    `json:"details,omitempty"`
 }
 
 // serve runs handler as a route would, and returns its status, Content-Type and decoded body.
@@ -109,29 +111,135 @@ func TestErrorHandlerOtherError(t *testing.T) {
 	}
 }
 
-// A WebError answers its own status with its message, cause and user
-// metadata, keeping system metadata out of the body.
+// A WebError, even wrapped, answers its own status with its message, cause, user metadata and details, keeping
+// system metadata out of the body; its own code wins over its status's.
 func TestErrorHandlerWebError(t *testing.T) {
-	status, contentType, body := serve(t, func(http.ResponseWriter, *http.Request) error {
-		return NewWebError(errors.New("no such file"), "reading %s", "a.log").
-			SetStatus(http.StatusNotFound).
-			WithMetadata("file", "a.log", true).
-			WithMetadata("dir", "/srv", false)
-	})
-
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+	tests := map[string]struct {
+		err        error
+		wantStatus int
+		want       errorBody
+	}{
+		"metadata": {
+			err: NewWebError(errors.New("no such file"), "reading %s", "a.log").
+				SetStatus(http.StatusNotFound).
+				WithMetadata("file", "a.log", true).
+				WithMetadata("dir", "/srv", false),
+			wantStatus: http.StatusNotFound,
+			want: errorBody{
+				Message: "reading a.log", Cause: "no such file", Code: CodeNotFound, Metadata: map[string]string{"file": "a.log"},
+			},
+		},
+		"own code": {
+			err:        NewWebError(nil, "minimega is busy").SetStatus(http.StatusConflict).WithCode(CodeUnavailable),
+			wantStatus: http.StatusConflict,
+			want:       errorBody{Message: "minimega is busy", Code: CodeUnavailable},
+		},
+		"details": {
+			err: NewWebError(nil, "broken disks").SetStatus(http.StatusConflict).WithCode(CodeBrokenDisks).
+				WithDetail("disks", []string{"a.qc2"}).WithDetail("vms", 1),
+			wantStatus: http.StatusConflict,
+			want: errorBody{
+				Message: "broken disks", Code: CodeBrokenDisks,
+				Details: map[string]any{"disks": []any{"a.qc2"}, "vms": float64(1)},
+			},
+		},
+		"default status": {
+			err:        NewWebError(nil, "bad %d", 7),
+			wantStatus: http.StatusBadRequest,
+			want:       errorBody{Message: "bad 7", Code: CodeInvalidRequest},
+		},
+		"wrapped": {
+			err:        fmt.Errorf("handling: %w", New(http.StatusForbidden, "not yours")),
+			wantStatus: http.StatusForbidden,
+			want:       errorBody{Message: "not yours", Code: CodeForbidden},
+		},
 	}
 
-	if contentType != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", contentType)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			status, contentType, body := serve(t, func(http.ResponseWriter, *http.Request) error { return tc.err })
+
+			if status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", status, tc.wantStatus)
+			}
+
+			if contentType != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", contentType)
+			}
+
+			if diff := cmp.Diff(tc.want, body); diff != "" {
+				t.Errorf("body mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// An error's text is its message, followed by its cause when it has one.
+func TestWebErrorError(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		err  *WebError
+		want string
+	}{
+		"message and cause": {err: NewWebError(errors.New("no such file"), "reading %s", "a.log"), want: "reading a.log: no such file"},
+		"message only":      {err: NewWebError(nil, "reading a.log"), want: "reading a.log"},
+		"empty":             {err: New(http.StatusNotFound, ""), want: ""},
 	}
 
-	want := errorBody{
-		Message: "reading a.log", Cause: "no such file", Code: CodeNotFound, Metadata: map[string]string{"file": "a.log"},
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
 	}
-	if diff := cmp.Diff(want, body); diff != "" {
-		t.Errorf("body mismatch (-want +got):\n%s", diff)
+}
+
+// Metadata is always kept for the log, and for the user only when asked; a later value for a key replaces the
+// earlier one.
+func TestWithMetadata(t *testing.T) {
+	t.Parallel()
+
+	err := New(http.StatusNotFound, "missing").
+		WithMetadata("exp", "demo", false).
+		WithMetadata("vm", "vm1", true).
+		WithMetadata("vm", "vm2", true)
+
+	wantSystem := map[string]string{"exp": "demo", "vm": "vm2"}
+	if diff := cmp.Diff(wantSystem, err.SystemMetadata); diff != "" {
+		t.Errorf("SystemMetadata mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff(map[string]string{"vm": "vm2"}, err.UserMetadata); diff != "" {
+		t.Errorf("UserMetadata mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff(map[string]any(nil), err.Details); diff != "" {
+		t.Errorf("Details mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Details are returned to the user and not logged.
+func TestWithDetailNotLogged(t *testing.T) {
+	logs := captureLogs(t)
+
+	err := New(http.StatusInternalServerError, "start failed").WithDetail("disks", "secret-disk.qc2")
+	if diff := cmp.Diff(map[string]any{"disks": "secret-disk.qc2"}, err.Details); diff != "" {
+		t.Errorf("Details mismatch (-want +got):\n%s", diff)
+	}
+
+	rec := httptest.NewRecorder()
+	Write(rec, err)
+
+	if !strings.Contains(rec.Body.String(), "secret-disk.qc2") {
+		t.Errorf("body = %s, want the detail in it", rec.Body)
+	}
+
+	if logged := logs.String(); !strings.Contains(logged, "start failed") || strings.Contains(logged, "secret-disk.qc2") {
+		t.Errorf("logs = %s, want the error without its detail", logged)
 	}
 }
 

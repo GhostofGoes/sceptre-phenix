@@ -3,6 +3,8 @@ package livecapture
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,14 +166,22 @@ func TestMeshSourceRefusesUnsafePaths(t *testing.T) {
 		`/phenix/images/exp/files/a"b.pcap`,
 		"/phenix/images/exp/files/a#b.pcap",
 		"/phenix/images/exp/files/$(reboot).pcap",
+		"",
+		"/",
+		"/phenix//files/a.pcap",
+		"/phenix/files/",
+		"/phenix/files/./a.pcap",
+		"/phenix/files/a.pcap\n",
 	} {
 		if _, err := newMeshSource("compute1", path); !errors.Is(err, ErrUnsafePath) {
 			t.Errorf("newMeshSource(compute1, %q) error = %v, want %v", path, err, ErrUnsafePath)
 		}
 	}
 
-	if _, err := newMeshSource("compute1 shell reboot", "/a.pcap"); !errors.Is(err, ErrUnsafePath) {
-		t.Errorf("newMeshSource(%q, /a.pcap) error = %v, want %v", "compute1 shell reboot", err, ErrUnsafePath)
+	for _, host := range []string{"compute1 shell reboot", "", "compute1;reboot", "compute1\n", "/", "a/b", "/compute1"} {
+		if _, err := newMeshSource(host, "/a.pcap"); !errors.Is(err, ErrUnsafePath) {
+			t.Errorf("newMeshSource(%q, /a.pcap) error = %v, want %v", host, err, ErrUnsafePath)
+		}
 	}
 }
 
@@ -275,4 +285,182 @@ func TestMeshSourceArgsProperties(t *testing.T) { //nolint:paralleltest // uses 
 			t.Fatalf("minicli.Compile(%q) args mismatch (-want +got):\n%s", sent, diff)
 		}
 	})
+}
+
+func TestFileSourceReadErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pcap"), []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("writing the capture file: %v", err)
+	}
+
+	closed, err := os.Open(filepath.Join(dir, "a.pcap"))
+	if err != nil {
+		t.Fatalf("opening the capture file: %v", err)
+	}
+
+	_ = closed.Close()
+
+	tests := []struct {
+		name     string
+		src      *fileSource
+		wantErr  error
+		wantText string
+	}{
+		{
+			name:     "missing file",
+			src:      &fileSource{path: filepath.Join(dir, "missing.pcap")},
+			wantErr:  fs.ErrNotExist,
+			wantText: "opening capture file",
+		},
+		{
+			name:     "closed file",
+			src:      &fileSource{path: filepath.Join(dir, "a.pcap"), f: closed},
+			wantErr:  os.ErrClosed,
+			wantText: "getting capture file size",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := test.src.Read(0, 4)
+			if got != nil || !errors.Is(err, test.wantErr) || !strings.Contains(fmt.Sprint(err), test.wantText) {
+				t.Errorf("Read(0, 4) = %q, %v; want nil, %v containing %q", got, err, test.wantErr, test.wantText)
+			}
+		})
+	}
+}
+
+// A directory opens and has a size, but reading it fails.
+func TestFileSourceReadDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.pcap"), nil, 0o600); err != nil {
+		t.Fatalf("writing a file into the directory: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("os.Stat(%s) error = %v", dir, err)
+	}
+
+	src := &fileSource{path: dir}
+	defer src.Close()
+
+	got, err := src.Read(0, 4)
+
+	// a filesystem that gives directories no size has nothing to read
+	if info.Size() == 0 {
+		if got != nil || err != nil {
+			t.Errorf("Read(0, 4) of an empty-sized directory = %q, %v; want nil, nil", got, err)
+		}
+
+		return
+	}
+
+	if got != nil || err == nil || !strings.Contains(err.Error(), "reading capture file") {
+		t.Errorf("Read(0, 4) of a directory = %q, %v; want nil and a read error", got, err)
+	}
+}
+
+func TestFileSourceClose(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "a.pcap")
+	if err := os.WriteFile(path, []byte("0123"), 0o600); err != nil {
+		t.Fatalf("writing the capture file: %v", err)
+	}
+
+	src := &fileSource{path: path}
+
+	if err := src.Close(); err != nil {
+		t.Errorf("Close() before any Read() error = %v, want nil", err)
+	}
+
+	if got, err := src.Read(0, 4); string(got) != "0123" || err != nil {
+		t.Fatalf("Read(0, 4) = %q, %v; want %q, nil", got, err, "0123")
+	}
+
+	if err := src.Close(); err != nil {
+		t.Errorf("Close() after Read() error = %v, want nil", err)
+	}
+
+	if _, err := src.Read(0, 4); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("Read(0, 4) after Close() error = %v, want %v", err, os.ErrClosed)
+	}
+}
+
+func TestMeshSourceReadErrors(t *testing.T) { //nolint:paralleltest // uses the fake minimega
+	tests := []struct {
+		name     string
+		resp     *minicli.Response
+		wantText string
+	}{
+		{name: "node error", resp: mmtest.Error("compute1", "no such file"), wantText: "reading /a.pcap on compute1: no such file"},
+		{name: "not base64", resp: mmtest.Text("compute1", "!!not base64"), wantText: "decoding /a.pcap from compute1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mmtest.Use(t, func(mmtest.Command) []*minicli.Response { return []*minicli.Response{test.resp} })
+
+			src, err := newMeshSource("compute1", "/a.pcap")
+			if err != nil {
+				t.Fatalf("newMeshSource(compute1, /a.pcap) error = %v", err)
+			}
+
+			got, err := src.Read(0, 4)
+			if got != nil || err == nil || !strings.Contains(err.Error(), test.wantText) {
+				t.Errorf("Read(0, 4) = %q, %v; want nil and an error containing %q", got, err, test.wantText)
+			}
+
+			if err := src.Close(); err != nil {
+				t.Errorf("Close() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestDecodeRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		out     string
+		want    []byte
+		wantErr bool
+	}{
+		{name: "bytes", out: "AAEC/w==", want: []byte{0, 1, 2, 0xff}},
+		{name: "trailing newline", out: "AAEC/w==\n", want: []byte{0, 1, 2, 0xff}},
+		{name: "surrounding space", out: " \tAAEC\r\n", want: []byte{0, 1, 2}},
+		{name: "nothing", out: "", want: nil},
+		{name: "only space", out: "\n", want: nil},
+		{name: "not base64", out: "!!", wantErr: true},
+		{name: "missing padding", out: "AAEC/w", wantErr: true},
+		{name: "space inside", out: "AAEC /w==", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := decodeRange(test.out)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("decodeRange(%q) error = %v, want error %t", test.out, err, test.wantErr)
+			}
+
+			// what decodes before an error is not used
+			if err != nil {
+				return
+			}
+
+			if diff := cmp.Diff(test.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("decodeRange(%q) mismatch (-want +got):\n%s", test.out, diff)
+			}
+		})
+	}
 }

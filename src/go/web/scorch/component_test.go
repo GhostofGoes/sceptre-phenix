@@ -21,6 +21,9 @@ func update(cmp, status, out string) ComponentUpdate {
 	}
 }
 
+// componentTypeBreak is the type of a component that opens a terminal.
+const componentTypeBreak = "break"
+
 func componentKey(cmp string) string { return "exp|0|0|start|" + cmp }
 
 // A viewer that stopped reading does not hold up a component's updates: the
@@ -128,4 +131,67 @@ func TestViewerThatLeavesIsForgotten(t *testing.T) {
 	}
 
 	UpdateComponent(update(cmp, statusSuccess, ""))
+}
+
+// componentOutput asks the component processor for a component's output, as GetComponentOutput does.
+func componentOutput(cmp string) outputResponse {
+	req := outputRequest{key: componentKey(cmp), resp: make(chan outputResponse, 1)}
+	outputRequests <- req
+
+	return <-req.resp
+}
+
+// A component runs from its first running or background update until it
+// succeeds or fails; only a running break is a terminal; output is answered
+// once the component is done, and starting it again forgets the old output.
+//
+//nolint:paralleltest // uses the package's component state
+func TestComponentOutputRequests(t *testing.T) {
+	startComponents()
+
+	const cmp = "requests"
+
+	brk := update(cmp, statusStart, "")
+	brk.CmpType = componentTypeBreak
+
+	plain := update(cmp, statusStart, "")
+	plain.CmpType = "shell"
+
+	for _, step := range []struct {
+		name   string
+		update ComponentUpdate
+		want   outputResponse
+	}{
+		{"break started", brk, outputResponse{}},
+		{"break running", update(cmp, statusRunning, "one\n"), outputResponse{running: true, terminal: true}},
+		{"break succeeded", update(cmp, statusSuccess, ""), outputResponse{output: []byte("one\n")}},
+		{"started again", plain, outputResponse{}},
+		{"in the background", update(cmp, statusBackground, "two\n"), outputResponse{running: true}},
+		{"empty output", update(cmp, statusRunning, ""), outputResponse{running: true}},
+		{"failed", update(cmp, statusFailure, ""), outputResponse{output: []byte("two\n")}},
+		{"unknown status", update(cmp, "paused", "ignored\n"), outputResponse{output: []byte("two\n")}},
+	} {
+		UpdateComponent(step.update)
+
+		got := componentOutput(cmp)
+		if got.running != step.want.running || got.terminal != step.want.terminal || string(got.output) != string(step.want.output) {
+			t.Errorf("after %s, output request = %+v, want %+v", step.name, got, step.want)
+		}
+	}
+
+	if got := componentOutput("never-updated"); got.running || got.terminal || got.output != nil {
+		t.Errorf("output request of an unknown component = %+v, want none", got)
+	}
+}
+
+// processComponents returns once its context is done.
+//
+//nolint:paralleltest // reads the package's component channels
+func TestProcessComponentsStopsWithItsContext(t *testing.T) {
+	startComponents()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	polltest.Within(t, "processComponents with a done context", func() { processComponents(ctx) })
 }

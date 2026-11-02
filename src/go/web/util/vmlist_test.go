@@ -12,10 +12,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/protobuf/testing/protocmp"
 	"pgregory.net/rapid"
 
+	ifaces "phenix/types/interfaces"
 	v1 "phenix/types/version/v1"
+	"phenix/util/freshness"
 	"phenix/util/mm"
+	"phenix/web/proto"
 	"phenix/web/rbac"
 )
 
@@ -670,4 +674,127 @@ func TestPageWalksEveryItem(t *testing.T) {
 			t.Fatalf("pages of %d mismatch (-want +got):\n%s", size, diff)
 		}
 	})
+}
+
+func TestVMLabelsToProtobuf(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels []VMLabel
+		want   []*proto.VMLabel
+	}{
+		{name: "nil", labels: nil, want: []*proto.VMLabel{}},
+		{name: "empty", labels: []VMLabel{}, want: []*proto.VMLabel{}},
+		{
+			name:   "in order",
+			labels: []VMLabel{{Key: "role", Value: "plc"}, {Key: "site", Value: ""}},
+			want:   []*proto.VMLabel{{Key: "role", Value: "plc"}, {Key: "site", Value: ""}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := VMLabelsToProtobuf(tc.labels)
+			if got == nil {
+				t.Fatalf("VMLabelsToProtobuf(%v) = nil, want a non-nil slice", tc.labels)
+			}
+
+			if diff := cmp.Diff(tc.want, got, protocmp.Transform()); diff != "" {
+				t.Errorf("VMLabelsToProtobuf(%v) mismatch (-want +got):\n%s", tc.labels, diff)
+			}
+		})
+	}
+}
+
+// VMListToProtobuf converts each VM in order with its topology node's delay
+// and external flag, and reports the total it is given, not the page's length.
+func TestVMListToProtobuf(t *testing.T) {
+	t.Parallel()
+
+	external := true
+	topo := &v1.TopologySpec{NodesF: []*v1.Node{
+		{GeneralF: &v1.General{HostnameF: "a"}, DelayF: &v1.Delay{TimerF: "5m"}, ExternalF: &external},
+	}}
+	vms := mm.VMs{
+		{Name: "a", Host: "h1", State: "BUILDING"},
+		{Name: "b", Host: "h2", Running: true, State: "RUNNING"},
+	}
+
+	tests := []struct {
+		name  string
+		vms   mm.VMs
+		total int
+		topo  ifaces.TopologySpec
+		want  *proto.VMList
+	}{
+		{
+			name: "with topology", vms: vms, total: 7, topo: topo,
+			want: &proto.VMList{Total: 7, Vms: []*proto.VM{
+				{Name: "a", Host: "h1", State: "BUILDING", Experiment: "exp", DelayedStart: "timer:5m", External: true},
+				{Name: "b", Host: "h2", Running: true, State: "RUNNING", Experiment: "exp"},
+			}},
+		},
+		{
+			name: "without topology", vms: vms[:1], total: 1, topo: nil,
+			want: &proto.VMList{Total: 1, Vms: []*proto.VM{
+				{Name: "a", Host: "h1", State: "BUILDING", Experiment: "exp"},
+			}},
+		},
+		{name: "empty page", vms: nil, total: 3, topo: topo, want: &proto.VMList{Total: 3}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := VMListToProtobuf("exp", tc.vms, tc.total, tc.topo)
+			if diff := cmp.Diff(tc.want, got, protocmp.Transform()); diff != "" {
+				t.Errorf("VMListToProtobuf(exp, %v, %d) mismatch (-want +got):\n%s", vmNames(tc.vms), tc.total, diff)
+			}
+
+			if len(got.GetVms()) != len(tc.vms) {
+				t.Errorf("VMListToProtobuf(exp, %v) has %d VMs, want %d", vmNames(tc.vms), len(got.GetVms()), len(tc.vms))
+			}
+		})
+	}
+}
+
+func TestSetVMListObservation(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 7, 31, 12, 0, 0, 5, time.FixedZone("x", 3600))
+
+	tests := []struct {
+		name         string
+		observedAt   string
+		obs          freshness.Observation
+		wantUnknown  bool
+		wantObserved string
+	}{
+		{name: "known", obs: freshness.Observed(at), wantObserved: "2026-07-31T11:00:00.000000005Z"},
+		{
+			name: "partly known", obs: freshness.Observation{At: at, Known: false},
+			wantUnknown: true, wantObserved: "2026-07-31T11:00:00.000000005Z",
+		},
+		{name: "not read at runtime", obs: freshness.Unobserved()},
+		{name: "failed with no time", obs: freshness.Observation{Known: false}, wantUnknown: true},
+		{name: "no time keeps an earlier one", observedAt: "earlier", obs: freshness.Unobserved(), wantObserved: "earlier"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			list := &proto.VMList{ObservedAt: tc.observedAt}
+			SetVMListObservation(list, tc.obs)
+
+			want := &proto.VMList{RuntimeUnknown: tc.wantUnknown, ObservedAt: tc.wantObserved}
+			if diff := cmp.Diff(want, list, protocmp.Transform()); diff != "" {
+				t.Errorf("SetVMListObservation(%+v) mismatch (-want +got):\n%s", tc.obs, diff)
+			}
+		})
+	}
 }

@@ -3,14 +3,20 @@ package web
 import (
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
 
+	"phenix/api/experiment"
+	"phenix/util/common"
 	"phenix/util/plog"
 )
 
@@ -237,5 +243,55 @@ func TestNonAPIRoutesStillServeTheSPA(t *testing.T) {
 
 	if recorder.Code != http.StatusNoContent {
 		t.Errorf("GET /api/v1/known: status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+// A second phenix ui whose port is in use stops before it changes shared
+// state: it leaves the app running flags of a running experiment and the Unix
+// socket of the phenix ui that runs on that port.
+//
+//nolint:paralleltest // sets the server options, the store and the Unix socket path
+func TestStartStopsBeforeItChangesStateWhenItsPortIsInUse(t *testing.T) {
+	saved := o
+	t.Cleanup(func() { o = saved })
+
+	running := namedExperiment(t, "running", "2024-01-01T00:00:00Z")
+	running.Status["appRunningStageStatus"] = map[string]any{"soh": true}
+	useTestStore(t, running)
+
+	socket := filepath.Join(t.TempDir(), "phenix.sock")
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%s) error = %v", socket, err)
+	}
+
+	originalSocket := common.UnixSocket
+	common.UnixSocket = socket                               //nolint:reassign // the socket of the phenix ui that runs
+	t.Cleanup(func() { common.UnixSocket = originalSocket }) //nolint:reassign // restore
+
+	taken, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening on 127.0.0.1: %v", err)
+	}
+
+	t.Cleanup(func() { _ = taken.Close() })
+
+	addr := taken.Addr().String()
+
+	err = Start(t.Context(), ServeOnEndpoint(addr), ServeUnbundled())
+	if err == nil || !strings.Contains(err.Error(), "listening on "+addr) {
+		t.Fatalf("Start(endpoint in use) = %v, want an error that it cannot listen on %s", err, addr)
+	}
+
+	exp, err := experiment.Get("running")
+	if err != nil {
+		t.Fatalf("experiment.Get(running) error = %v", err)
+	}
+
+	if diff := cmp.Diff(map[string]bool{"soh": true}, exp.Status.AppRunning()); diff != "" {
+		t.Errorf("app running flags after Start(endpoint in use) mismatch (-want +got):\n%s", diff)
+	}
+
+	if _, err := os.Lstat(socket); err != nil {
+		t.Errorf("os.Lstat(Unix socket) after Start(endpoint in use) error = %v, want the socket kept", err)
 	}
 }

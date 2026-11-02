@@ -267,3 +267,206 @@ func TestWaitForResponseNamespacesPollSeparately(t *testing.T) { //nolint:parall
 		t.Errorf("waitForResponse(a, 1) and waitForResponse(b, 1) polled namespaces mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// ccresponseSet returns a poller set holding one poller for ns, with a waiter
+// for each of ids, none of them started.
+func ccresponseSet(ns string, ids ...string) (*responsePollerSet, *responsePoller, []*responseWaiter) {
+	p := &responsePoller{ns: ns, interval: time.Hour, waiters: make(map[*responseWaiter]struct{})}
+	s := &responsePollerSet{pollers: map[string]*responsePoller{ns: p}}
+
+	ws := make([]*responseWaiter, 0, len(ids))
+
+	for _, id := range ids {
+		w := &responseWaiter{id: id, poller: p, done: make(chan struct{})}
+		p.waiters[w] = struct{}{}
+		ws = append(ws, w)
+	}
+
+	return s, p, ws
+}
+
+// ccresponseDone reports which of ws have been given their answer.
+func ccresponseDone(ws []*responseWaiter) []bool {
+	done := make([]bool, len(ws))
+
+	for i, w := range ws {
+		select {
+		case <-w.done:
+			done[i] = true
+		default:
+		}
+	}
+
+	return done
+}
+
+func TestResponsePollerSetPending(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		ids     []string
+		want    []string
+		wantOK  bool
+		retired bool
+	}{
+		"distinct sorted IDs":           {ids: []string{"3", "1", "2"}, want: []string{"1", "2", "3"}, wantOK: true},
+		"one ID for waiters that share": {ids: []string{"5", "5", "4"}, want: []string{"4", "5"}, wantOK: true},
+		"no waiters retires the poller": {ids: nil, want: nil, wantOK: false, retired: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			s, p, _ := ccresponseSet("exp", tc.ids...)
+
+			ids, ok := s.pending(p)
+			if ok != tc.wantOK {
+				t.Errorf("pending() ok = %t, want %t", ok, tc.wantOK)
+			}
+
+			if diff := cmp.Diff(tc.want, ids); diff != "" {
+				t.Errorf("pending() IDs mismatch (-want +got):\n%s", diff)
+			}
+
+			if _, kept := s.pollers["exp"]; kept == tc.retired {
+				t.Errorf("pending() left the poller registered = %t, want %t", kept, !tc.retired)
+			}
+		})
+	}
+}
+
+func TestResponsePollerSetRelease(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		ids       []string
+		responded map[string]bool
+		wantDone  []bool
+		wantOK    bool
+	}{
+		"releases only answered waiters": {
+			ids: []string{"1", "2", "2"}, responded: map[string]bool{"2": true},
+			wantDone: []bool{false, true, true}, wantOK: true,
+		},
+		"ignores answers nobody waits on": {
+			ids: []string{"1"}, responded: map[string]bool{"9": true, "1": false},
+			wantDone: []bool{false}, wantOK: true,
+		},
+		"nothing answered": {ids: []string{"1"}, responded: nil, wantDone: []bool{false}, wantOK: true},
+		"retires once every waiter is answered": {
+			ids: []string{"1", "2"}, responded: map[string]bool{"1": true, "2": true},
+			wantDone: []bool{true, true}, wantOK: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			s, p, ws := ccresponseSet("exp", tc.ids...)
+
+			if ok := s.release(p, tc.responded); ok != tc.wantOK {
+				t.Errorf("release(%v) = %t, want %t", tc.responded, ok, tc.wantOK)
+			}
+
+			if diff := cmp.Diff(tc.wantDone, ccresponseDone(ws)); diff != "" {
+				t.Errorf("release(%v) answered waiters mismatch (-want +got):\n%s", tc.responded, diff)
+			}
+
+			left := 0
+			for _, done := range tc.wantDone {
+				if !done {
+					left++
+				}
+			}
+
+			if len(p.waiters) != left {
+				t.Errorf("release(%v) left %d waiters, want %d", tc.responded, len(p.waiters), left)
+			}
+
+			if _, kept := s.pollers["exp"]; kept != tc.wantOK {
+				t.Errorf("release(%v) left the poller registered = %t, want %t", tc.responded, kept, tc.wantOK)
+			}
+		})
+	}
+}
+
+// A retired poller never removes the newer poller that replaced it, and removing
+// a waiter already released is harmless.
+func TestResponsePollerSetRetireAndRemove(t *testing.T) {
+	t.Parallel()
+
+	s, old, ws := ccresponseSet("exp", "1")
+
+	newer := &responsePoller{ns: "exp", interval: time.Hour, waiters: make(map[*responseWaiter]struct{})}
+	s.pollers["exp"] = newer
+
+	s.retire(old)
+
+	if s.pollers["exp"] != newer {
+		t.Error("retire(old poller) removed the namespace's newer poller")
+	}
+
+	s.retire(newer)
+
+	if _, kept := s.pollers["exp"]; kept {
+		t.Error("retire(current poller) left it registered")
+	}
+
+	s.release(old, map[string]bool{"1": true})
+	s.remove(ws[0])
+	s.remove(ws[0])
+
+	if len(old.waiters) != 0 {
+		t.Errorf("poller has %d waiters after its only one was released and removed, want 0", len(old.waiters))
+	}
+}
+
+func TestRespondedCommands(t *testing.T) { //nolint:paralleltest // shares the fake minimega
+	header := []string{"id", "responses"}
+
+	for name, tc := range map[string]struct {
+		ids     []string
+		answer  []*minicli.Response
+		want    map[string]bool
+		wantRaw string
+	}{
+		"one command is filtered": {
+			ids:     []string{"7"},
+			answer:  []*minicli.Response{mmtest.Tabular("head", header, []string{"7", "2"})},
+			want:    map[string]bool{"7": true},
+			wantRaw: `.record false namespace "exp" .columns "id","responses" .filter id=7 cc commands`,
+		},
+		"several commands are listed together": {
+			ids: []string{"1", "2", "3"},
+			answer: []*minicli.Response{
+				mmtest.Tabular("head", header, []string{"1", "0"}, []string{"2", "0"}, []string{"3", "0"}, []string{"4", "1"}),
+				mmtest.Tabular("compute1", header, []string{"1", "0"}, []string{"2", "1"}, []string{"3", "0"}),
+			},
+			want:    map[string]bool{"2": true, "4": true},
+			wantRaw: `.record false namespace "exp" .columns "id","responses" cc commands`,
+		},
+		"no answer": {
+			ids:     []string{"1", "2"},
+			answer:  []*minicli.Response{mmtest.Error("head", "boom")},
+			want:    map[string]bool{},
+			wantRaw: `.record false namespace "exp" .columns "id","responses" cc commands`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			received := useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+				if cmd.Base == ccCommandsCmd {
+					return tc.answer
+				}
+
+				return nil
+			})
+
+			if diff := cmp.Diff(tc.want, respondedCommands("exp", tc.ids)); diff != "" {
+				t.Errorf("respondedCommands(exp, %q) mismatch (-want +got):\n%s", tc.ids, diff)
+			}
+
+			want := []mmtest.Command{{Raw: tc.wantRaw, Namespace: "exp", Base: ccCommandsCmd}}
+			if diff := cmp.Diff(want, received()); diff != "" {
+				t.Errorf("respondedCommands(exp, %q) sent commands mismatch (-want +got):\n%s", tc.ids, diff)
+			}
+		})
+	}
+}

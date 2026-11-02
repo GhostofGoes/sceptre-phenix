@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -265,28 +266,110 @@ func TestUpdateVMsStopAtTheirDeadline(t *testing.T) {
 	}
 }
 
+// changeContext and committedChangeContext end the request's change at its timeout; only changeContext also ends
+// it when the client leaves.
+func TestChangeContexts(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		bound          func(*http.Request, time.Duration) (context.Context, context.CancelFunc)
+		wantClientEnds bool
+	}{
+		"change":           {bound: changeContext, wantClientEnds: true},
+		"committed change": {bound: committedChangeContext, wantClientEnds: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client, leave := context.WithCancel(context.Background())
+			defer leave()
+
+			began := time.Now()
+
+			ctx, cancel := tc.bound(httptest.NewRequestWithContext(client, http.MethodPost, "/", nil), time.Hour)
+			defer cancel()
+
+			if deadline, ok := ctx.Deadline(); !ok || deadline.Before(began.Add(time.Hour)) || deadline.After(time.Now().Add(time.Hour)) {
+				t.Errorf("%s context deadline = %v, %t; want an hour from the request", name, deadline, ok)
+			}
+
+			leave()
+
+			if ended := ctx.Err() != nil; ended != tc.wantClientEnds {
+				t.Errorf("%s context ended when the client left = %t, want %t", name, ended, tc.wantClientEnds)
+			}
+
+			short, stop := tc.bound(httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", nil), time.Millisecond)
+			defer stop()
+
+			<-short.Done()
+
+			if err := short.Err(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("%s context past its timeout error = %v, want %v", name, err, context.DeadlineExceeded)
+			}
+		})
+	}
+}
+
+// screenshotContext keeps the change's deadline, if any, but not its cancellation.
 func TestScreenshotContextKeepsTheDeadlineButNotTheCancel(t *testing.T) {
+	t.Parallel()
+
 	deadline := time.Now().Add(time.Hour)
 
-	change, cancel := context.WithDeadline(context.Background(), deadline)
-	cancel()
+	tests := map[string]struct {
+		change       func() (context.Context, context.CancelFunc)
+		wantDeadline bool
+		wantErr      error
+	}{
+		"a canceled change with a deadline": {
+			change: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithDeadline(context.Background(), deadline)
+				cancel()
 
-	ctx, stop := screenshotContext(change)
-	defer stop()
-
-	if err := ctx.Err(); err != nil {
-		t.Errorf("screenshot context ended with its canceled change: %v", err)
+				return ctx, cancel
+			},
+			wantDeadline: true,
+		},
+		"a change without a deadline": {
+			change: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		"a change past its deadline": {
+			change: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			wantDeadline: true,
+			wantErr:      context.DeadlineExceeded,
+		},
 	}
 
-	got, ok := ctx.Deadline()
-	if !ok || !got.Equal(deadline) {
-		t.Errorf("screenshot context deadline = %v, %t; want %v", got, ok, deadline)
-	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	unbounded, stopUnbounded := screenshotContext(context.Background())
-	defer stopUnbounded()
+			change, cancelChange := tc.change()
+			defer cancelChange()
 
-	if _, ok := unbounded.Deadline(); ok {
-		t.Error("screenshot context of a change without a deadline has one")
+			ctx, stop := screenshotContext(change)
+
+			if err := ctx.Err(); !errors.Is(err, tc.wantErr) {
+				t.Errorf("screenshotContext(%s) error = %v, want %v", name, err, tc.wantErr)
+			}
+
+			want, _ := change.Deadline()
+
+			got, ok := ctx.Deadline()
+			if ok != tc.wantDeadline || !got.Equal(want) {
+				t.Errorf("screenshotContext(%s) deadline = %v, %t; want %v, %t", name, got, ok, want, tc.wantDeadline)
+			}
+
+			stop()
+
+			if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				t.Errorf("screenshotContext(%s) after its stop error = %v, want it ended", name, ctx.Err())
+			}
+		})
 	}
 }

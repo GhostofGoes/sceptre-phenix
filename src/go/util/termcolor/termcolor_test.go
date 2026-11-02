@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/creack/pty"
 	"github.com/google/go-cmp/cmp"
 	"pgregory.net/rapid"
 
 	"phenix/util/termcolor"
+	"phenix/util/testenv"
 )
 
 // ParseMode takes the three modes and "" as auto, and refuses any other value.
@@ -76,6 +78,9 @@ func TestEnabled(t *testing.T) {
 		"auto, regular file":       {mode: termcolor.Auto, w: file, want: false},
 		"auto, file and NO_COLOR":  {mode: termcolor.Auto, w: file, vars: map[string]string{"NO_COLOR": "1"}, want: false},
 		"auto, file and dumb TERM": {mode: termcolor.Auto, w: file, vars: map[string]string{"TERM": "dumb"}, want: false},
+		"off, file and xterm TERM": {mode: termcolor.Off, w: file, vars: map[string]string{"TERM": "xterm"}, want: false},
+		"empty mode, buffer":       {mode: "", w: &bytes.Buffer{}, want: false},
+		"unknown mode, buffer":     {mode: "sometimes", w: &bytes.Buffer{}, want: false},
 	}
 
 	for name, tc := range tests {
@@ -128,4 +133,119 @@ func TestPaletteOffKeepsText(t *testing.T) {
 			}
 		}
 	})
+}
+
+// termcolorTerminal opens a pseudo-terminal and returns its terminal side.
+func termcolorTerminal(t *testing.T) *os.File {
+	t.Helper()
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		testenv.Skipf(t, "opening a pseudo-terminal: %v", err)
+	}
+
+	t.Cleanup(func() { _ = tty.Close(); _ = ptmx.Close() })
+
+	return tty
+}
+
+// IsTerminal is true only for a file that is a terminal. Auto and an empty or
+// unknown mode color a terminal unless NO_COLOR is set or TERM is dumb.
+func TestIsTerminalAndAutoOnATerminal(t *testing.T) {
+	t.Parallel()
+
+	tty := termcolorTerminal(t)
+
+	file, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = file.Close() })
+
+	for name, tc := range map[string]struct {
+		w    io.Writer
+		want bool
+	}{
+		"terminal":     {w: tty, want: true},
+		"regular file": {w: file, want: false},
+		"buffer":       {w: &bytes.Buffer{}, want: false},
+		"nil":          {w: nil, want: false},
+	} {
+		t.Run("IsTerminal/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := termcolor.IsTerminal(tc.w); got != tc.want {
+				t.Errorf("IsTerminal(%s) = %t, want %t", name, got, tc.want)
+			}
+		})
+	}
+
+	for name, tc := range map[string]struct {
+		mode termcolor.Mode
+		vars map[string]string
+		want bool
+	}{
+		"auto":              {mode: termcolor.Auto, want: true},
+		"auto, xterm":       {mode: termcolor.Auto, vars: map[string]string{"TERM": "xterm"}, want: true},
+		"auto, NO_COLOR":    {mode: termcolor.Auto, vars: map[string]string{"NO_COLOR": "1"}, want: false},
+		"auto, dumb TERM":   {mode: termcolor.Auto, vars: map[string]string{"TERM": "dumb"}, want: false},
+		"empty mode":        {mode: "", want: true},
+		"unknown mode":      {mode: "sometimes", want: true},
+		"off":               {mode: termcolor.Off, want: false},
+		"on, dumb TERM":     {mode: termcolor.On, vars: map[string]string{"TERM": "dumb"}, want: true},
+		"off, terminal set": {mode: termcolor.Off, vars: map[string]string{"TERM": "xterm"}, want: false},
+	} {
+		t.Run("Enabled/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			getenv := func(name string) string { return tc.vars[name] }
+
+			if got := termcolor.Enabled(tc.mode, tty, getenv); got != tc.want {
+				t.Errorf("Enabled(%q, terminal) with %s = %t, want %t", tc.mode, name, got, tc.want)
+			}
+		})
+	}
+}
+
+// For reads NO_COLOR and TERM from the process environment.
+//
+//nolint:paralleltest // sets environment variables
+func TestFor(t *testing.T) {
+	tty := termcolorTerminal(t)
+
+	tests := map[string]struct {
+		mode          termcolor.Mode
+		w             io.Writer
+		noColor, term string
+		want          bool
+	}{
+		"on, buffer":              {mode: termcolor.On, w: &bytes.Buffer{}, want: true},
+		"off, terminal":           {mode: termcolor.Off, w: tty, term: "xterm", want: false},
+		"auto, buffer":            {mode: termcolor.Auto, w: &bytes.Buffer{}, term: "xterm", want: false},
+		"auto, terminal":          {mode: termcolor.Auto, w: tty, term: "xterm", want: true},
+		"auto, terminal NO_COLOR": {mode: termcolor.Auto, w: tty, noColor: "1", term: "xterm", want: false},
+		"auto, terminal dumb":     {mode: termcolor.Auto, w: tty, term: "dumb", want: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", tc.noColor)
+			t.Setenv("TERM", tc.term)
+
+			p := termcolor.For(tc.mode, tc.w)
+			if p.On() != tc.want {
+				t.Errorf("For(%q).On() = %t, want %t", tc.mode, p.On(), tc.want)
+			}
+
+			want := "a"
+			if tc.want {
+				want = "\x1b[32ma\x1b[0m"
+			}
+
+			if got := p.Green("a"); got != want {
+				t.Errorf("For(%q).Green(a) = %q, want %q", tc.mode, got, want)
+			}
+		})
+	}
 }

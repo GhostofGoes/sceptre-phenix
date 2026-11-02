@@ -191,10 +191,18 @@ func TestStoreFileCheck(t *testing.T) {
 
 	tests := map[string]struct {
 		data       []byte
-		pageSize   int // of the host; 0 is doctorFilesPageSize
+		pageSize   int   // of the host; 0 is doctorFilesPageSize
+		failAt     int64 // the offset whose read fails; 0 for none, -1 for the first
 		want       doctorStatus
 		wantDetail string
 	}{
+		"first read fails": {
+			data: valid, failAt: -1, want: doctorFail, wantDetail: "cannot read /phenix/store.bdb: permission denied",
+		},
+		"second read fails": {
+			data: valid, failAt: doctorFilesPageSize, want: doctorFail,
+			wantDetail: "cannot read /phenix/store.bdb: permission denied",
+		},
 		"new file":   {data: valid, want: doctorPass, wantDetail: "BoltDB version 2, 4096-byte pages, 16384 bytes"},
 		"empty file": {data: []byte{}, want: doctorPass, wantDetail: "is empty"},
 		"no checksums": {
@@ -288,6 +296,17 @@ func TestStoreFileCheck(t *testing.T) {
 			env := fakeDoctorEnv(nil, false)
 			env.readAt = doctorFilesReadAt(tc.data)
 
+			if tc.failAt != 0 {
+				readAt := env.readAt
+				env.readAt = func(path string, off int64, n int) ([]byte, error) {
+					if off == tc.failAt || (tc.failAt < 0 && off == 0) {
+						return nil, os.ErrPermission
+					}
+
+					return readAt(path, off, n)
+				}
+			}
+
 			if tc.pageSize != 0 {
 				env.pageSize = tc.pageSize
 			}
@@ -362,6 +381,10 @@ func TestStoreOwnerCheck(t *testing.T) {
 			owner: 0, uid: 0, phenixUID: "1000",
 			want: []doctorCheck{row("", doctorWarn,
 				"/s.bdb belongs to root (uid 0), but sudo phenix uses the store of alice (uid 1000), who cannot open it without sudo")},
+		},
+		"root, phenix user not known": {
+			owner: 1000, uid: 0, phenixUID: "",
+			want: []doctorCheck{row("", doctorPass, "/s.bdb belongs to alice (uid 1000)")},
 		},
 		"sudo phenix on the user's store": {
 			owner: 1000, uid: 0, phenixUID: "1000",
@@ -708,5 +731,43 @@ func TestOSReadAt(t *testing.T) {
 
 	if _, err := osReadAt(filepath.Join(t.TempDir(), "missing"), 0, 4); err == nil {
 		t.Error("osReadAt(missing) error = nil, want one")
+	}
+}
+
+// storeFile is the store's path and file information only when
+// store.endpoint names a bolt:// regular file.
+func TestDoctorFilesStoreFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	file := writeTestFile(t, dir, "store.bdb", "0123456789")
+
+	tests := map[string]struct {
+		endpoint string
+		want     string // the path; "" for none
+	}{
+		"regular file":   {endpoint: "bolt://" + file, want: file},
+		"missing file":   {endpoint: "bolt://" + filepath.Join(dir, "missing.bdb")},
+		"directory":      {endpoint: "bolt://" + dir},
+		"other scheme":   {endpoint: "etcd://" + file},
+		"not an address": {endpoint: "bolt://%zz"},
+		"empty":          {endpoint: ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), map[string]string{"store.endpoint": tc.endpoint})
+
+			path, info := in.storeFile()
+			if path != tc.want || (info == nil) != (tc.want == "") {
+				t.Fatalf("storeFile() = %q, %v; want %q", path, info, tc.want)
+			}
+
+			if info != nil && info.Size() != 10 {
+				t.Errorf("storeFile() size = %d, want 10", info.Size())
+			}
+		})
 	}
 }

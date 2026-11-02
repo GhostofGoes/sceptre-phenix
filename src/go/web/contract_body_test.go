@@ -126,3 +126,52 @@ func wantDocumentedBody(t *testing.T, method, path string, resp *http.Response) 
 		t.Errorf("%s: body sets %s, which openapi.yml does not document", what, field)
 	}
 }
+
+// specOperation finds the operation for a concrete path at the API or the
+// root, ignoring the query, and prefers literal segments to parameters.
+func TestSpecOperation(t *testing.T) {
+	t.Parallel()
+
+	doc := contractSpec(t)
+
+	tests := map[string]struct {
+		method, path, want string
+	}{
+		"API path":              {http.MethodGet, "/api/v1/experiments/foo", "/experiments/{name}"},
+		"lower-case method":     {"get", "/api/v1/experiments/foo", "/experiments/{name}"},
+		"query ignored":         {http.MethodGet, "/api/v1/experiments?filter=x", "/experiments"},
+		"literal segment":       {http.MethodPost, "/api/v1/experiments/foo/files/download", "/experiments/{name}/files/download"},
+		"param segment":         {http.MethodGet, "/api/v1/experiments/foo/files/a.log", "/experiments/{name}/files/{filename}"},
+		"root path":             {http.MethodGet, "/features", "/features"},
+		"root path under API":   {http.MethodGet, "/api/v1/features", ""},
+		"API path at root":      {http.MethodGet, "/experiments", ""},
+		"undocumented method":   {http.MethodTrace, "/api/v1/experiments", ""},
+		"too many segments":     {http.MethodGet, "/api/v1/experiments/a/b/c/d/e/f/g", ""},
+		"parameter spans slash": {http.MethodGet, "/api/v1/users/a/b", ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, op := specOperation(doc, tc.method, tc.path)
+			if got != tc.want || (op == nil) != (tc.want == "") {
+				t.Errorf("specOperation(%s %s) = %q (operation %t), want %q", tc.method, tc.path, got, op != nil, tc.want)
+			}
+		})
+	}
+
+	// openapi.yml has no two templates of one method that match one path
+	t.Run("fewest parameters", func(t *testing.T) {
+		t.Parallel()
+
+		get := &openapi3.PathItem{Get: openapi3.NewOperation()}
+		synthetic := &openapi3.T{Paths: openapi3.Paths{"/a/{x}/{y}": get, "/a/{x}/c": get, "/a/b/c": get}}
+
+		for path, want := range map[string]string{"/api/v1/a/b/c": "/a/b/c", "/api/v1/a/z/c": "/a/{x}/c", "/api/v1/a/z/d": "/a/{x}/{y}"} {
+			if got, _ := specOperation(synthetic, http.MethodGet, path); got != want {
+				t.Errorf("specOperation(GET %s) = %q, want %q", path, got, want)
+			}
+		}
+	})
+}

@@ -23,6 +23,13 @@ func TestCreateRejectsInvalidOptions(t *testing.T) {
 		opts []experiment.CreateOption
 		want string // in the error, naming what was rejected
 	}{
+		{name: "no name", opts: []experiment.CreateOption{experiment.CreateWithTopology("topo")}, want: "no experiment name provided"},
+		{name: "no topology", opts: []experiment.CreateOption{experiment.CreateWithName("exp")}, want: "no topology name provided"},
+		{
+			name: "a default bridge too long",
+			opts: append(withName("exp"), experiment.CreateWithDefaultBridge(strings.Repeat("b", experiment.MaxBridgeNameLength+1))),
+			want: "default bridge name must be 15 characters or less",
+		},
 		{name: "the all name", opts: withName("all"), want: "cannot use 'all'"},
 		{name: "minimega's default namespace", opts: withName("minimega"), want: "cannot use 'minimega'"},
 		{name: "a reserved name in any case", opts: withName("MiniMega"), want: "cannot use 'MiniMega'"},
@@ -214,4 +221,29 @@ func annotationsByNode(nodes []ifaces.NodeSpec) map[string]nodeAnnotations {
 	}
 
 	return got
+}
+
+// Create refuses a topology the store does not hold, and creates nothing.
+func TestCreateRefusesAMissingTopology(t *testing.T) { //nolint:paralleltest // replaces package state
+	useTestStore(t)
+
+	err := experiment.Create(context.Background(), withName("exp")...)
+	if err == nil || err.Error() != "topology doesn't exist" {
+		t.Errorf("Create(topology topo) error = %v, want %q", err, "topology doesn't exist")
+	}
+
+	if _, err := experiment.Get("exp"); err == nil {
+		t.Error("Get(exp) after a refused Create succeeded, want no experiment")
+	}
+}
+
+// A default bridge of the longest name allowed passes the check of its length.
+func TestCreateTakesTheLongestDefaultBridge(t *testing.T) { //nolint:paralleltest // replaces package state
+	useTestStore(t)
+
+	err := experiment.Create(context.Background(),
+		append(withName("exp"), experiment.CreateWithDefaultBridge(strings.Repeat("b", experiment.MaxBridgeNameLength)))...)
+	if err == nil || err.Error() != "topology doesn't exist" {
+		t.Errorf("Create(bridge of %d characters) error = %v, want it to get as far as the topology", experiment.MaxBridgeNameLength, err)
+	}
 }

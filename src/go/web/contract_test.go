@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -233,6 +234,8 @@ type contractRoute struct {
 	// RBAC; when empty, anything but 401, 403 and its hidden status, short of
 	// a server error
 	want []int
+	// code is the code of an error body that is not its status's (see weberror.CodeFor)
+	code weberror.Code
 }
 
 func (c contractRoute) String() string { return c.method + " " + c.path }
@@ -659,7 +662,7 @@ func renameRole(role rbac.Role, replacer *strings.Replacer) (rbac.Role, bool) {
 }
 
 // wantErrorBody fails the test unless resp has the JSON Error body, with a
-// message and its status's code.
+// message and its status's code, or route's code.
 func wantErrorBody(t *testing.T, route contractRoute, resp *http.Response) {
 	t.Helper()
 
@@ -686,7 +689,12 @@ func wantErrorBody(t *testing.T, route contractRoute, resp *http.Response) {
 		t.Errorf("%s error body message = %q, want one", route, body.Message)
 	}
 
-	if want := weberror.CodeFor(resp.StatusCode); body.Code != want {
+	want := weberror.CodeFor(resp.StatusCode)
+	if route.code != "" {
+		want = route.code
+	}
+
+	if body.Code != want {
 		t.Errorf("%s error body code = %q, want %q", route, body.Code, want)
 	}
 }
@@ -756,6 +764,8 @@ type contractErrorCase struct {
 	// prepare returns the path to request when it depends on the fixture
 	prepare func(t *testing.T, f contractFixture) string
 	want    int
+	// code is the error body's code when it is not the status's
+	code weberror.Code
 }
 
 const (
@@ -836,7 +846,24 @@ func fileAndVMErrorCases() map[string]contractErrorCase {
 		return "/api/v1/console/" + f.console(t, "bob")
 	}
 
+	// an image backed by the contract disk, so that a delete of that disk is refused
+	diskInUse := func(t *testing.T, _ contractFixture) string {
+		t.Helper()
+
+		child := mm.GetMMFullPath("child.qc2")
+		writeDisks(t, child)
+		backedBy(t, child, contractDisk)
+
+		return "/api/v1/disks?disk=" + contractDisk
+	}
+
 	return map[string]contractErrorCase{
+		"delete disk in use": {
+			method: "DELETE", prepare: diskInUse, want: http.StatusConflict, code: weberror.CodeDiskInUse,
+		},
+		"delete disk with a force not a boolean": {
+			method: "DELETE", path: "/api/v1/disks?disk=" + contractDisk + "&force=maybe", want: http.StatusBadRequest,
+		},
 		"checksum of missing file": {
 			method: "GET", path: exp + "/files/none.log/checksum?path=none.log", want: http.StatusNotFound,
 		},
@@ -1017,7 +1044,7 @@ func checkContractError(t *testing.T, spec openAPISpec, name string, tc contract
 		wantDocumentedBody(t, tc.method, path, resp)
 	}
 
-	wantErrorBody(t, contractRoute{method: tc.method, path: path}, resp)
+	wantErrorBody(t, contractRoute{method: tc.method, path: path, code: tc.code}, resp)
 
 	if !everyPath && !spec.documents(tc.method, path, tc.want) {
 		t.Errorf("openapi.yml documents %d for %s %s = false, want true", tc.want, tc.method, path)
@@ -1281,5 +1308,101 @@ func TestContractSocket(t *testing.T) {
 				t.Errorf("socket route %s %s has no case", method, r.path)
 			}
 		}
+	}
+}
+
+// A route passes once past authentication and RBAC: with an answer it lists,
+// or, listing none, with any but 401, 403, its hidden status or a 5xx. A role
+// without its permissions gets its hidden status, else 403.
+func TestContractRouteVerdicts(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		route  contractRoute
+		passed []int
+		failed []int
+		denied int
+	}{
+		"any status": {
+			route:  contractRoute{},
+			passed: []int{http.StatusOK, http.StatusNotFound, http.StatusConflict},
+			failed: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError, http.StatusBadGateway},
+			denied: http.StatusForbidden,
+		},
+		"hidden": {
+			route:  contractRoute{hidden: http.StatusNotFound},
+			passed: []int{http.StatusOK, http.StatusBadRequest},
+			failed: []int{http.StatusNotFound, http.StatusForbidden},
+			denied: http.StatusNotFound,
+		},
+		"listed": {
+			route:  contractRoute{want: []int{http.StatusAccepted, http.StatusServiceUnavailable}},
+			passed: []int{http.StatusAccepted, http.StatusServiceUnavailable},
+			failed: []int{http.StatusOK, http.StatusNotFound},
+			denied: http.StatusForbidden,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, status := range tc.passed {
+				if !tc.route.passed(status) {
+					t.Errorf("passed(%d) = false, want true", status)
+				}
+			}
+
+			for _, status := range tc.failed {
+				if tc.route.passed(status) {
+					t.Errorf("passed(%d) = true, want false", status)
+				}
+			}
+
+			if got := tc.route.denied(); got != tc.denied {
+				t.Errorf("denied() = %d, want %d", got, tc.denied)
+			}
+		})
+	}
+}
+
+// renameRole changes only the resource names of a copy of the role, and says
+// whether any changed; otherNames gives a renamed variant per role and change.
+func TestContractRenameRoles(t *testing.T) {
+	t.Parallel()
+
+	var (
+		vmRole  = testRole("vms", "get", contractExp+"/"+contractVM)
+		expRole = testRole("experiments", "get", contractExp)
+		anyRole = testRole("hosts", "list")
+	)
+
+	renamed, changed := renameRole(vmRole, strings.NewReplacer(contractVM, "other-vm"))
+	if !changed {
+		t.Error("renameRole(test-vm to other-vm) changed = false, want true")
+	}
+
+	want := testRole("vms", "get", contractExp+"/other-vm")
+	if diff := cmp.Diff(want.Spec, renamed.Spec); diff != "" {
+		t.Errorf("renameRole() mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := vmRole.Spec.Policies[0].ResourceNames[0]; got != contractExp+"/"+contractVM {
+		t.Errorf("renameRole() changed the original's resource name to %q", got)
+	}
+
+	if _, changed := renameRole(anyRole, strings.NewReplacer(contractVM, "other-vm")); changed {
+		t.Error("renameRole() of a role naming nothing changed = true, want false")
+	}
+
+	got := slices.Sorted(maps.Keys(otherNames([]rbac.Role{vmRole, expRole, anyRole})))
+
+	wantKeys := []string{
+		"experiments for another experiment, disk or config",
+		"vms for another VM",
+		"vms for another experiment, disk or config",
+	}
+	if diff := cmp.Diff(wantKeys, got); diff != "" {
+		t.Errorf("otherNames() keys mismatch (-want +got):\n%s", diff)
 	}
 }

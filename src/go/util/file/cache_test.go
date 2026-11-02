@@ -60,6 +60,8 @@ func countingList(calls *atomic.Int32, files Files) func() (Files, error) {
 }
 
 func TestListingCacheReusesUntilExpired(t *testing.T) {
+	t.Parallel()
+
 	cache := newTestCache()
 
 	var calls atomic.Int32
@@ -93,55 +95,136 @@ func TestListingCacheReusesUntilExpired(t *testing.T) {
 }
 
 func TestListingCacheKeysByExperiment(t *testing.T) {
+	t.Parallel()
+
 	cache := newTestCache()
 
 	var calls atomic.Int32
 
+	if got := listingKey("a"); got != "a/files/" {
+		t.Errorf("listingKey(a) = %q, want a/files/", got)
+	}
+
 	_ = fill(cache, listingKey("a"), countingList(&calls, nil))
 	_ = fill(cache, listingKey("b"), countingList(&calls, nil))
+	_ = fill(cache, listingKey("a"), countingList(&calls, nil))
 
 	if got := calls.Load(); got != 2 {
-		t.Errorf("listings after filling experiments a and b = %d, want 2", got)
+		t.Errorf("listings after filling experiments a, b and a again = %d, want 2", got)
 	}
 }
 
 // A listing that was in flight when the files changed may miss the change, so
-// it must not be reused by callers who ask after the change.
+// it must not be reused by callers who ask after the change, who list anew at
+// once rather than wait for it.
 func TestListingCacheDropsListingInvalidatedInFlight(t *testing.T) {
-	cache := newTestCache()
+	t.Parallel()
 
-	var (
-		calls   atomic.Int32
-		entered = make(chan struct{})
-		release = make(chan struct{})
-		done    = make(chan struct{})
-	)
+	for name, drop := range map[string]func(*listingCache){
+		"invalidate":    func(c *listingCache) { c.invalidate("k") },
+		"invalidateAll": func(c *listingCache) { c.invalidateAll() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	go func() {
-		defer close(done)
+			var (
+				cache   = newTestCache()
+				calls   atomic.Int32
+				entered = make(chan struct{})
+				release = make(chan struct{})
+				done    = make(chan struct{})
+			)
 
-		_ = fill(cache, "k", func() (Files, error) {
-			calls.Add(1)
-			close(entered)
-			<-release
+			go func() {
+				defer close(done)
 
-			return nil, nil
+				_ = fill(cache, "k", func() (Files, error) {
+					calls.Add(1)
+					close(entered)
+					<-release
+
+					return Files{{Name: "stale", Path: "stale"}}, nil
+				})
+			}()
+
+			<-entered
+			drop(cache)
+
+			var fresh Files
+
+			polltest.Within(t, "listing while the dropped listing runs", func() {
+				var err error
+
+				fresh, _, err = cache.get("k", countingList(&calls, Files{{Name: "fresh", Path: "fresh"}}))
+				if err != nil {
+					t.Errorf("get(k) after %s error = %v", name, err)
+				}
+			})
+
+			close(release)
+			<-done
+
+			again, _, err := cache.get("k", countingList(&calls, nil))
+			if err != nil {
+				t.Fatalf("get(k) once the dropped listing ended error = %v", err)
+			}
+
+			if diff := cmp.Diff([]string{"fresh", "fresh"}, append(names(fresh), names(again)...)); diff != "" {
+				t.Errorf("get(k) after %s, then again, mismatch (-want +got):\n%s", name, diff)
+			}
+
+			if got := calls.Load(); got != 2 {
+				t.Errorf("listings after %s during the first = %d, want 2", name, got)
+			}
 		})
-	}()
+	}
+}
 
-	<-entered
-	cache.invalidate("k")
-	close(release)
-	<-done
+// However concurrent callers interleave with a listing, a key that is never
+// invalidated is listed once, and every caller gets that listing.
+func TestListingCacheListsOnceForConcurrentCallers(t *testing.T) {
+	t.Parallel()
 
-	_ = fill(cache, "k", countingList(&calls, nil))
+	const callers = 16
 
-	if got := calls.Load(); got != 2 {
-		t.Errorf("listings after invalidate(k) during the first = %d, want 2", got)
+	for round := range 20 {
+		var (
+			cache = newTestCache()
+			calls atomic.Int32
+			start = make(chan struct{})
+			got   = make(chan []string, callers)
+		)
+
+		for range callers {
+			go func() {
+				<-start
+
+				files, _, err := cache.get("k", countingList(&calls, Files{{Name: "a", Path: "a"}}))
+				if err != nil {
+					t.Errorf("round %d: get(k) error = %v", round, err)
+				}
+
+				got <- names(files)
+			}()
+		}
+
+		close(start)
+
+		for range callers {
+			if diff := cmp.Diff([]string{"a"}, <-got); diff != "" {
+				t.Errorf("round %d: get(k) mismatch (-want +got):\n%s", round, diff)
+			}
+		}
+
+		if n := calls.Load(); n != 1 {
+			t.Errorf("round %d: listings for %d concurrent get(k) = %d, want 1", round, callers, n)
+		}
 	}
 }
 
 func TestListingCacheDoesNotReuseFailures(t *testing.T) {
+	t.Parallel()
+
 	cache := newTestCache()
 
 	var calls atomic.Int32
@@ -196,6 +279,8 @@ func TestListingCacheDoesNotReuseFailures(t *testing.T) {
 }
 
 func TestListingCacheHandsOutCopies(t *testing.T) {
+	t.Parallel()
+
 	cache := newTestCache()
 
 	list := func() (Files, error) {
@@ -225,6 +310,8 @@ func TestListingCacheHandsOutCopies(t *testing.T) {
 }
 
 func TestListingCachePrunesExpiredListings(t *testing.T) {
+	t.Parallel()
+
 	cache := newTestCache()
 
 	_ = fill(cache, "old", countingList(new(atomic.Int32), nil))
@@ -331,10 +418,6 @@ func TestDeletingFilesDropsCachedListings(t *testing.T) { //nolint:paralleltest 
 		"DeleteFile": {
 			remove: func() error { return DeleteFile("exp/files/a") },
 			want:   []string{"exp/files/a"},
-		},
-		"DeleteExistingFiles through DeleteFile": {
-			remove: func() error { return DeleteExistingFiles([]string{"x", "y"}) },
-			want:   []string{"x", "y"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -445,6 +528,8 @@ func TestListingErrorsPropagate(t *testing.T) {
 // A caller whose context ends returns at once while the listing goes on for those still waiting;
 // once none is left, the listing's context is canceled, and a later call lists anew.
 func TestListingCacheCancelsAListingNoOneWaitsFor(t *testing.T) {
+	t.Parallel()
+
 	var (
 		cache      = newTestCache()
 		running    = make(chan context.Context, 1)

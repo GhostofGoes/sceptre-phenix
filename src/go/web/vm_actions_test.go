@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -17,8 +19,12 @@ import (
 	"pgregory.net/rapid"
 
 	"phenix/api/job"
+	"phenix/store"
+	"phenix/util/common"
+	"phenix/util/mm"
 	"phenix/util/mm/mmtest"
 	"phenix/web/cache"
+	"phenix/web/util"
 )
 
 // fakeVMAction records the VMs the named action touches and fails those in fail;
@@ -447,4 +453,388 @@ func TestUniqueNamesProperties(t *testing.T) {
 			t.Fatalf("uniqueNames(uniqueNames(%q)) = %q, want %q", in, again, got)
 		}
 	})
+}
+
+// vmActionsDo makes the named action do what do does until the test ends.
+func vmActionsDo(t *testing.T, action string, do func(ctx context.Context, exp, name string) error) {
+	t.Helper()
+
+	a := vmActions[action]
+	original := a.do
+	a.do = do
+
+	t.Cleanup(func() { a.do = original })
+}
+
+// vmActionsNoScreenshot has a start take no screenshot until the test ends:
+// the test minimega takes none.
+func vmActionsNoScreenshot(t *testing.T) {
+	t.Helper()
+
+	start := vmActions["start"]
+	screenshot := start.screenshot
+	start.screenshot = ""
+
+	t.Cleanup(func() { start.screenshot = screenshot })
+}
+
+// vmActionsJob starts a bulk action of exp's VMs and returns the job once it
+// has finished.
+func vmActionsJob(t *testing.T, registry *job.Registry, server, exp, action string, vms ...string) job.Job {
+	t.Helper()
+
+	body, err := json.Marshal(vmActionsRequest{Action: action, VMs: vms})
+	if err != nil {
+		t.Fatalf("json.Marshal(%s request) error = %v", action, err)
+	}
+
+	resp := do(t, http.MethodPost, server+"/api/v1/experiments/"+exp+"/vms/actions", string(body))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST %s actions = %d, want %d: %s", action, resp.StatusCode, http.StatusAccepted, readBody(t, resp))
+	}
+
+	var started job.Job
+	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+		t.Fatalf("decoding the job: %v", err)
+	}
+
+	return waitJob(t, registry, started.ID)
+}
+
+// A VM's screenshot is a PNG data URL, or "" when it cannot be taken.
+func TestVMScreenshot(t *testing.T) {
+	t.Parallel()
+
+	png := []byte("\x89PNG vm_actions_test")
+
+	width, err := util.ScreenshotWidth(defaultScreenshotSize)
+	if err != nil {
+		t.Fatalf("util.ScreenshotWidth(%s) error = %v", defaultScreenshotSize, err)
+	}
+
+	// what GetScreenshotContext caches it as, so minimega is not asked
+	if err := cache.SetWithExpire("vmActionsShot_a_"+width, png, time.Minute); err != nil {
+		t.Fatalf("cache.SetWithExpire() error = %v", err)
+	}
+
+	tests := map[string]struct {
+		size, want string
+	}{
+		"cached":       {defaultScreenshotSize, "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)},
+		"invalid size": {"huge", ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := vmScreenshot(t.Context(), "vmActionsShot", "a", tc.size); got != tc.want {
+				t.Errorf("vmScreenshot(size %s) = %q, want %q", tc.size, got, tc.want)
+			}
+		})
+	}
+}
+
+// A kill sends minimega `vm kill` for the VM, in the experiment's namespace.
+func TestKillVMKillsInMinimega(t *testing.T) {
+	useTestStore(t, namedExperiment(t, "exp", "2024-01-01T00:00:00Z", diskVM("a", "a.qc2")))
+
+	received := useMinimega(t, func(mmtest.Command) []*minicli.Response { return nil })
+	server := serveAs(t, "alice", testRole("vms", "delete", "exp/*")).URL
+
+	resp := do(t, http.MethodDelete, server+"/api/v1/experiments/exp/vms/a", "")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE vms/a = %d, want %d: %s", resp.StatusCode, http.StatusNoContent, readBody(t, resp))
+	}
+
+	var kills []mmtest.Command
+
+	for _, cmd := range received() {
+		if strings.HasPrefix(cmd.Base, "vm kill") {
+			kills = append(kills, cmd)
+		}
+	}
+
+	if len(kills) != 1 || kills[0].Base != "vm kill a" || kills[0].Namespace != "exp" {
+		t.Errorf("minimega kill commands = %+v, want one vm kill a in namespace exp", kills)
+	}
+}
+
+// A single-VM action that fails after acting answers why, and broadcasts the
+// failure; a kill in an experiment that does not exist touches no VM.
+func TestSingleVMActionFailures(t *testing.T) {
+	tests := map[string]struct {
+		method, path string
+		do           func(ctx context.Context, exp, name string) error
+		action       string
+		want         int
+		broadcasts   []string
+	}{
+		"VM not in the topology": {
+			method: http.MethodPost, path: "/experiments/exp/vms/ghost/stop", action: "pause",
+			want: http.StatusInternalServerError, broadcasts: []string{"stopping", "errorStopping"},
+		},
+		"experiment gone after acting": {
+			method: http.MethodPost, path: "/experiments/exp/vms/a/stop", action: "pause",
+			do: func(context.Context, string, string) error {
+				c, _ := store.NewConfig("experiment/exp")
+
+				return store.Delete(c) //nolint:wrapcheck // test double
+			},
+			want: http.StatusBadRequest, broadcasts: []string{"stopping", "errorStopping"},
+		},
+		"kill in a missing experiment": {
+			method: http.MethodDelete, path: "/experiments/none/vms/a", action: "kill", want: http.StatusBadRequest,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useVMExperiment(t, true, "a")
+
+			if tc.do == nil {
+				tc.do = func(context.Context, string, string) error { return nil }
+			}
+
+			vmActionsDo(t, tc.action, tc.do)
+
+			broadcasts := recordVMBroadcasts(t)
+			events := captureAudit(t)
+			server := serveAs(t, "alice", adminRole()).URL
+
+			resp := do(t, tc.method, server+"/api/v1"+tc.path, "")
+			if body := readBody(t, resp); resp.StatusCode != tc.want {
+				t.Errorf("%s %s = %d, want %d: %s", tc.method, tc.path, resp.StatusCode, tc.want, body)
+			}
+
+			if diff := cmp.Diff(tc.broadcasts, broadcasts(), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("%s %s broadcasts mismatch (-want +got):\n%s", tc.method, tc.path, diff)
+			}
+
+			if tc.action == "kill" {
+				wantAudit(t, events(), "vm-kill", "failure", map[string]any{"user.name": "alice"})
+			}
+		})
+	}
+}
+
+// A shut down VM is answered as stopped though minimega has yet to say so;
+// a paused one is answered as minimega reports it.
+func TestSingleVMActionReportsStopped(t *testing.T) {
+	for action, want := range map[string]bool{"shutdown": false, "stop": true} {
+		t.Run(action, func(t *testing.T) {
+			useVMExperiment(t, true, "a")
+			useTestMM(t, &testMM{vms: mm.VMs{{Name: "a", Running: true}}})
+
+			name := action
+			if action == "stop" {
+				name = "pause"
+			}
+
+			vmActionsDo(t, name, func(context.Context, string, string) error { return nil })
+
+			server := serveAs(t, "alice", adminRole()).URL
+
+			resp := do(t, http.MethodPost, server+"/api/v1/experiments/exp/vms/a/"+action, "")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("POST vms/a/%s = %d, want %d: %s", action, resp.StatusCode, http.StatusOK, readBody(t, resp))
+			}
+
+			var got struct {
+				Running bool `json:"running"`
+			}
+
+			if err := json.Unmarshal([]byte(readBody(t, resp)), &got); err != nil {
+				t.Fatalf("decoding POST vms/a/%s: %v", action, err)
+			}
+
+			if got.Running != want {
+				t.Errorf("POST vms/a/%s running = %t, want %t", action, got.Running, want)
+			}
+		})
+	}
+}
+
+// A bulk action that ends without a VM (a kill) succeeds with no result.
+func TestRunVMActionsWithoutResult(t *testing.T) {
+	useVMExperiment(t, true, "a", "b")
+
+	var (
+		registry = useJobs(t)
+		acted    = fakeVMAction(t, "kill", nil, nil)
+		server   = serveAs(t, "alice", testRole("vms", "delete", "exp/*")).URL
+	)
+
+	j := vmActionsJob(t, registry, server, "exp", "kill", "a", "b")
+
+	want := []job.Item{{Name: "a", Status: job.ItemSucceeded}, {Name: "b", Status: job.ItemSucceeded}}
+	if diff := cmp.Diff(want, j.Items); diff != "" {
+		t.Errorf("job items mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := slices.Sorted(slices.Values(*acted)); !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("killed VMs = %v, want [a b]", got)
+	}
+}
+
+// A bulk start checks no disks when it cannot read the experiment, or when
+// every VM it may start is running, and then acts on every VM.
+func TestRunVMActionsSkipsTheDiskCheck(t *testing.T) {
+	image := loopImage(t)
+
+	tests := map[string]struct {
+		exp    string
+		states map[string]string
+		want   []job.Item
+	}{
+		"experiment missing": {
+			exp: "none",
+			// the action itself then fails reading the experiment
+			want: []job.Item{{Name: "a", Status: job.ItemFailed}},
+		},
+		"every VM running": {
+			exp: "exp", states: map[string]string{"a": "RUNNING"},
+			want: []job.Item{{Name: "a", Status: job.ItemSucceeded}},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestStore(t, namedExperiment(t, "exp", "2024-01-01T00:00:00Z", snapshotVM("a", image)))
+			useTestMM(t, &testMM{states: tc.states})
+			useDiskCheck(t, common.DiskCheckError)
+			vmActionsNoScreenshot(t)
+
+			var (
+				registry = useJobs(t)
+				acted    = fakeVMAction(t, "start", nil, nil)
+				server   = serveAs(t, "alice", testRole("vms/start", "update", tc.exp+"/a")).URL
+			)
+
+			j := vmActionsJob(t, registry, server, tc.exp, "start", "a")
+
+			if diff := cmp.Diff(tc.want, j.Items, cmpopts.IgnoreFields(job.Item{}, "Result", "Error")); diff != "" {
+				t.Errorf("job items mismatch (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff([]string{"a"}, *acted); diff != "" {
+				t.Errorf("started VMs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A vmActionError reads as its cause, which [errors.Is] finds.
+func TestVMActionError(t *testing.T) {
+	t.Parallel()
+
+	cause := fmt.Errorf("locking: %w", job.ErrForbidden)
+	err := error(&vmActionError{status: http.StatusConflict, err: cause})
+
+	if err.Error() != cause.Error() || !errors.Is(err, job.ErrForbidden) {
+		t.Errorf("vmActionError = %q (is ErrForbidden: %t), want %q and true", err, errors.Is(err, job.ErrForbidden), cause)
+	}
+}
+
+// A request's log fields name its user, experiment and VM, and its job when it
+// has one.
+func TestVMRequestLogArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		req  vmRequest
+		want []any
+	}{
+		"single VM": {vmRequest{user: "alice", exp: "exp", name: "a"}, []any{"user", "alice", "exp", "exp", "vm", "a"}},
+		"job": {
+			vmRequest{user: "alice", exp: "exp", name: "a", jobID: "j1"},
+			[]any{"user", "alice", "exp", "exp", "vm", "a", "job", "j1"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, tc.req.logArgs()); diff != "" {
+				t.Errorf("logArgs() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A start of a VM that minimega does not know answers 409 with how to launch
+// it when the topology sets the VM to not boot, and minimega's own error
+// otherwise. Both fail the start: they audit it and broadcast the failure.
+func TestStartVMNotLaunched(t *testing.T) {
+	const notLaunched = "VM off is set to not boot, so minimega did not launch it. Redeploy the VM to launch it"
+
+	tests := map[string]struct {
+		vm   string
+		want int
+		body string // the error message, or the part of it that must appear
+	}{
+		"set to not boot": {vm: "off", want: http.StatusConflict, body: notLaunched},
+		"set to boot":     {vm: "on", want: http.StatusInternalServerError, body: "vm not found: on"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			off := diskVM("off", "a.qc2")
+			off["general"] = map[string]any{"hostname": "off", "do_not_boot": true}
+
+			useTestStore(t, namedExperiment(t, "exp", "2024-01-01T00:00:00Z", off, diskVM("on", "a.qc2")))
+
+			received := useMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+				if vm, ok := strings.CutPrefix(cmd.Base, "vm start "); ok {
+					return []*minicli.Response{mmtest.Error("compute1", "vm not found: "+vm)}
+				}
+
+				return nil
+			})
+
+			broadcasts := recordVMBroadcasts(t)
+			events := captureAudit(t)
+			server := serveAs(t, "alice", testRole("vms/start", "update", "exp/*")).URL
+
+			resp := do(t, http.MethodPost, server+"/api/v1/experiments/exp/vms/"+tc.vm+"/start", "")
+			body := readBody(t, resp)
+
+			if resp.StatusCode != tc.want {
+				t.Fatalf("POST vms/%s/start = %d, want %d: %s", tc.vm, resp.StatusCode, tc.want, body)
+			}
+
+			if got := errorMessage(t, resp.StatusCode, body); !strings.Contains(got, tc.body) {
+				t.Errorf("POST vms/%s/start message = %q, want it to contain %q", tc.vm, got, tc.body)
+			}
+
+			if got := mmtest.Count(received(), "vm start "+tc.vm); got != 1 {
+				t.Errorf("minimega got vm start %s %d times, want 1", tc.vm, got)
+			}
+
+			if diff := cmp.Diff([]string{"starting", "errorStarting"}, broadcasts()); diff != "" {
+				t.Errorf("POST vms/%s/start broadcasts mismatch (-want +got):\n%s", tc.vm, diff)
+			}
+
+			wantAudit(t, events(), "vm-start", "failure", map[string]any{"user.name": "alice"})
+		})
+	}
+}
+
+// startVM gives minimega's error as it is for a VM it does not know when the
+// experiment is not in the store, and for a VM the topology does not have.
+func TestStartVMKeepsOtherErrors(t *testing.T) {
+	useTestStore(t, namedExperiment(t, "exp", "2024-01-01T00:00:00Z", diskVM("a", "a.qc2")))
+	useMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+		return []*minicli.Response{mmtest.Error("compute1", "vm not found: "+strings.TrimPrefix(cmd.Base, "vm start "))}
+	})
+
+	for _, tc := range []struct{ exp, vm string }{{exp: "none", vm: "a"}, {exp: "exp", vm: "ghost"}} {
+		err := startVM(t.Context(), tc.exp, tc.vm)
+
+		var actionErr *vmActionError
+		if err == nil || errors.As(err, &actionErr) || !strings.Contains(err.Error(), "vm not found: "+tc.vm) {
+			t.Errorf("startVM(%s, %s) error = %v, want minimega's vm not found error", tc.exp, tc.vm, err)
+		}
+	}
 }

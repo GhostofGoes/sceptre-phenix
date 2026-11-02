@@ -115,14 +115,53 @@ func TestDiskFilesystems(t *testing.T) {
 func TestQemuImg(t *testing.T) {
 	t.Parallel()
 
-	version := func(context.Context, string) (string, error) {
-		return "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)", nil
-	}
+	var (
+		found   = func(string) (string, error) { return "/usr/bin/qemu-img", nil }
+		version = func(context.Context, string) (string, error) {
+			return "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)", nil
+		}
+		answers = func(out string, err error) func(context.Context, string) (string, error) {
+			return func(context.Context, string) (string, error) { return out, err }
+		}
+	)
 
 	tests := map[string]struct {
 		lookPath func(string) (string, error)
+		version  func(context.Context, string) (string, error)
 		want     Result
 	}{
+		"version fails": {
+			lookPath: found,
+			version:  answers("", errors.New("exit status 1")),
+			want: Result{
+				ComponentID:       "qemu-img",
+				ComponentType:     TypeComponent,
+				Status:            Warn,
+				AffectedEndpoints: []string{"/api/v1/disks"},
+				Output:            "running /usr/bin/qemu-img --version: exit status 1",
+			},
+		},
+		"other format": {
+			lookPath: found,
+			version:  answers("  qemu-img 9.0\nCopyright\n", nil),
+			want: Result{
+				ComponentID:   "qemu-img",
+				ComponentType: TypeComponent,
+				ObservedValue: "qemu-img 9.0",
+				Status:        Pass,
+				Output:        "/usr/bin/qemu-img: qemu-img 9.0",
+			},
+		},
+		"empty output": {
+			lookPath: found,
+			version:  answers("", nil),
+			want: Result{
+				ComponentID:   "qemu-img",
+				ComponentType: TypeComponent,
+				Status:        Pass,
+				Output:        "/usr/bin/qemu-img: ",
+			},
+		},
 		"missing": {
 			lookPath: func(string) (string, error) { return "", errors.New("not found") },
 			want: Result{
@@ -134,7 +173,8 @@ func TestQemuImg(t *testing.T) {
 			},
 		},
 		"found": {
-			lookPath: func(string) (string, error) { return "/usr/bin/qemu-img", nil },
+			lookPath: found,
+			version:  version,
 			want: Result{
 				ComponentID:   "qemu-img",
 				ComponentType: TypeComponent,
@@ -149,7 +189,7 @@ func TestQemuImg(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			if diff := cmp.Diff(tc.want, only(t, one(t, QemuImg(tc.lookPath, version)), KeyQemuImg)); diff != "" {
+			if diff := cmp.Diff(tc.want, only(t, one(t, QemuImg(tc.lookPath, tc.version)), KeyQemuImg)); diff != "" {
 				t.Errorf("QemuImg() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -181,6 +221,23 @@ func TestWebShark(t *testing.T) {
 	want = Result{ComponentID: "webshark", ComponentType: TypeComponent, Status: Pass}
 	if diff := cmp.Diff(want, only(t, one(t, WebShark(dir, always)), KeyWebShark)); diff != "" {
 		t.Errorf("WebShark() with index.html mismatch (-want +got):\n%s", diff)
+	}
+
+	// index.html that is a directory is not a build
+	notFile := t.TempDir()
+	if err := os.Mkdir(filepath.Join(notFile, "index.html"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	want = Result{
+		ComponentID:       "webshark",
+		ComponentType:     TypeComponent,
+		Status:            Warn,
+		AffectedEndpoints: []string{"/webshark/"},
+		Output:            filepath.Join(notFile, "index.html") + " is not a file",
+	}
+	if diff := cmp.Diff(want, only(t, one(t, WebShark(notFile, always)), KeyWebShark)); diff != "" {
+		t.Errorf("WebShark() with an index.html directory mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -554,4 +611,317 @@ func TestPercentileProperties(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPercentile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		h    *metrics.Float64Histogram
+		p    float64
+		want float64
+	}{
+		{name: "no buckets", h: &metrics.Float64Histogram{Buckets: []float64{0}}, p: 0.99, want: 0},
+		{name: "no samples", h: &metrics.Float64Histogram{Counts: []uint64{0, 0}, Buckets: []float64{0, 1, 2}}, p: 0.99, want: 0},
+		{name: "first bucket", h: &metrics.Float64Histogram{Counts: []uint64{9, 1}, Buckets: []float64{0, 1, 2}}, p: 0.5, want: 1},
+		{name: "last bucket", h: &metrics.Float64Histogram{Counts: []uint64{9, 1}, Buckets: []float64{0, 1, 2}}, p: 0.99, want: 2},
+		{name: "zeroth", h: &metrics.Float64Histogram{Counts: []uint64{0, 1}, Buckets: []float64{0, 1, 2}}, p: 0, want: 1},
+		{
+			name: "unbounded last bucket",
+			h:    &metrics.Float64Histogram{Counts: []uint64{1, 1}, Buckets: []float64{0, 1, math.Inf(1)}},
+			p:    0.99,
+			want: 1,
+		},
+		{name: "past the samples", h: &metrics.Float64Histogram{Counts: []uint64{1, 1}, Buckets: []float64{0, 1, 2}}, p: 1.5, want: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := percentile(test.h, test.p); got != test.want {
+				t.Errorf("percentile(%+v, %v) = %v, want %v", test.h, test.p, got, test.want)
+			}
+		})
+	}
+}
+
+// A listing slower than a second warns, with how long it took.
+func TestStoreSlow(t *testing.T) {
+	t.Parallel()
+
+	got := only(t, one(t, Store("bolt", func() error {
+		time.Sleep(slowResponse + 10*time.Millisecond)
+
+		return nil
+	})), KeyStore)
+
+	if took, ok := got.ObservedValue.(Float); !ok || took < Float(slowResponse.Milliseconds()) {
+		t.Errorf("Store() of a slow store: ObservedValue = %#v, want at least %d ms", got.ObservedValue, slowResponse.Milliseconds())
+	}
+
+	if got.Status != Warn || !strings.HasPrefix(got.Output, "listing configs took ") {
+		t.Errorf("Store() of a slow store = %s, %q; want %s, the time it took", got.Status, got.Output, Warn)
+	}
+}
+
+// checksVersion is the minimega command that gives its version.
+const checksVersion = "version"
+
+// checksRunner answers each minimega command from a table, sleeping first
+// when slow is set; a command not in the table fails.
+type checksRunner struct {
+	answers map[string][]*minicli.Response
+	errs    map[string]error
+	slow    time.Duration
+}
+
+func (r checksRunner) run(_ context.Context, command string) ([]*minicli.Response, error) {
+	if command == checksVersion {
+		time.Sleep(r.slow)
+	}
+
+	if err := r.errs[command]; err != nil {
+		return nil, err
+	}
+
+	resps, ok := r.answers[command]
+	if !ok {
+		return nil, errors.New("unexpected command " + command)
+	}
+
+	return resps, nil
+}
+
+// The keys after the version warn, each on its own, when their command fails
+// or its answer cannot be read.
+func TestMinimegaPartialAnswers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		version   = []*minicli.Response{{Host: "head", Response: "minimega 2.9"}}
+		namespace = []*minicli.Response{{Header: []string{"namespace"}, Tabular: [][]string{{"exp"}}}}
+		mesh      = []*minicli.Response{{Header: []string{"size"}, Tabular: [][]string{{"1"}}}}
+	)
+
+	warn := func(id, componentType, output string) Result {
+		return Result{
+			ComponentID:       id,
+			ComponentType:     componentType,
+			Status:            Warn,
+			AffectedEndpoints: minimegaEndpoints,
+			Output:            output,
+		}
+	}
+
+	tests := []struct {
+		name   string
+		runner checksRunner
+		key    string
+		want   Result
+	}{
+		{
+			name: "namespace fails",
+			runner: checksRunner{
+				answers: map[string][]*minicli.Response{checksVersion: version, "mesh status": mesh},
+				errs:    map[string]error{"namespace": errors.New("boom")},
+			},
+			key:  KeyMinimegaNamespaces,
+			want: warn("minimega", TypeComponent, "listing namespaces: boom"),
+		},
+		{
+			name: "mesh status fails",
+			runner: checksRunner{
+				answers: map[string][]*minicli.Response{checksVersion: version, "namespace": namespace},
+				errs:    map[string]error{"mesh status": errors.New("boom")},
+			},
+			key:  KeyMeshNodes,
+			want: warn("minimega-mesh", TypeSystem, "reading mesh status: boom"),
+		},
+		{
+			name: "mesh status without a size",
+			runner: checksRunner{answers: map[string][]*minicli.Response{
+				checksVersion: version,
+				"namespace":   namespace,
+				"mesh status": {{Header: []string{"size"}, Tabular: [][]string{{"many"}}}},
+			}},
+			key:  KeyMeshNodes,
+			want: warn("minimega-mesh", TypeSystem, "mesh status has no size"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := one(t, Minimega(test.runner.run))
+
+			if diff := cmp.Diff(test.want, only(t, got, test.key)); diff != "" {
+				t.Errorf("Minimega() %s mismatch (-want +got):\n%s", test.key, diff)
+			}
+
+			for _, key := range []string{KeyMinimegaTime, KeyMinimegaVersion, KeyMinimegaNamespaces, KeyMeshNodes} {
+				if key != test.key && only(t, got, key).Status != Pass {
+					t.Errorf("Minimega() %s = %+v, want it to pass", key, only(t, got, key))
+				}
+			}
+		})
+	}
+}
+
+// The version is the second word of "minimega <version> ...", the whole
+// answer otherwise, and none for an empty answer.
+func TestMinimegaVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		resps  []*minicli.Response
+		want   any
+		output string
+	}{
+		{name: "minimega version", resps: []*minicli.Response{{Response: "minimega 2.9 abc"}}, want: "2.9", output: "minimega 2.9 abc"},
+		{name: "other format", resps: []*minicli.Response{{Response: " v2.9-dev \n"}}, want: "v2.9-dev", output: "v2.9-dev"},
+		{name: "one word", resps: []*minicli.Response{{Response: "minimega"}}, want: "minimega", output: "minimega"},
+		{name: "empty", resps: []*minicli.Response{{Response: "  "}}, want: nil, output: ""},
+		{name: "no responses", resps: nil, want: nil, output: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			runner := checksRunner{answers: map[string][]*minicli.Response{
+				checksVersion: test.resps,
+				"namespace":   nil,
+				"mesh status": {{Header: []string{"size"}, Tabular: [][]string{{"1"}}}},
+			}}
+
+			want := Result{
+				ComponentID:   "minimega",
+				ComponentType: TypeComponent,
+				ObservedValue: test.want,
+				Status:        Pass,
+				Output:        test.output,
+			}
+
+			if diff := cmp.Diff(want, only(t, one(t, Minimega(runner.run)), KeyMinimegaVersion)); diff != "" {
+				t.Errorf("Minimega() version mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A version answer slower than a second warns, with how long it took.
+func TestMinimegaSlow(t *testing.T) {
+	t.Parallel()
+
+	runner := checksRunner{
+		answers: map[string][]*minicli.Response{
+			checksVersion: {{Response: "minimega 2.9"}},
+			"namespace":   nil,
+			"mesh status": {{Header: []string{"size"}, Tabular: [][]string{{"1"}}}},
+		},
+		slow: slowResponse + 10*time.Millisecond,
+	}
+
+	got := only(t, one(t, Minimega(runner.run)), KeyMinimegaTime)
+
+	if took, ok := got.ObservedValue.(Float); !ok || took < Float(slowResponse.Milliseconds()) {
+		t.Errorf("Minimega() of a slow minimega %s value = %#v, want at least %d ms",
+			KeyMinimegaTime, got.ObservedValue, slowResponse.Milliseconds())
+	}
+
+	if got.Status != Warn || !strings.HasPrefix(got.Output, "minimega took ") {
+		t.Errorf("Minimega() of a slow minimega %s = %+v, want a warning of the time it took", KeyMinimegaTime, got)
+	}
+}
+
+func TestCountColumn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		resps []*minicli.Response
+		want  int
+	}{
+		{name: "no responses", resps: nil, want: 0},
+		{name: "no such column", resps: []*minicli.Response{{Header: []string{"other"}, Tabular: [][]string{{"a"}}}}, want: 0},
+		{
+			name: "distinct across nodes",
+			resps: []*minicli.Response{
+				{Header: []string{"namespace"}, Tabular: [][]string{{"a"}, {"b"}}},
+				{Header: []string{"vlans", "namespace"}, Tabular: [][]string{{"1", "b"}, {"2", "c"}}},
+			},
+			want: 3,
+		},
+		{
+			name: "short rows and a node without the column",
+			resps: []*minicli.Response{
+				{Header: []string{"other"}, Tabular: [][]string{{"x"}}},
+				{Header: []string{"vlans", "namespace"}, Tabular: [][]string{{"1"}, {"2", "a"}}},
+			},
+			want: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := countColumn(test.resps, "namespace"); got != test.want {
+				t.Errorf("countColumn(%s, namespace) = %d, want %d", test.name, got, test.want)
+			}
+		})
+	}
+}
+
+func TestMeshSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		resps  []*minicli.Response
+		want   meshInfo
+		wantOK bool
+	}{
+		{name: "no responses", resps: nil},
+		{name: "no rows", resps: []*minicli.Response{{Header: []string{"size"}}}},
+		{
+			name: "first node with rows",
+			resps: []*minicli.Response{
+				{Header: []string{"size"}},
+				{Header: []string{"size", "degree", "peers"}, Tabular: [][]string{{"4", "2", "3"}}},
+				{Header: []string{"size"}, Tabular: [][]string{{"9"}}},
+			},
+			want:   meshInfo{size: 4, degree: "2", peers: "3"},
+			wantOK: true,
+		},
+		{
+			name:  "row shorter than the header",
+			resps: []*minicli.Response{{Header: []string{"degree", "size"}, Tabular: [][]string{{"2"}}}},
+			want:  meshInfo{degree: "2"},
+		},
+		{
+			name:  "size not a number",
+			resps: []*minicli.Response{{Header: []string{"size", "peers"}, Tabular: [][]string{{"x", "1"}}}},
+			want:  meshInfo{peers: "1"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			info, ok := meshStatus(test.resps)
+			if diff := cmp.Diff(test.want, info, cmp.AllowUnexported(meshInfo{})); diff != "" || ok != test.wantOK {
+				t.Errorf("meshStatus(%s) = %t, want %t; mismatch (-want +got):\n%s", test.name, ok, test.wantOK, diff)
+			}
+
+			if size, ok := MeshSize(test.resps); size != test.want.size || ok != test.wantOK {
+				t.Errorf("MeshSize(%s) = %d, %t; want %d, %t", test.name, size, ok, test.want.size, test.wantOK)
+			}
+		})
+	}
 }

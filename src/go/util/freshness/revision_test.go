@@ -15,45 +15,75 @@ import (
 )
 
 func TestETag(t *testing.T) {
-	if got := freshness.ETag(0); got != "" {
-		t.Errorf("ETag(0) = %q, want none", got)
-	}
+	t.Parallel()
 
-	if got := freshness.ETag(12); got != `"r12"` {
-		t.Errorf(`ETag(12) = %q, want "r12"`, got)
+	for rev, want := range map[uint64]string{0: "", 1: `"r1"`, 12: `"r12"`, 1<<64 - 1: `"r18446744073709551615"`} {
+		if got := freshness.ETag(rev); got != want {
+			t.Errorf("ETag(%d) = %q, want %q", rev, got, want)
+		}
 	}
 }
 
+// ParseIfMatch returns the revisions of an If-Match list's strong "r<n>" tags,
+// in order, or that the value is "*"; MatchRevision matches only those.
 func TestMatchRevision(t *testing.T) {
-	tests := []struct {
+	t.Parallel()
+
+	tests := map[string]struct {
 		ifMatch string
 		rev     uint64
+		revs    []uint64
+		anyTag  bool
 		match   bool
 		bad     bool
 	}{
-		{ifMatch: `"r5"`, rev: 5, match: true},
-		{ifMatch: `"r5"`, rev: 6},
-		{ifMatch: `W/"r5"`, rev: 5},
-		{ifMatch: `*`, rev: 5, match: true},
-		{ifMatch: ` "r4" , "r5"`, rev: 5, match: true},
-		{ifMatch: `"r4", W/"r5"`, rev: 5},
-		{ifMatch: `"abc"`, rev: 5},
-		{ifMatch: `"r0"`, rev: 0},
-		{ifMatch: `"r007"`, rev: 7},
-		{ifMatch: `r5`, rev: 5, bad: true},
-		{ifMatch: `"r5`, rev: 5, bad: true},
-		{ifMatch: `"r5", *`, rev: 5, bad: true},
-		{ifMatch: ``, rev: 5, bad: true},
+		"strong tag":              {ifMatch: `"r5"`, rev: 5, revs: []uint64{5}, match: true},
+		"another revision":        {ifMatch: `"r5"`, rev: 6, revs: []uint64{5}},
+		"weak tag":                {ifMatch: `W/"r5"`, rev: 5},
+		"any":                     {ifMatch: `*`, rev: 5, anyTag: true, match: true},
+		"any, padded":             {ifMatch: " \t* ", rev: 0, anyTag: true, match: true},
+		"list with spaces":        {ifMatch: ` "r4" , "r5"`, rev: 5, revs: []uint64{4, 5}, match: true},
+		"list, first named":       {ifMatch: `"r4","r5"`, rev: 4, revs: []uint64{4, 5}, match: true},
+		"strong and weak":         {ifMatch: `"r4", W/"r5"`, rev: 5, revs: []uint64{4}},
+		"other opaque tag":        {ifMatch: `"abc"`, rev: 5},
+		"empty opaque tag":        {ifMatch: `""`, rev: 0},
+		"revision 0":              {ifMatch: `"r0"`, rev: 0},
+		"zero-padded":             {ifMatch: `"r007"`, rev: 7},
+		"signed":                  {ifMatch: `"r+7"`, rev: 7},
+		"r alone":                 {ifMatch: `"r"`, rev: 0},
+		"past uint64":             {ifMatch: `"r18446744073709551616"`, rev: 0},
+		"largest revision":        {ifMatch: `"r18446744073709551615"`, rev: 1<<64 - 1, revs: []uint64{1<<64 - 1}, match: true},
+		"repeated":                {ifMatch: `"r3", "r3"`, rev: 3, revs: []uint64{3, 3}, match: true},
+		"unquoted":                {ifMatch: `r5`, rev: 5, bad: true},
+		"unterminated":            {ifMatch: `"r5`, rev: 5, bad: true},
+		"quote inside":            {ifMatch: `"r"5"`, rev: 5, bad: true},
+		"one quote":               {ifMatch: `"`, rev: 0, bad: true},
+		"weak prefix alone":       {ifMatch: `W/`, rev: 0, bad: true},
+		"lower-case weak prefix":  {ifMatch: `w/"r5"`, rev: 5, bad: true},
+		"any in a list":           {ifMatch: `"r5", *`, rev: 5, bad: true},
+		"empty element":           {ifMatch: `"r5",`, rev: 5, bad: true},
+		"empty":                   {ifMatch: ``, rev: 5, bad: true},
+		"blank":                   {ifMatch: "  ", rev: 5, bad: true},
+		"malformed after a match": {ifMatch: `"r5", x`, rev: 5, bad: true},
 	}
 
-	for _, tt := range tests {
-		if got := freshness.MatchRevision(tt.ifMatch, tt.rev); got != tt.match {
-			t.Errorf("MatchRevision(%q, %d) = %v, want %v", tt.ifMatch, tt.rev, got, tt.match)
-		}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		if _, _, err := freshness.ParseIfMatch(tt.ifMatch); (err != nil) != tt.bad {
-			t.Errorf("ParseIfMatch(%q) error = %v, want malformed %t", tt.ifMatch, err, tt.bad)
-		}
+			revs, anyTag, err := freshness.ParseIfMatch(tc.ifMatch)
+			if tc.bad != errors.Is(err, freshness.ErrBadIfMatch) || !tc.bad && err != nil {
+				t.Errorf("ParseIfMatch(%q) error = %v, want malformed %t", tc.ifMatch, err, tc.bad)
+			}
+
+			if diff := cmp.Diff(tc.revs, revs, cmpopts.EquateEmpty()); diff != "" || anyTag != tc.anyTag {
+				t.Errorf("ParseIfMatch(%q) = %v, %t; want %v, %t", tc.ifMatch, revs, anyTag, tc.revs, tc.anyTag)
+			}
+
+			if got := freshness.MatchRevision(tc.ifMatch, tc.rev); got != tc.match {
+				t.Errorf("MatchRevision(%q, %d) = %v, want %v", tc.ifMatch, tc.rev, got, tc.match)
+			}
+		})
 	}
 }
 

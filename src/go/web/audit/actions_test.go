@@ -159,6 +159,8 @@ func documentedActions(t *testing.T) map[Action]kind {
 // table in docs/content/logging.md lists each of them with those, and no
 // other action.
 func TestActionsMatchDocs(t *testing.T) {
+	t.Parallel()
+
 	declared := make(map[Action]kind)
 
 	for name, a := range declaredActions(t) {
@@ -188,24 +190,36 @@ func TestActionsMatchDocs(t *testing.T) {
 }
 
 func TestSpread(t *testing.T) {
-	for _, tc := range []struct {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
 		cell   string
 		n      int
 		want   []string
 		wantOK bool
 	}{
-		{" `file` ", 3, []string{"file", "file", "file"}, true},
-		{" `start`, `end` ", 2, []string{"start", "end"}, true},
-		{" `start`, `end` ", 3, nil, false},
-		{" none ", 1, nil, false},
-	} {
-		got, ok := spread(tc.cell, tc.n)
-		if ok != tc.wantOK {
-			t.Errorf("spread(%q, %d) ok = %t, want %t", tc.cell, tc.n, ok, tc.wantOK)
-		}
+		{name: "one span for every action", cell: " `file` ", n: 3, want: []string{"file", "file", "file"}, wantOK: true},
+		{name: "one span for one action", cell: " `file` ", n: 1, want: []string{"file"}, wantOK: true},
+		{name: "a span for each action", cell: " `start`, `end` ", n: 2, want: []string{"start", "end"}, wantOK: true},
+		{name: "too few spans", cell: " `start`, `end` ", n: 3, want: nil, wantOK: false},
+		{name: "no span", cell: " none ", n: 1, want: nil, wantOK: false},
+		{name: "no span for no action", cell: " none ", n: 0, want: []string{}, wantOK: true},
+		{name: "an empty span is not one", cell: " `` ", n: 1, want: nil, wantOK: false},
+	}
 
-		if diff := cmp.Diff(tc.want, got); diff != "" {
-			t.Errorf("spread(%q, %d) mismatch (-want +got):\n%s", tc.cell, tc.n, diff)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := spread(tc.cell, tc.n)
+			if ok != tc.wantOK {
+				t.Errorf("spread(%q, %d) ok = %t, want %t", tc.cell, tc.n, ok, tc.wantOK)
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("spread(%q, %d) mismatch (-want +got):\n%s", tc.cell, tc.n, diff)
+			}
+		})
 	}
 }

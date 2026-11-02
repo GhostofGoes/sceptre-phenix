@@ -155,8 +155,9 @@ func TestRefusalsBounded(t *testing.T) {
 }
 
 // The user a token names is user.name only when its signature was checked:
-// a proxy JWT's is phenix.auth.claimed_user. That user, the forwarded address
-// and the path, which a client chooses, are cut short.
+// a proxy JWT's is phenix.auth.claimed_user, left out when it names none.
+// That user, the forwarded address and the path, which a client chooses, are
+// cut short.
 func TestRefusalsUnverifiedAndBounded(t *testing.T) {
 	var (
 		events  = capture(t)
@@ -174,9 +175,11 @@ func TestRefusalsUnverifiedAndBounded(t *testing.T) {
 
 	limit.Refused(request("192.0.2.1"), middleware.Refusal{Reason: middleware.RefusedRevoked, User: "admin", Verified: false})
 	limit.Refused(request("192.0.2.2"), verified(middleware.RefusedRevoked, "alice"+long))
+	limit.Refused(request("192.0.2.3"), middleware.Refusal{Reason: middleware.RefusedRevoked, User: "", Verified: false})
 
 	type users struct {
 		Name, Claimed string
+		HasClaimed    bool
 		Lengths       [3]int // user, forwarded address and path
 	}
 
@@ -185,19 +188,20 @@ func TestRefusalsUnverifiedAndBounded(t *testing.T) {
 
 	for _, r := range records {
 		name, _ := r["user.name"].(string)
-		claimed, _ := r["phenix.auth.claimed_user"].(string)
+		claimed, hasClaimed := r["phenix.auth.claimed_user"].(string)
 		forwarded, _ := r["network.forwarded_ip"].(string)
 		path, _ := r["url.path"].(string)
 
 		got = append(got, users{
-			Name: name[:min(len(name), 5)], Claimed: claimed,
+			Name: name[:min(len(name), 5)], Claimed: claimed, HasClaimed: hasClaimed,
 			Lengths: [3]int{max(len(name), len(claimed)), len(forwarded), len(path)},
 		})
 	}
 
 	want := []users{
-		{Name: "", Claimed: "admin", Lengths: [3]int{5, 64, 1024}},
+		{Name: "", Claimed: "admin", HasClaimed: true, Lengths: [3]int{5, 64, 1024}},
 		{Name: "alice", Claimed: "", Lengths: [3]int{128, 64, 1024}},
+		{Name: "", Claimed: "", Lengths: [3]int{0, 64, 1024}},
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -233,5 +237,75 @@ func TestUnixSocketAndDryRun(t *testing.T) {
 
 	if diff := cmp.Diff(want, pick(onlyEvent(t, events), want, []string{"user.name", "source.ip"})); diff != "" {
 		t.Errorf("audit.Success() over the Unix socket record mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TokenRefused audits the auth middleware's refusals through the server's
+// own limit: one a window for a source and reason.
+func TestTokenRefused(t *testing.T) {
+	events := capture(t)
+
+	// a documentation address no other test refuses, so the shared limit is fresh
+	r := refusedRequest("198.51.100.77")
+
+	audit.TokenRefused(r, middleware.Refusal{Reason: middleware.RefusedInvalid, User: "", Verified: false})
+	audit.TokenRefused(r, middleware.Refusal{Reason: middleware.RefusedInvalid, User: "", Verified: false})
+
+	records := decoded(t, events())
+	if len(records) != 1 {
+		t.Fatalf("2 refusals from one source in one window audited %d times, want 1", len(records))
+	}
+
+	want := map[string]any{
+		"event.action": "request-auth", "event.reason": "invalid", "source.ip": "198.51.100.77",
+		"user.name": "", "phenix.suppressed": float64(0),
+	}
+
+	if diff := cmp.Diff(want, pick(records[0], want, []string{"phenix.auth.claimed_user"})); diff != "" {
+		t.Errorf("audit.TokenRefused() record mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A full limit forgets a source with skipped refusals only once it has been
+// unused for an hour, losing its count; before that it keeps the count.
+func TestRefusalsForgetIdleSources(t *testing.T) {
+	cases := []struct {
+		name           string
+		idle           time.Duration
+		wantSuppressed float64
+	}{
+		{name: "kept before an hour", idle: 2 * time.Minute, wantSuppressed: 1},
+		{name: "forgotten after an hour", idle: time.Hour, wantSuppressed: 0},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var (
+				events = capture(t)
+				clock  = &fakeClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+				limit  = audit.NewRefusals(time.Minute, 2, clock.Now)
+				refuse = func(ip string) {
+					limit.Refused(refusedRequest(ip), verified(middleware.RefusedExpired, ""))
+				}
+			)
+
+			// both sources skip a refusal, so the window alone does not forget them
+			for _, ip := range []string{"192.0.2.1", "192.0.2.1", "192.0.2.2", "192.0.2.2"} {
+				refuse(ip)
+			}
+
+			clock.advance(c.idle)
+			refuse("192.0.2.3")
+			refuse("192.0.2.1")
+
+			records := decoded(t, events())
+			if len(records) != 4 {
+				t.Fatalf("audited %d refusals, want 4", len(records))
+			}
+
+			if got := records[3]["phenix.suppressed"]; got != c.wantSuppressed {
+				t.Errorf("192.0.2.1's refusal after %v phenix.suppressed = %v, want %v", c.idle, got, c.wantSuppressed)
+			}
+		})
 	}
 }

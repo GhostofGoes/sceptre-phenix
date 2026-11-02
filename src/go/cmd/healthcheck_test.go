@@ -14,39 +14,58 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"pgregory.net/rapid"
 )
 
+// healthURL derives the health endpoint from ui.listen-endpoint, on loopback for a wildcard host, and fails for an
+// endpoint without a port.
 func TestHealthURL(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	tests := map[string]struct {
 		endpoint   string
 		tls, ready bool
 		want       string
+		wantErr    string
 	}{
-		{"0.0.0.0:3000", false, false, "http://127.0.0.1:3000/healthz"},
-		{":3000", false, true, "http://127.0.0.1:3000/readyz"},
-		{"[::]:3443", true, false, "https://[::1]:3443/healthz"},
-		{"10.0.0.5:8080", false, false, "http://10.0.0.5:8080/healthz"},
-		{"phenix.example.com:443", true, true, "https://phenix.example.com:443/readyz"},
+		"IPv4 wildcard":    {endpoint: "0.0.0.0:3000", want: "http://127.0.0.1:3000/healthz"},
+		"empty host":       {endpoint: ":3000", ready: true, want: "http://127.0.0.1:3000/readyz"},
+		"IPv6 wildcard":    {endpoint: "[::]:3443", tls: true, want: "https://[::1]:3443/healthz"},
+		"address":          {endpoint: "10.0.0.5:8080", want: "http://10.0.0.5:8080/healthz"},
+		"name, TLS, ready": {endpoint: "phenix.example.com:443", tls: true, ready: true, want: "https://phenix.example.com:443/readyz"},
+		"no port": {
+			endpoint: "3000",
+			wantErr:  `parsing ui.listen-endpoint "3000": address 3000: missing port in address`,
+		},
+		"empty": {endpoint: "", wantErr: `parsing ui.listen-endpoint "": missing port in address`},
 	}
 
-	for _, test := range tests {
-		got, err := healthURL(test.endpoint, test.tls, test.ready)
-		if err != nil || got != test.want {
-			t.Errorf("healthURL(%q, %t, %t) = %q, %v; want %q, nil", test.endpoint, test.tls, test.ready, got, err, test.want)
-		}
-	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	if got, err := healthURL("3000", false, false); err == nil {
-		t.Errorf("healthURL(%q, false, false) = %q, nil; want an error for an endpoint without a port", "3000", got)
+			got, err := healthURL(tc.endpoint, tc.tls, tc.ready)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("healthURL(%q) = %q, %v; want error %q", tc.endpoint, got, err, tc.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil || got != tc.want {
+				t.Errorf("healthURL(%q, %t, %t) = %q, %v; want %q, nil", tc.endpoint, tc.tls, tc.ready, got, err, tc.want)
+			}
+		})
 	}
 }
 
+// isLoopback is true only for localhost and loopback addresses, and false for a URL that does not parse.
 func TestIsLoopback(t *testing.T) {
 	t.Parallel()
 
@@ -57,12 +76,19 @@ func TestIsLoopback(t *testing.T) {
 		"https://LocalHost:3000/healthz":    true,
 		"https://phenix.example.com/readyz": false,
 		"https://10.0.0.5/readyz":           false,
+		"http://[::1/healthz":               false,
+		"://127.0.0.1":                      false,
+		"":                                  false,
 	}
 
 	for target, want := range tests {
-		if got := isLoopback(target); got != want {
-			t.Errorf("isLoopback(%q) = %v, want %v", target, got, want)
-		}
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isLoopback(target); got != want {
+				t.Errorf("isLoopback(%q) = %v, want %v", target, got, want)
+			}
+		})
 	}
 }
 
@@ -262,5 +288,132 @@ func TestHealthcheckFromEnvironment(t *testing.T) {
 
 	if out, err, _ := runRootHealthcheck(t); err != nil || strings.TrimSpace(out) != "pass (200)" {
 		t.Errorf("phenix healthcheck with PHENIX_UI_LISTEN_ENDPOINT=%s = %q, %v; want %q, nil", srv.Host, out, err, "pass (200)")
+	}
+}
+
+// healthcheckRun runs runHealthcheck against target, and returns the output and the error.
+func healthcheckRun(t *testing.T, target, output string) (string, error) {
+	t.Helper()
+
+	var out bytes.Buffer
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&out)
+
+	err := runHealthcheck(cmd, target, time.Second, output)
+
+	return out.String(), err
+}
+
+// runHealthcheck fails for a URL it cannot request and for a body cut short, and trusts the certificate of a
+// server on loopback without checking it.
+func TestRunHealthcheck(t *testing.T) {
+	t.Parallel()
+
+	truncated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	t.Cleanup(truncated.Close)
+
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"pass"}`))
+	}))
+	t.Cleanup(tlsServer.Close)
+
+	tests := map[string]struct {
+		target, output string
+		want           string
+		wantErr        string // a prefix
+		unhealthy      bool
+	}{
+		"bad URL":         {target: "://nowhere", wantErr: "creating request: "},
+		"body cut short":  {target: truncated.URL, wantErr: "phenix is not healthy: reading " + truncated.URL + ": ", unhealthy: true},
+		"TLS on loopback": {target: tlsServer.URL, want: "pass (200)\n"},
+		"TLS, JSON":       {target: tlsServer.URL, output: FormatJSON, want: `{"status":"pass"}` + "\n"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			out, err := healthcheckRun(t, tc.target, tc.output)
+
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.wantErr)) {
+				t.Fatalf("runHealthcheck(%s) error = %v, want prefix %q", tc.target, err, tc.wantErr)
+			}
+
+			if errors.Is(err, errUnhealthy) != tc.unhealthy {
+				t.Errorf("runHealthcheck(%s) error = %v, errors.Is(errUnhealthy) want %t", tc.target, err, tc.unhealthy)
+			}
+
+			if out != tc.want {
+				t.Errorf("runHealthcheck(%s) output = %q, want %q", tc.target, out, tc.want)
+			}
+		})
+	}
+}
+
+// printHealth prints "unknown" for a body that is not a health response, and otherwise the status and each check
+// that does not pass, sorted by key, with its component and output when it has them.
+func TestPrintHealth(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		code int
+		body string
+		want string
+	}{
+		"not JSON":     {code: http.StatusBadGateway, body: "<html>bad gateway</html>", want: "unknown (502)\n"},
+		"no status":    {code: http.StatusOK, body: `{"checks":{}}`, want: "unknown (200)\n"},
+		"empty body":   {code: http.StatusServiceUnavailable, want: "unknown (503)\n"},
+		"every pass":   {code: http.StatusOK, body: `{"status":"pass","checks":{"uptime":[{"status":"pass"}]}}`, want: "pass (200)\n"},
+		"wrong layout": {code: http.StatusOK, body: `{"status":"pass","checks":[]}`, want: "unknown (200)\n"},
+		"problems sorted": {
+			code: http.StatusServiceUnavailable,
+			body: `{"status":"fail","checks":{` +
+				`"store":[{"status":"fail","output":"locked"}],` +
+				`"disk":[{"componentId":"files-dir","status":"warn","output":"91% used"},{"componentId":"store","status":"pass"}],` +
+				`"minimega":[{"status":"warn"}]}}`,
+			want: "fail (503)\n  disk [files-dir]: warn: 91% used\n  minimega: warn\n  store: fail: locked\n",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+
+			printHealth(&out, tc.code, []byte(tc.body))
+
+			if diff := cmp.Diff(tc.want, out.String()); diff != "" {
+				t.Errorf("printHealth(%d, %q) mismatch (-want +got):\n%s", tc.code, tc.body, diff)
+			}
+		})
+	}
+}
+
+// The command gives the healthURL error for a ui.listen-endpoint without a port, and opens no store.
+//
+//nolint:paralleltest // runs the root command and sets the environment
+func TestHealthcheckBadListenEndpoint(t *testing.T) {
+	t.Setenv("PHENIX_UI_LISTEN_ENDPOINT", "3000")
+
+	_, err, created := runRootHealthcheck(t)
+
+	if want := `parsing ui.listen-endpoint "3000": `; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("phenix healthcheck with PHENIX_UI_LISTEN_ENDPOINT=3000 error = %v, want prefix %q", err, want)
+	}
+
+	if created {
+		t.Error("phenix healthcheck with a bad endpoint created the store, want the root command's hooks skipped")
 	}
 }

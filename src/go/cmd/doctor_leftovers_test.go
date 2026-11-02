@@ -3,6 +3,9 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,11 +77,13 @@ func TestDoctorLeftoverSnapshots(t *testing.T) {
 	stored := []doctorExperiment{{name: "kept"}}
 
 	tests := map[string]struct {
-		files map[string]int
-		why   string
-		host  string // the head node minimega answers from; empty for none
-		vms   []doctorMMVM
-		want  func(dir string) doctorCheck
+		files      map[string]int
+		why        string
+		host       string // the head node minimega answers from; empty for none
+		noHostname bool   // this host's name is not known either
+		images     string // "missing" or "file" in place of the images directory
+		vms        []doctorMMVM
+		want       func(dir string) doctorCheck
 	}{
 		"experiment that minimega runs": {
 			files: map[string]int{"mm1_live_vm1_snapshot": 1, "mm1_dead_x_snapshot": 2},
@@ -120,9 +125,28 @@ func TestDoctorLeftoverSnapshots(t *testing.T) {
 			},
 		},
 		"no images directory": {
-			host: "mm1",
+			host: "mm1", images: "missing",
 			want: func(dir string) doctorCheck {
 				return row("", doctorSkip, "not checked, because "+dir+" does not exist")
+			},
+		},
+		"images directory a file": {
+			host: "mm1", images: "file",
+			want: func(dir string) doctorCheck {
+				return row("", doctorSkip, "not checked, because this user cannot list "+dir+": not a directory")
+			},
+		},
+		"head node not known": {
+			files: map[string]int{"mm1_gone_vm_snapshot": 1}, noHostname: true,
+			want: func(string) doctorCheck {
+				return row("", doctorSkip, "not checked, because the name of this head node is not known")
+			},
+		},
+		"directories and other files": {
+			files: map[string]int{"mm1_gone_vm_snapshot/disk": 1, "mm1_gone_vm.qc2": 1, "mm1_gone_vm_snapshot.bak": 1},
+			host:  "mm1",
+			want: func(dir string) doctorCheck {
+				return row("", doctorPass, "no snapshot files of deleted experiments in "+dir)
 			},
 		},
 	}
@@ -137,9 +161,18 @@ func TestDoctorLeftoverSnapshots(t *testing.T) {
 			in, dir := leftoverInput(t, doctorGoodHost(), stored, inv)
 			images := filepath.Join(dir, "files")
 
-			if name == "no images directory" {
+			switch tc.images {
+			case "missing":
 				images = filepath.Join(dir, "missing")
-				in.found.minimegaArgs["filepath"] = images
+			case "file":
+				images = filepath.Join(dir, "images-file")
+				writeSized(t, images, 1)
+			}
+
+			in.found.minimegaArgs["filepath"] = images
+
+			if tc.noHostname {
+				in.hostname = func() (string, error) { return "", errors.New("no host name") }
 			}
 
 			for file, size := range tc.files {
@@ -151,6 +184,10 @@ func TestDoctorLeftoverSnapshots(t *testing.T) {
 			got := leftoverSnapshotsCheck(t.Context(), in, stored, tc.why, found)
 			if diff := cmp.Diff(tc.want(images), got); diff != "" {
 				t.Errorf("leftoverSnapshotsCheck() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got.Status != doctorWarn && (found.bytes != 0 || found.items != 0) {
+				t.Errorf("leftoverSnapshotsCheck() found %+v for a row that does not warn", *found)
 			}
 		})
 	}
@@ -229,10 +266,22 @@ func TestDoctorLeftoverMounts(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		mounts []string // relative to mount-dir
-		inv    *doctorInventory
-		want   func(dir string) doctorCheck
+		mounts       []string // relative to mount-dir
+		inv          *doctorInventory
+		why          string // why the store was not read
+		noProcMounts bool
+		want         func(dir string) doctorCheck
 	}{
+		"store not read": {
+			mounts: []string{"gone/vm1"}, inv: doctorTestInventory(vms, nil, nil), why: "the store is locked",
+			want: func(string) doctorCheck { return row("", doctorSkip, "not checked, because the store is locked") },
+		},
+		"no /proc/mounts": {
+			inv: doctorTestInventory(vms, nil, nil), noProcMounts: true,
+			want: func(string) doctorCheck {
+				return row("", doctorSkip, "not checked, because this host has no /proc/mounts to read")
+			},
+		},
 		"left mounts": {
 			mounts: []string{"gone/vm1", "kept/vm1", "kept/vm2", "live/vm1"},
 			inv:    doctorTestInventory(vms, nil, nil),
@@ -279,9 +328,13 @@ func TestDoctorLeftoverMounts(t *testing.T) {
 			}
 
 			host["/proc/mounts"] = strings.Join(lines, "\n") + "\n"
+			if tc.noProcMounts {
+				delete(host, "/proc/mounts")
+			}
+
 			host.apply(&in.env)
 
-			got := leftoverMountsCheck(t.Context(), in, stored, "")
+			got := leftoverMountsCheck(t.Context(), in, stored, tc.why)
 			if diff := cmp.Diff(tc.want(mounts), got); diff != "" {
 				t.Errorf("leftoverMountsCheck() mismatch (-want +got):\n%s", diff)
 			}
@@ -387,6 +440,26 @@ func TestDoctorLeftoverNetwork(t *testing.T) {
 				row("", doctorSkip, "not checked, because ovs-vsctl list Mirror: exit status 1"),
 			},
 		},
+		"ovs-vsctl show fails": {
+			inv: vmTaps, commands: map[string]doctorCommand{show: {err: errors.New("exit status 1")}},
+			want: []doctorCheck{
+				row("", doctorWarn, "taps that no VM or host tap owns: mega_tap2, mega_tap3. The Open vSwitch ports are "+
+					"not checked, because ovs-vsctl show failed (see the openvswitch row)"),
+				row("", doctorSkip, "not checked, because ovs-vsctl show failed (see the openvswitch row)"),
+			},
+		},
+		"ovs-vsctl list Bridge fails": {
+			inv: doctorTestInventory(nil, []string{"mega_tap1", "mega_tap2", "mega_tap5"}, []string{"phenix"}),
+			commands: map[string]doctorCommand{
+				show: {out: doctorLeftoverShow}, mirrors: commands[mirrors], bridges: {err: errors.New("exit status 1")},
+			},
+			want: []doctorCheck{
+				row("", doctorWarn, "Open vSwitch ports (bridge and port) whose network device is gone: phenix mega_tap4. "+
+					"The taps that no VM owns are not checked, because a capture of a whole bridge runs, and its tap is "+
+					"not known: ovs-vsctl list Bridge: exit status 1"),
+				row("", doctorSkip, "not checked, because ovs-vsctl list Bridge: exit status 1"),
+			},
+		},
 		"every tap owned": {
 			inv: doctorTestInventory(nil, []string{"mega_tap1", "mega_tap2", "mega_tap3", "mega_tap4", "mega_tap5"},
 				[]string{"other"}),
@@ -478,9 +551,21 @@ func TestDoctorMinimegaInventory(t *testing.T) {
 
 	tests := map[string]struct {
 		up      bool
+		noFound bool // no run of doctor to share the inventory with
 		answers map[string][]*minicli.Response
 		want    *doctorInventory
 	}{
+		"namespace fails": {
+			up: true, answers: map[string][]*minicli.Response{"vm info": nil},
+			want: &doctorInventory{
+				taps: map[string]bool{}, bridgeCaptures: map[string]bool{},
+				why: "minimega did not answer namespace: invalid command",
+			},
+		},
+		"no run": {
+			noFound: true,
+			want:    &doctorInventory{taps: map[string]bool{}, bridgeCaptures: map[string]bool{}, why: "minimega gave no version"},
+		},
 		"inventory": {
 			up: true, answers: answers,
 			want: &doctorInventory{
@@ -517,6 +602,9 @@ func TestDoctorMinimegaInventory(t *testing.T) {
 			mm := &doctorMinimega{answers: tc.answers}
 			in.minimega = mm.run
 			in.found = &doctorFound{minimegaUp: tc.up}
+			if tc.noFound {
+				in.found = nil
+			}
 
 			got := in.minimegaInventory(t.Context())
 			opts := cmp.AllowUnexported(doctorInventory{}, doctorMMVM{})
@@ -525,8 +613,8 @@ func TestDoctorMinimegaInventory(t *testing.T) {
 				t.Errorf("minimegaInventory() mismatch (-want +got):\n%s", diff)
 			}
 
-			if again := in.minimegaInventory(t.Context()); again != got {
-				t.Errorf("minimegaInventory() asked minimega again in one run")
+			if again := in.minimegaInventory(t.Context()); (again == got) == tc.noFound {
+				t.Errorf("minimegaInventory() shared its answer %t, want %t", again == got, !tc.noFound)
 			}
 		})
 	}
@@ -551,6 +639,18 @@ func TestDoctorLeftoversHint(t *testing.T) {
 		"mirrors": {
 			check: row(leftoverMirrorsRow, doctorWarn, "x"),
 			want:  "remove each mirror with ovs-vsctl -- --id=@m get mirror <mirror> -- remove bridge <bridge> mirrors @m",
+		},
+		"files": {
+			check: row(leftoverFilesRow, doctorWarn, "2 directories"),
+			want:  "delete each directory that the row names, with rm -r <directory>, after you copy the files you want to keep",
+		},
+		"mounts": {
+			check: row(leftoverMountsRow, doctorWarn, "VM file system mounts"),
+			want:  "unmount each path with umount <path>, then remove its empty directory",
+		},
+		"taps only": {
+			check: row(leftoverTapsRow, doctorWarn, orphanTapPhrase+": mega_tap2"),
+			want:  "delete each tap with ip link delete <tap>",
 		},
 		"skip": {check: row(leftoverMountsRow, doctorSkip, "not checked"), want: ""},
 	}
@@ -745,12 +845,20 @@ func isEmptySlice(v any) bool {
 func TestDoctorBytes(t *testing.T) {
 	t.Parallel()
 
-	tests := map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 5 << 30: "5.0 GiB", 1 << 62: "4.0 EiB"}
+	tests := map[int64]string{
+		-1: "-1 B", 0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 1<<20 - 1: "1024.0 KiB",
+		1 << 20: "1.0 MiB", 5 << 30: "5.0 GiB", 3 << 40: "3.0 TiB", 1 << 50: "1.0 PiB", 1 << 62: "4.0 EiB",
+		math.MaxInt64: "8.0 EiB",
+	}
 
 	for n, want := range tests {
-		if got := doctorBytes(n); got != want {
-			t.Errorf("doctorBytes(%d) = %q, want %q", n, got, want)
-		}
+		t.Run(want, func(t *testing.T) {
+			t.Parallel()
+
+			if got := doctorBytes(n); got != want {
+				t.Errorf("doctorBytes(%d) = %q, want %q", n, got, want)
+			}
+		})
 	}
 }
 
@@ -790,6 +898,118 @@ func TestDoctorStoredExperimentsNoStore(t *testing.T) {
 				if r.Status != doctorSkip {
 					t.Errorf("leftoversChecks() row %s = %s, want skip", r.Name, r.Status)
 				}
+			}
+		})
+	}
+}
+
+// headNode is the host minimega answers from, else this host's name without the hostname-suffixes, else empty.
+func TestDoctorHeadNode(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		mmHost   string
+		hostname func() (string, error)
+		want     string
+	}{
+		"minimega host": {mmHost: "mm1", hostname: func() (string, error) { return "ws42", nil }, want: "mm1"},
+		"this host":     {hostname: func() (string, error) { return "ws42-phenix", nil }, want: "ws42"},
+		"no host name":  {hostname: func() (string, error) { return "", errors.New("no host name") }, want: ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), map[string]string{"hostname-suffixes": "-minimega,-phenix"})
+			in.found = &doctorFound{inventory: &doctorInventory{host: tc.mmHost}}
+			in.hostname = tc.hostname
+
+			if got := in.headNode(t.Context()); got != tc.want {
+				t.Errorf("headNode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// dirSize adds up the regular files under a directory without following links, gives 0 for one it cannot read, and
+// says when the time ran out, even in a subdirectory.
+func TestDoctorDirSize(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeSized(t, filepath.Join(dir, "a"), 3)
+	writeSized(t, filepath.Join(dir, "sub", "b"), 5)
+	writeSized(t, filepath.Join(dir, "sub", "deeper", "c"), 7)
+
+	if err := os.Symlink(filepath.Join(dir, "a"), filepath.Join(dir, "link")); err != nil {
+		t.Fatalf("os.Symlink() error = %v", err)
+	}
+
+	tests := map[string]struct {
+		dir       string
+		cancelAt  string // cancel the context when dirSize reads this directory
+		want      int64
+		wantWhole bool
+	}{
+		"every file":            {dir: dir, want: 15, wantWhole: true},
+		"a subdirectory":        {dir: filepath.Join(dir, "sub"), want: 12, wantWhole: true},
+		"missing":               {dir: filepath.Join(dir, "missing"), want: 0, wantWhole: true},
+		"time out at the start": {dir: dir, cancelAt: dir, want: 0},
+		"time out inside":       {dir: dir, cancelAt: filepath.Join(dir, "sub", "deeper"), want: 8},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.readDir = func(path string) ([]os.DirEntry, error) {
+				if path == tc.cancelAt {
+					cancel()
+				}
+
+				return os.ReadDir(path)
+			}
+
+			size, whole := env.dirSize(ctx, tc.dir)
+			if size != tc.want || whole != tc.wantWhole {
+				t.Errorf("dirSize(%s) = %d, %t, want %d, %t", tc.dir, size, whole, tc.want, tc.wantWhole)
+			}
+		})
+	}
+}
+
+// capitalize makes only the first letter a capital, and unwrapPathError gives the error inside a path error.
+func TestDoctorLeftoverWords(t *testing.T) {
+	t.Parallel()
+
+	for s, want := range map[string]string{"": "", "a": "A", "abc def": "Abc def", "Abc": "Abc", "1x": "1x"} {
+		t.Run("capitalize "+s, func(t *testing.T) {
+			t.Parallel()
+
+			if got := capitalize(s); got != want {
+				t.Errorf("capitalize(%q) = %q, want %q", s, got, want)
+			}
+		})
+	}
+
+	plain := errors.New("plain")
+
+	for name, tc := range map[string]struct{ err, want error }{
+		"path error":  {err: &fs.PathError{Op: "open", Path: "/x", Err: fs.ErrPermission}, want: fs.ErrPermission},
+		"wrapped":     {err: fmt.Errorf("listing: %w", &fs.PathError{Op: "open", Path: "/x", Err: plain}), want: plain},
+		"other error": {err: plain, want: plain},
+		"nil":         {err: nil, want: nil},
+	} {
+		t.Run("unwrapPathError "+name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := unwrapPathError(tc.err); got != tc.want { //nolint:errorlint // the very error
+				t.Errorf("unwrapPathError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

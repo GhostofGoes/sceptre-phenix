@@ -236,3 +236,28 @@ func TestExecC2CommandLeavesFilterAfterTimeout(t *testing.T) { //nolint:parallel
 		t.Errorf("ccLocks.refs(exp) after ExecC2Command timed out = %d, want 0", got)
 	}
 }
+
+func TestExecC2CommandForMissingVMSendsNoCC(t *testing.T) { //nolint:paralleltest // shares the fake minimega
+	cluster := new(c2Cluster)
+
+	received := useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+		if cmd.Base == vmInfoCmd {
+			return []*minicli.Response{mmtest.Tabular("head", []string{"name", "uuid"})}
+		}
+
+		return cluster.reply(cmd)
+	})
+
+	_, err := (Minimega{}).ExecC2Command(C2NS("exp"), C2VM("vm3"), C2Command("hostname"), C2Wait())
+	if want := "cannot execute command: vm vm3 does not exist"; err == nil || err.Error() != want {
+		t.Errorf("ExecC2Command(vm3, hostname) error = %v, want %q", err, want)
+	}
+
+	if got := ccSequence(received()); len(got) != 0 {
+		t.Errorf("ExecC2Command(vm3, hostname) sent cc commands %q, want none", got)
+	}
+
+	if got := ccLocks.refs("exp"); got != 0 {
+		t.Errorf("ccLocks.refs(exp) after ExecC2Command(vm3) failed = %d, want 0", got)
+	}
+}

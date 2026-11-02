@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"phenix/util/mm"
 	"phenix/util/mm/mmcli"
 	"phenix/util/mm/mmtest"
+	"phenix/util/plog/plogtest"
 	"phenix/util/polltest"
 	bt "phenix/web/broker/brokertypes"
 	"phenix/web/middleware"
@@ -315,5 +317,96 @@ func TestVMActionsJobGivesUpWhenCanceledInDiskCheck(t *testing.T) {
 
 	if n := mmtest.Count(received(), "vm start"); n != 0 {
 		t.Errorf("canceled job sent %d vm start commands, want none", n)
+	}
+}
+
+// endedWith holds only for an error that is, or wraps, the error of a done
+// context.
+func TestEndedWith(t *testing.T) {
+	t.Parallel()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(stop)
+
+	other := errors.New("minimega failed")
+
+	tests := map[string]struct {
+		ctx  context.Context //nolint:containedctx // a table of contexts
+		err  error
+		want bool
+	}{
+		"no error, live context":         {context.Background(), nil, false},
+		"no error, canceled context":     {canceled, nil, false},
+		"canceled error, live context":   {context.Background(), context.Canceled, false},
+		"canceled":                       {canceled, context.Canceled, true},
+		"canceled, wrapped":              {canceled, fmt.Errorf("vm info: %w", context.Canceled), true},
+		"other error, canceled context":  {canceled, other, false},
+		"deadline error, canceled":       {canceled, context.DeadlineExceeded, false},
+		"deadline exceeded":              {expired, context.DeadlineExceeded, true},
+		"deadline exceeded, wrapped":     {expired, fmt.Errorf("vm save: %w", context.DeadlineExceeded), true},
+		"canceled error, deadline ended": {expired, context.Canceled, false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := endedWith(tc.ctx, tc.err); got != tc.want {
+				t.Errorf("endedWith(ctx with Err() = %v, %v) = %t, want %t", tc.ctx.Err(), tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// A request is gone once its context is done, and only its own commands
+// giving up for that reason count as canceled, logged at debug level with
+// the token redacted.
+func TestRequestCanceled(t *testing.T) {
+	logs := plogtest.Capture(t)
+
+	live := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/vms?token=secret", nil)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	left := live.WithContext(ctx)
+
+	if requestGone(live) {
+		t.Error("requestGone(live request) = true, want false")
+	}
+
+	if !requestGone(left) {
+		t.Error("requestGone(request whose client left) = false, want true")
+	}
+
+	for _, tc := range []struct {
+		name string
+		r    *http.Request
+		err  error
+		want bool
+	}{
+		{"live request", live, context.Canceled, false},
+		{"no error", left, nil, false},
+		{"other error", left, errors.New("minimega failed"), false},
+		{"commands gave up", left, fmt.Errorf("vm info: %w", context.Canceled), true},
+	} {
+		if got := requestCanceled(tc.r, tc.err); got != tc.want {
+			t.Errorf("requestCanceled(%s, %v) = %t, want %t", tc.name, tc.err, got, tc.want)
+		}
+	}
+
+	records := logs.Take(t, plogtest.Message("request canceled"))
+	if len(records) != 1 {
+		t.Fatalf("request canceled log records = %d, want 1: %v", len(records), records)
+	}
+
+	got := map[string]any{"level": records[0]["level"], "method": records[0]["method"], "url": records[0]["url"]}
+	want := map[string]any{"level": "DEBUG", "method": http.MethodGet, "url": "/api/v1/vms?token=REDACTED"}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("request canceled log record mismatch (-want +got):\n%s", diff)
 	}
 }

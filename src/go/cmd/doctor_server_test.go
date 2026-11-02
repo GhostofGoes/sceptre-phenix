@@ -3,10 +3,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -142,18 +146,31 @@ func TestServerChecks(t *testing.T) {
 		return nil, req.Context().Err()
 	})
 
+	cutOff := doctorServer(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{},
+			Body: io.NopCloser(iotest.ErrReader(errors.New("connection reset"))), Request: req,
+		}, nil
+	})
+
 	tests := map[string]struct {
 		socket         string
 		client         func(string, time.Duration) *http.Client
 		mode           os.FileMode // of the file at socket; 0 is none
 		bridge, deploy string
 		want           []doctorCheck
+		wantUp         bool // a phenix ui answered
 	}{
+		"answer cut off": {
+			socket: socket, client: cutOff, wantUp: true,
+			want: []doctorCheck{row("", doctorWarn, "reading the answer of phenix ui on /run/phenix.sock: connection reset")},
+		},
 		"no socket": {
 			want: []doctorCheck{row("", doctorPass, "unix-socket is empty, so phenix commands ask no phenix ui for its modes")},
 		},
 		"answers": {
 			socket: socket, client: doctorServerAnswer(http.StatusOK, version.API(), doctorTestOptions), bridge: "manual",
+			wantUp: true,
 			want: []doctorCheck{
 				row("", doctorPass, "phenix ui "+version.API()+" answers on /run/phenix.sock"),
 				row("server bridge-mode", doctorPass, "phenix commands use manual, as phenix ui does"),
@@ -187,17 +204,17 @@ func TestServerChecks(t *testing.T) {
 			want: []doctorCheck{row("", doctorWarn, "phenix ui on /run/phenix.sock did not answer within 50ms")},
 		},
 		"refused": {
-			socket: socket, client: doctorServerAnswer(http.StatusForbidden, version.API(), `{}`),
+			socket: socket, wantUp: true, client: doctorServerAnswer(http.StatusForbidden, version.API(), `{}`),
 			want: []doctorCheck{row("", doctorWarn,
 				"phenix ui on /run/phenix.sock answered GET /api/v1/options with Forbidden")},
 		},
 		"bad options": {
-			socket: socket, client: doctorServerAnswer(http.StatusOK, version.API(), `[`),
+			socket: socket, wantUp: true, client: doctorServerAnswer(http.StatusOK, version.API(), `[`),
 			want: []doctorCheck{row("", doctorWarn,
 				"phenix ui on /run/phenix.sock answered with options that do not parse: unexpected end of JSON input")},
 		},
 		"other version and modes": {
-			socket: socket, bridge: "manual", deploy: "all",
+			socket: socket, wantUp: true, bridge: "manual", deploy: "all",
 			client: doctorServerAnswer(http.StatusOK, "9.9.9", `{"bridge-mode":"auto","deploy-mode":"no-headnode"}`),
 			want: []doctorCheck{
 				row("", doctorWarn, "phenix ui on /run/phenix.sock is 9.9.9, and this phenix is "+version.API()),
@@ -207,6 +224,7 @@ func TestServerChecks(t *testing.T) {
 		},
 		"auto in phenix ui, bridge-mode not set here": {
 			socket: socket, client: doctorServerAnswer(http.StatusOK, version.API(), `{"bridge-mode":"auto","deploy-mode":"all"}`),
+			wantUp: true,
 			want: []doctorCheck{
 				row("", doctorPass, "phenix ui "+version.API()+" answers on /run/phenix.sock"),
 				row("server bridge-mode", doctorPass, "phenix commands use auto, from phenix ui"),
@@ -214,7 +232,7 @@ func TestServerChecks(t *testing.T) {
 			},
 		},
 		"no version, auto set here, bad deploy mode": {
-			socket: socket, bridge: "auto", deploy: "some",
+			socket: socket, wantUp: true, bridge: "auto", deploy: "some",
 			client: doctorServerAnswer(http.StatusOK, "", doctorTestOptions),
 			want: []doctorCheck{
 				row("", doctorWarn, "phenix ui on /run/phenix.sock does not give its version, and this phenix is "+version.API()),
@@ -235,9 +253,13 @@ func TestServerChecks(t *testing.T) {
 				return doctorEnvMode{FileInfo: nil, mode: tc.mode}, nil
 			}
 
-			got, _ := serverChecks(t.Context(), tc.socket, 50*time.Millisecond, tc.client, lstat, tc.bridge, tc.deploy)
+			got, up := serverChecks(t.Context(), tc.socket, 50*time.Millisecond, tc.client, lstat, tc.bridge, tc.deploy)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("serverChecks() mismatch (-want +got):\n%s", diff)
+			}
+
+			if up != tc.wantUp {
+				t.Errorf("serverChecks() answered = %t, want %t", up, tc.wantUp)
 			}
 		})
 	}
@@ -620,5 +642,348 @@ func TestBoundedCall(t *testing.T) {
 
 	if _, err := boundedCall(ctx, time.Minute, hangs); !errors.Is(err, errNoAnswer) {
 		t.Errorf("boundedCall(canceled) error = %v, want errNoAnswer", err)
+	}
+}
+
+// A failed request names its cause, with or without the [url.Error] the client
+// wraps it in, and a file that is not a socket comes before the error.
+func TestDoctorServerDialCheck(t *testing.T) {
+	t.Parallel()
+
+	const socket = "/run/phenix.sock"
+
+	dial := func(errno syscall.Errno) error {
+		return &url.Error{Op: "Get", URL: "http://unix/api/v1/options", Err: &net.OpError{
+			Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", errno),
+		}}
+	}
+
+	tests := map[string]struct {
+		err   error
+		lstat error       // of the socket file; nil is a file of mode
+		mode  os.FileMode // of the socket file
+		want  doctorCheck
+	}{
+		"not running": {
+			err: dial(syscall.ENOENT), lstat: os.ErrNotExist,
+			want: warnCheck("no phenix ui on /run/phenix.sock: phenix ui is not running, or serves another unix socket"),
+		},
+		"permission": {
+			err: dial(syscall.EACCES), mode: os.ModeSocket,
+			want: failCheck("this user cannot connect to /run/phenix.sock: dial unix: connect: permission denied"),
+		},
+		"stale": {
+			err: dial(syscall.ECONNREFUSED), mode: os.ModeSocket,
+			want: warnCheck("/run/phenix.sock is a stale socket file: no phenix ui listens on it"),
+		},
+		"not a socket": {
+			err: dial(syscall.EACCES), mode: 0o600,
+			want: warnCheck("/run/phenix.sock is not a socket, so no phenix ui listens on it"),
+		},
+		"lstat fails": {
+			err: dial(syscall.ECONNREFUSED), lstat: fs.ErrPermission,
+			want: warnCheck("/run/phenix.sock is a stale socket file: no phenix ui listens on it"),
+		},
+		"deadline": {
+			err: context.DeadlineExceeded, mode: os.ModeSocket,
+			want: warnCheck("phenix ui on /run/phenix.sock did not answer within 2s"),
+		},
+		"network timeout": {
+			err: &url.Error{Op: "Get", URL: "http://unix/", Err: os.ErrDeadlineExceeded}, mode: os.ModeSocket,
+			want: warnCheck("phenix ui on /run/phenix.sock did not answer within 2s"),
+		},
+		"other": {
+			err: &url.Error{Op: "Get", URL: "http://unix/", Err: errors.New("malformed HTTP response")}, mode: os.ModeSocket,
+			want: warnCheck("asking phenix ui on /run/phenix.sock: malformed HTTP response"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			lstat := func(path string) (os.FileInfo, error) {
+				if path != socket {
+					return nil, fmt.Errorf("lstat(%s)", path)
+				}
+
+				if tc.lstat != nil {
+					return nil, tc.lstat
+				}
+
+				return doctorEnvMode{FileInfo: nil, mode: tc.mode}, nil
+			}
+
+			got := serverDialCheck(socket, 2*time.Second, lstat, tc.err)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("serverDialCheck(%v) mismatch (-want +got):\n%s", tc.err, diff)
+			}
+
+			if hint := serverHint(got); hint == "" {
+				t.Errorf("serverHint(%+v) = \"\", want a hint", got)
+			}
+		})
+	}
+}
+
+// The doctor's client has its time bound, and dials the socket without
+// creating it.
+func TestDoctorServerClient(t *testing.T) {
+	t.Parallel()
+
+	socket := filepath.Join(t.TempDir(), "p.sock")
+
+	client := doctorServerClient(socket, 2*time.Second)
+	if client.Timeout != 2*time.Second {
+		t.Errorf("doctorServerClient() timeout = %s, want 2s", client.Timeout)
+	}
+
+	defer client.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://unix/api/v1/options", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext() error = %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+
+		t.Fatalf("doctorServerClient() request to a missing socket succeeded, want an error")
+	}
+
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("doctorServerClient() request error = %v, want one for a missing socket", err)
+	}
+
+	if _, err := os.Lstat(socket); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("os.Lstat(%s) after the request error = %v, want the socket not created", socket, err)
+	}
+}
+
+// minimega's files directory must be an absolute directory here that this
+// user can read and search; one it cannot write only warns.
+func TestDoctorServerMinimegaFilesCheck(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	file := writeTestFile(t, dir, "file", "")
+	missing := filepath.Join(dir, "missing")
+
+	denied := func(mode uint32) func(string, uint32) error {
+		return func(_ string, m uint32) error {
+			if m&mode != 0 {
+				return unix.EACCES
+			}
+
+			return nil
+		}
+	}
+
+	tests := map[string]struct {
+		dir    string
+		stat   func(string) (os.FileInfo, error)
+		access func(string, uint32) error
+		want   doctorCheck
+	}{
+		"good": {dir: dir, want: passCheck(dir + " (minimega's -filepath)")},
+		"none": {want: warnCheck("minimega gives no -filepath, so phenix uses <base-dir.phenix>/images in its place")},
+		"relative": {
+			dir:  "files",
+			want: warnCheck("minimega's -filepath files is relative, so phenix uses <base-dir.phenix>/images in its place"),
+		},
+		"missing": {
+			dir: missing,
+			want: failCheck("minimega's -filepath " + missing +
+				" does not exist here, so phenix cannot find the images minimega launches"),
+		},
+		"stat fails": {
+			dir: dir,
+			stat: func(path string) (os.FileInfo, error) {
+				return nil, &fs.PathError{Op: "stat", Path: path, Err: syscall.EACCES}
+			},
+			want: failCheck("stat " + dir + ": permission denied"),
+		},
+		"a file": {dir: file, want: failCheck("minimega's -filepath " + file + " is not a directory")},
+		"not searchable": {
+			dir: dir, access: denied(unix.X_OK),
+			want: failCheck("minimega's -filepath " + dir +
+				" is not readable and searchable by this user, so phenix cannot read its images"),
+		},
+		"not writable": {
+			dir: dir, access: denied(unix.W_OK),
+			want: warnCheck("minimega's -filepath " + dir +
+				" is not writable by this user, so phenix cannot upload, clone, rename or delete disk images in it"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.access = func(string, uint32) error { return nil }
+
+			if tc.stat != nil {
+				env.stat = tc.stat
+			}
+
+			if tc.access != nil {
+				env.access = tc.access
+			}
+
+			got := env.minimegaFilesCheck(tc.dir)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("minimegaFilesCheck(%q) mismatch (-want +got):\n%s", tc.dir, diff)
+			}
+		})
+	}
+}
+
+// minimega's -base passes when it is base-dir.minimega, cleaned, and warns
+// when it differs or minimega gives none.
+func TestDoctorServerMinimegaBaseCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		setting, base string
+		want          doctorCheck
+	}{
+		"same":                {setting: "/tmp/minimega", base: "/tmp/minimega", want: passCheck("/tmp/minimega")},
+		"same, cleaned":       {setting: "/tmp/minimega/", base: "/tmp//minimega", want: passCheck("/tmp//minimega")},
+		"no -base":            {setting: "/tmp/minimega", want: warnCheck("minimega gives no -base")},
+		"no -base or setting": {want: warnCheck("minimega gives no -base")},
+		"other": {
+			setting: "/tmp/minimega", base: "/var/minimega",
+			want: warnCheck("minimega runs with -base /var/minimega and base-dir.minimega is /tmp/minimega. " +
+				"The Hosts page measures disk usage under /tmp/minimega"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			tc.want.Name = minimegaBaseRow
+			if diff := cmp.Diff(tc.want, minimegaBaseCheck(tc.setting, tc.base)); diff != "" {
+				t.Errorf("minimegaBaseCheck(%q, %q) mismatch (-want +got):\n%s", tc.setting, tc.base, diff)
+			}
+		})
+	}
+}
+
+// The mesh row asks for mesh status only when minimega meshes with other
+// nodes, and warns when it fails or gives no size.
+func TestDoctorServerMinimegaMeshCheck(t *testing.T) {
+	t.Parallel()
+
+	sized := []*minicli.Response{{Host: "mm1", Header: []string{"size", "degree"}, Tabular: [][]string{{"4", "2"}}}}
+
+	tests := map[string]struct {
+		degree  string
+		resps   []*minicli.Response
+		err     error
+		want    doctorCheck
+		wantRun bool
+	}{
+		"alone":      {degree: "0", want: passCheck("degree 0, abssnapshot true")},
+		"no degree":  {want: passCheck("degree , abssnapshot true")},
+		"bad degree": {degree: "two", want: passCheck("degree two, abssnapshot true")},
+		"mesh": {
+			degree: "2", resps: sized, want: passCheck("degree 2, abssnapshot true, mesh of 4 nodes"), wantRun: true,
+		},
+		"mesh status fails": {
+			degree: "2", err: errors.New("invalid command"), wantRun: true,
+			want: warnCheck("degree 2, abssnapshot true, but mesh status failed: invalid command"),
+		},
+		"no size": {
+			degree: "3", resps: []*minicli.Response{{Host: "mm1", Response: "ok"}}, wantRun: true,
+			want: warnCheck("degree 3, abssnapshot true, but mesh status gives no size"),
+		},
+		"size and an error": {
+			degree: "2", resps: sized, err: errors.New("partial"), wantRun: true,
+			want: warnCheck("degree 2, abssnapshot true, but mesh status failed: partial"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var commands []string
+
+			run := func(command string) ([]*minicli.Response, error) {
+				commands = append(commands, command)
+
+				return tc.resps, tc.err
+			}
+
+			tc.want.Name = minimegaMeshRow
+			args := map[string]string{"degree": tc.degree, "abssnapshot": "true"}
+
+			if diff := cmp.Diff(tc.want, minimegaMeshCheck(args, run)); diff != "" {
+				t.Errorf("minimegaMeshCheck(%v) mismatch (-want +got):\n%s", args, diff)
+			}
+
+			var want []string
+			if tc.wantRun {
+				want = []string{"mesh status"}
+			}
+
+			if diff := cmp.Diff(want, commands); diff != "" {
+				t.Errorf("minimega commands mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Each minimega-env row that warns or fails has its own hint.
+func TestDoctorServerMinimegaEnvHint(t *testing.T) {
+	t.Parallel()
+
+	const mountHint = "mount minimega's files directory at the same path for phenix (Docker Compose shares /phenix), " +
+		"readable by this user"
+
+	tests := map[string]struct {
+		check doctorCheck
+		want  string
+	}{
+		"skip": {check: row("", doctorSkip, "not checked"), want: ""},
+		"base": {
+			check: row(minimegaBaseRow, doctorWarn, "minimega gives no -base"),
+			want:  "set base-dir.minimega to minimega's -base",
+		},
+		"mesh": {
+			check: row(minimegaMeshRow, doctorWarn, "mesh status failed"),
+			want:  "check minimega's mesh with minimega -e mesh status",
+		},
+		"not writable": {
+			check: row(minimegaFilesRow, doctorWarn, "x is not writable by this user"),
+			want:  "give this user write access to minimega's files directory",
+		},
+		"relative": {
+			check: row(minimegaFilesRow, doctorWarn, "x is relative, so"),
+			want:  "start minimega with an absolute -filepath",
+		},
+		"no filepath": {
+			check: row(minimegaFilesRow, doctorWarn, "minimega gives no -filepath, so"),
+			want:  "start minimega with an absolute -filepath",
+		},
+		"missing":   {check: row(minimegaFilesRow, doctorFail, "x does not exist here"), want: mountHint},
+		"not a dir": {check: row(minimegaFilesRow, doctorFail, "x is not a directory"), want: mountHint},
+		"no flags": {
+			check: row("", doctorWarn, "minimega's answer to args holds no flags"),
+			want:  "run minimega 3.0 or later, whose args command gives its flags",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := minimegaEnvHint(tc.check); got != tc.want {
+				t.Errorf("minimegaEnvHint(%+v) = %q, want %q", tc.check, got, tc.want)
+			}
+		})
 	}
 }

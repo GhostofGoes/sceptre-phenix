@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"pgregory.net/rapid"
 
 	"phenix/api/disk"
@@ -687,6 +689,7 @@ func TestParseDoctorSkip(t *testing.T) {
 				"ui.listen-endpoint", "ui.proxy-auth-header", "ui.tls", "ui.tls-cert", "ui.users", "unix-socket", "unix-socket-gid",
 			},
 		},
+		"blank names": {args: []string{"--skip", " ,env-overrides", "--skip", ""}, want: []string{"env-overrides"}},
 		"unknown": {
 			args:    []string{"--skip", "minimega,mm,cofnig"},
 			wantErr: `--skip: unknown check "mm", "cofnig". Checks: config-file, users-file, config-keys, config-paths, settings-file, scenario-hosts, env,`,
@@ -1071,5 +1074,400 @@ func TestDoctorFlagShorthands(t *testing.T) {
 
 	if diff := cmp.Diff([]string{"no-print-settings"}, owners["x"]); diff != "" {
 		t.Errorf("-x owners mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// newDoctorInput resolves every known setting, reads this process's user,
+// directory and system, and wires the real readers; no run's findings yet.
+func TestDoctorRegistryNewDoctorInput(t *testing.T) {
+	flags := pflag.NewFlagSet("doctor", pflag.ContinueOnError)
+	in := newDoctorInput(flags, 3*time.Second)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+
+	phenixUID, home := getCurrentUserInfo()
+	systemStore, _ := store.BoltPath(rootDefaultStore)
+
+	type fields struct {
+		UID, GID                int
+		Cwd, PhenixUID, Home    string
+		SystemStore, Used       string
+		Timeout                 time.Duration
+		System                  doctorSystem
+		ConfigPaths, Known, Set []string
+		Found                   bool
+	}
+
+	want := fields{
+		UID: os.Getuid(), GID: os.Getgid(), Cwd: cwd, PhenixUID: phenixUID, Home: home,
+		SystemStore: systemStore, Used: viper.ConfigFileUsed(), Timeout: 3 * time.Second, System: osDoctorSystem(),
+		ConfigPaths: configSearchPaths, Known: knownSettings(), Set: slices.Sorted(slices.Values(knownSettings())),
+	}
+	got := fields{
+		UID: in.uid, GID: in.gid, Cwd: in.cwd, PhenixUID: in.phenixUID, Home: in.home,
+		SystemStore: in.systemStore, Used: in.settingsUsed, Timeout: in.timeout, System: in.system,
+		ConfigPaths: in.configPaths, Known: in.known, Set: slices.Sorted(maps.Keys(in.settings)), Found: in.found != nil,
+	}
+
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(doctorSystem{})); diff != "" {
+		t.Errorf("newDoctorInput() mismatch (-want +got):\n%s", diff)
+	}
+
+	readers := map[string]bool{
+		"probe": in.probe != nil, "minimega": in.minimega != nil, "server": in.server != nil, "qemuImg": in.qemuImg != nil,
+		"statfs": in.statfs != nil, "images": in.images != nil, "inspectDisk": in.inspectDisk != nil,
+		"command": in.command != nil, "storeConfigs": in.storeConfigs != nil, "now": in.now != nil,
+		"hostname": in.hostname != nil, "addrs": in.addrs != nil,
+	}
+
+	for name, set := range readers {
+		if !set {
+			t.Errorf("newDoctorInput() %s = nil, want a reader", name)
+		}
+	}
+
+	if _, ok := in.config.checks["config"]; !ok {
+		t.Errorf("newDoctorInput() config checks = %v, want a config file row", in.config.checks)
+	}
+}
+
+// The system is this build's operating system and architecture, and the
+// release of the running kernel.
+func TestDoctorRegistryOSSystem(t *testing.T) {
+	t.Parallel()
+
+	got := osDoctorSystem()
+
+	if got.os != runtime.GOOS || got.arch != runtime.GOARCH {
+		t.Errorf("osDoctorSystem() = %+v, want os %s and arch %s", got, runtime.GOOS, runtime.GOARCH)
+	}
+
+	if got.kernel == "" || got.kernel == "unknown" || strings.ContainsRune(got.kernel, 0) {
+		t.Errorf("osDoctorSystem() kernel = %q, want the kernel release", got.kernel)
+	}
+}
+
+// text is the setting's value as phenix reads it, "" for one not resolved,
+// and sources maps each resolved setting to where it came from.
+func TestDoctorRegistryTextAndSources(t *testing.T) {
+	t.Parallel()
+
+	in := &doctorInput{settings: map[string]resolvedSetting{
+		"log.level":   {value: "debug", text: "debug", source: sourceEnv},
+		"bridge-mode": {value: nil, text: "", source: sourceDefault},
+		"ui.users":    {value: []any{"a:b:c"}, text: "[a:b:c]", source: sourceFile},
+	}}
+
+	for key, want := range map[string]string{"log.level": "debug", "bridge-mode": "", "ui.users": "[a:b:c]", "nosuch": ""} {
+		if got := in.text(key); got != want {
+			t.Errorf("text(%q) = %q, want %q", key, got, want)
+		}
+	}
+
+	want := map[string]string{"log.level": sourceEnv, "bridge-mode": sourceDefault, "ui.users": sourceFile}
+	if diff := cmp.Diff(want, in.sources()); diff != "" {
+		t.Errorf("sources() mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := (&doctorInput{}).sources(); len(got) != 0 {
+		t.Errorf("sources() of no settings = %v, want none", got)
+	}
+}
+
+// Each known setting gets viper's value and text, and its source: a changed
+// flag, then a set PHENIX_ variable, then a config file, then the default.
+func TestDoctorRegistryResolveSettings(t *testing.T) {
+	const (
+		flagKey = "doctor-registry-test.flag"
+		envKey  = "doctor-registry-test.env"
+		fileKey = "doctor-registry-test.file"
+		noneKey = "doctor-registry-test.none"
+		sameKey = "doctor-registry-test.unchanged"
+	)
+
+	flags := pflag.NewFlagSet("doctor", pflag.ContinueOnError)
+	flags.String(flagKey, "", "")
+	flags.String(sameKey, "", "")
+
+	if err := flags.Parse([]string{"--" + flagKey + "=x"}); err != nil {
+		t.Fatalf("flags.Parse() error = %v", err)
+	}
+
+	env := map[string]string{
+		settingEnvVar(envKey): "y", settingEnvVar(flagKey): "y", settingEnvVar(fileKey): "", settingEnvVar(sameKey): "y",
+	}
+	lookupEnv := func(name string) (string, bool) {
+		value, ok := env[name]
+
+		return value, ok
+	}
+
+	known := []string{flagKey, envKey, fileKey, noneKey, sameKey}
+	got := resolveSettings(flags, map[string]bool{fileKey: true, flagKey: true}, known, lookupEnv)
+
+	want := map[string]resolvedSetting{
+		flagKey: {source: sourceFlag},
+		envKey:  {source: sourceEnv},
+		fileKey: {source: sourceFile},
+		noneKey: {source: sourceDefault},
+		sameKey: {source: sourceEnv},
+	}
+
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(resolvedSetting{})); diff != "" {
+		t.Errorf("resolveSettings() mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := resolveSettings(flags, nil, nil, lookupEnv); len(got) != 0 {
+		t.Errorf("resolveSettings() of no keys = %v, want none", got)
+	}
+}
+
+// A config file gives its row only when doctor read one of that name.
+func TestDoctorRegistryConfigFileRows(t *testing.T) {
+	t.Parallel()
+
+	config := row("config file", doctorWarn, "none found")
+	in := &doctorInput{config: doctorConfig{checks: map[string]doctorCheck{"config": config}}}
+
+	if diff := cmp.Diff([]doctorCheck{config}, configFileRows(in, "config")); diff != "" {
+		t.Errorf("configFileRows(config) mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := configFileRows(in, usersConfigName); got != nil {
+		t.Errorf("configFileRows(%s) = %v, want none", usersConfigName, got)
+	}
+
+	if got := configFileRows(&doctorInput{}, "config"); got != nil {
+		t.Errorf("configFileRows() with no checks = %v, want none", got)
+	}
+}
+
+// hintText gives its text for any row; a base directory check reads its
+// setting, or the directory under base-dir.phenix it defaults to; a setting
+// check reads the setting by the rules of its env check.
+func TestDoctorRegistryDefHelpers(t *testing.T) {
+	t.Parallel()
+
+	hint := hintText("do this")
+	for _, c := range []doctorCheck{row("", doctorWarn, "a"), row("x", doctorFail, "b"), {}} {
+		if got := hint(c); got != "do this" {
+			t.Errorf("hintText()(%+v) = %q, want %q", c, got, "do this")
+		}
+	}
+
+	dir := newDoctorTestDir(t)
+	in := fakeDoctorInput(dir, map[string]string{"base-dir.injects": "", "log.level": "loud"})
+
+	tests := map[string]struct {
+		def       doctorCheckDef
+		wantGroup string
+		want      []doctorCheck
+	}{
+		"base dir": {
+			def:       baseDirDef("base-dir.phenix", "", true),
+			wantGroup: doctorGroupDirs,
+			want:      []doctorCheck{in.env.baseDirCheck("base-dir.phenix", filepath.Join(dir, "phenix"), true)},
+		},
+		"derived base dir": {
+			def:       baseDirDef("base-dir.injects", "injects", true),
+			wantGroup: doctorGroupDirs,
+			want:      []doctorCheck{in.env.baseDirCheck("base-dir.injects", filepath.Join(dir, "phenix", "injects"), true)},
+		},
+		"setting": {
+			def:       settingDef("log.level", "set it"),
+			wantGroup: doctorGroupSettings,
+			want: []doctorCheck{
+				warnCheck(`"loud" is not a log level (debug, info, warn or error), so phenix ignores it and logs at info`),
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if tc.def.group != tc.wantGroup || tc.def.id != tc.def.name {
+				t.Errorf("def %s group %s, name %s; want group %s and its id as name",
+					tc.def.id, tc.def.group, tc.def.name, tc.wantGroup)
+			}
+
+			if diff := cmp.Diff(tc.want, tc.def.run(t.Context(), in)); diff != "" {
+				t.Errorf("def %s rows mismatch (-want +got):\n%s", tc.def.id, diff)
+			}
+		})
+	}
+
+	if got := baseDirDef("mount-dir", "mounts", true).hint(doctorCheck{}); !strings.Contains(got, "or set mount-dir to") {
+		t.Errorf("baseDirDef(mount-dir) hint = %q, want it to name mount-dir", got)
+	}
+
+	if got := settingDef("log.level", "set it").hint(doctorCheck{}); got != "set it" {
+		t.Errorf("settingDef() hint = %q, want %q", got, "set it")
+	}
+}
+
+// A variable's value is the config file's when it is its text; an unset file
+// value is empty, and a list is the variable's words.
+func TestDoctorRegistrySameSettingValue(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		env  string
+		file any
+		want bool
+	}{
+		"nil, empty":          {env: "", file: nil, want: true},
+		"nil, set":            {env: "x", file: nil},
+		"string":              {env: "debug", file: "debug", want: true},
+		"other string":        {env: "info", file: "debug"},
+		"number":              {env: "30", file: 30, want: true},
+		"boolean":             {env: "true", file: true, want: true},
+		"list":                {env: "a  b", file: []any{"a", "b"}, want: true},
+		"list in other order": {env: "b a", file: []any{"a", "b"}},
+		"empty list":          {env: " ", file: []any{}, want: true},
+		"list of one":         {env: "a,b", file: []any{"a,b"}, want: true},
+		"list of numbers":     {env: "1 2", file: []any{1, 2}, want: true},
+	}
+
+	for name, tc := range tests {
+		if got := sameSettingValue(tc.env, tc.file); got != tc.want {
+			t.Errorf("%s: sameSettingValue(%q, %#v) = %t, want %t", name, tc.env, tc.file, got, tc.want)
+		}
+	}
+}
+
+// The checks whose hint depends on the row give the hint for that row.
+func TestDoctorRegistryHints(t *testing.T) {
+	t.Parallel()
+
+	hints := make(map[string]func(doctorCheck) string)
+	for _, def := range doctorChecks() {
+		hints[def.id] = def.hint
+	}
+
+	tests := map[string]struct {
+		id    string
+		check doctorCheck
+		want  string // a prefix
+	}{
+		"no config file": {
+			id: "config-file", check: row("config file", doctorWarn, "none found"), want: "phenix creates config.yaml",
+		},
+		"bad config file": {
+			id: "config-file", check: row("config file", doctorFail, "x does not parse"), want: "fix the YAML syntax",
+		},
+		"bad users file": {
+			id: "users-file", check: row("users file", doctorFail, "x does not parse"), want: "fix the YAML syntax",
+		},
+		"large store": {
+			id: "store-file", check: row("store file", doctorWarn, "x is large"), want: "copy the store to a backup",
+		},
+		"broken store": {
+			id: "store-file", check: row("store file", doctorFail, "x is not a store"),
+			want: "restore the store from a backup",
+		},
+		"env": {
+			id: "env", check: row("PHENIX_LOG_LEVEL", doctorWarn, "x"), want: "fix or unset PHENIX_LOG_LEVEL",
+		},
+		"store root": {
+			id: "store-root", check: row("store root", doctorWarn, "x"),
+			want: "to use the store of a phenix ui that runs as root",
+		},
+		"dev key": {id: "ui.jwt-signing-key", check: row("", doctorFail, "x"), want: "write a dev| key"},
+		"no key": {
+			id: "ui.jwt-signing-key", check: row("", doctorWarn, "x"), want: "set ui.jwt-signing-key",
+		},
+		"no users":  {id: "ui.users", check: row("", doctorWarn, "empty, so"), want: "set ui.users"},
+		"bad users": {id: "ui.users", check: row("", doctorFail, "x has no role"), want: "write each user as"},
+		"refused bridge": {
+			id: "bridge-mode", check: row("", doctorFail, "x"), want: "set bridge-mode to manual or auto",
+		},
+		"bad system log": {
+			id: "log.system.max-size", check: row("", doctorFail, "x"), want: "set log.system.max-size",
+		},
+		"unknown key":        {id: "config-keys", check: row("", doctorWarn, "x"), want: "rename or remove the keys"},
+		"env override":       {id: "env-overrides", check: row("", doctorWarn, "x"), want: "unset the variable"},
+		"bad store endpoint": {id: "store.endpoint", check: row("", doctorFail, "x"), want: "create the directory"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			hint, ok := hints[tc.id]
+			if !ok || hint == nil {
+				t.Fatalf("no check %s with a hint", tc.id)
+			}
+
+			if got := hint(tc.check); !strings.HasPrefix(got, tc.want) {
+				t.Errorf("hint of %s for %+v = %q, want prefix %q", tc.id, tc.check, got, tc.want)
+			}
+		})
+	}
+}
+
+// runDoctorChecksFound runs each check on a copy of the input with findings
+// of its own, which it returns; a row takes its check's name when it has none,
+// and a check without a hint gives rows without one.
+func TestDoctorRegistryRunChecksFound(t *testing.T) {
+	t.Parallel()
+
+	in := &doctorInput{timeout: time.Second}
+	defs := []doctorCheckDef{
+		{
+			id: "first", group: "g1", name: "first check", hint: hintText("fix it"),
+			run: func(_ context.Context, in *doctorInput) []doctorCheck {
+				in.found.minimegaUp = true
+				in.timeout = time.Minute
+
+				return []doctorCheck{warnCheck("w"), row("own name", doctorPass, "p")}
+			},
+		},
+		{
+			id: "second", group: "g2", name: "second check",
+			run: func(_ context.Context, in *doctorInput) []doctorCheck {
+				if !in.found.minimegaUp {
+					return []doctorCheck{failCheck("did not see the first check's findings")}
+				}
+
+				return []doctorCheck{failCheck("f")}
+			},
+		},
+		{id: "none", group: "g2", name: "no rows", run: func(context.Context, *doctorInput) []doctorCheck { return nil }},
+		{id: "skipped", group: "g3", name: "skipped check", run: func(context.Context, *doctorInput) []doctorCheck {
+			return []doctorCheck{failCheck("ran")}
+		}},
+	}
+
+	results, found := runDoctorChecksFound(t.Context(), in, defs, map[string]bool{"skipped": true})
+
+	want := []doctorResult{
+		{ID: "first", Group: "g1", Name: "first check", Status: doctorWarn, Detail: "w", Hint: "fix it"},
+		{ID: "first", Group: "g1", Name: "own name", Status: doctorPass, Detail: "p"},
+		{ID: "second", Group: "g2", Name: "second check", Status: doctorFail, Detail: "f"},
+		{ID: "skipped", Group: "g3", Name: "skipped check", Status: doctorSkip, Detail: "skipped by --skip"},
+	}
+
+	if diff := cmp.Diff(want, results); diff != "" {
+		t.Errorf("runDoctorChecksFound() mismatch (-want +got):\n%s", diff)
+	}
+
+	if found == nil || !found.minimegaUp {
+		t.Errorf("runDoctorChecksFound() found = %+v, want the first check's findings", found)
+	}
+
+	if in.found != nil || in.timeout != time.Second {
+		t.Errorf("runDoctorChecksFound() changed its input: found %+v, timeout %s", in.found, in.timeout)
+	}
+
+	if diff := cmp.Diff(want, runDoctorChecks(t.Context(), in, defs, map[string]bool{"skipped": true})); diff != "" {
+		t.Errorf("runDoctorChecks() mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := runDoctorChecks(t.Context(), in, nil, nil); got != nil {
+		t.Errorf("runDoctorChecks() of no checks = %v, want none", got)
 	}
 }

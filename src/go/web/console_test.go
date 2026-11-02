@@ -8,17 +8,24 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"golang.org/x/net/websocket"
 	"pgregory.net/rapid"
 
 	"phenix/util/polltest"
 	"phenix/util/testenv"
+	"phenix/web/lifecycle"
 	"phenix/web/rbac"
 )
 
@@ -172,6 +179,8 @@ func echoTestConsole(t *testing.T, ws *websocket.Conn, line string) {
 }
 
 func TestConsoleHistory(t *testing.T) {
+	t.Parallel()
+
 	history := newConsoleHistory(16)
 
 	// each write in turn, and what the 16-byte history then replays
@@ -557,5 +566,438 @@ func TestCreateConsoleNeedsTheConsoleEnabled(t *testing.T) {
 	resp := do(t, http.MethodPost, consoleAPI(t, "alice", consoleRole())+"/console", "")
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /console with the console disabled = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+// consoleStuckSession registers, as owner's, a console whose process (sleep)
+// can be killed but which never ends, and whose tty is tty.
+func consoleStuckSession(t *testing.T, registry *consoleRegistry, owner string, tty *os.File) *consoleSession {
+	t.Helper()
+
+	testenv.RequireCommands(t, "sleep")
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting sleep: %v", err)
+	}
+
+	console := &consoleSession{
+		pid: cmd.Process.Pid, owner: owner, tty: tty, proc: cmd.Process, grace: time.Minute, registry: registry,
+		done: make(chan struct{}), mu: sync.Mutex{}, clients: make(map[*consoleClient]struct{}),
+		history: newConsoleHistory(16),
+	}
+
+	registry.mu.Lock()
+	registry.sessions[console.pid] = console
+	registry.mu.Unlock()
+
+	// before useTestConsoles ends what is left, which would wait for this
+	t.Cleanup(func() {
+		registry.remove(console)
+
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	return console
+}
+
+// consoleTempFile is a new regular file, open for the rest of the test.
+func consoleTempFile(t *testing.T) *os.File {
+	t.Helper()
+
+	f, err := os.Create(filepath.Join(t.TempDir(), "tty"))
+	if err != nil {
+		t.Fatalf("os.Create() error = %v", err)
+	}
+
+	t.Cleanup(func() { _ = f.Close() })
+
+	return f
+}
+
+// consoleClosedFile is a regular file that is already closed.
+func consoleClosedFile(t *testing.T) *os.File {
+	t.Helper()
+
+	f := consoleTempFile(t)
+	_ = f.Close()
+
+	return f
+}
+
+// The minimega console is `phenix mm --attach` of this very executable,
+// killed when its context ends.
+func TestMinimegaConsoleCommand(t *testing.T) {
+	t.Parallel()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+
+	cmd, err := minimegaConsoleCommand(t.Context())
+	if err != nil {
+		t.Fatalf("minimegaConsoleCommand() error = %v", err)
+	}
+
+	if diff := cmp.Diff([]string{exe, "mm", "--attach"}, cmd.Args); diff != "" {
+		t.Errorf("minimegaConsoleCommand() args mismatch (-want +got):\n%s", diff)
+	}
+
+	if cmd.Path != exe || cmd.Cancel == nil {
+		t.Errorf("minimegaConsoleCommand() = path %q, cancel set %t; want %q, true", cmd.Path, cmd.Cancel != nil, exe)
+	}
+}
+
+// A console that cannot start is a 500 naming why, audited as a failure.
+func TestCreateConsoleStartFails(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err     error
+		program string
+	}{
+		"no command": {err: errors.New("no phenix executable")},
+		"no program": {program: filepath.Join(t.TempDir(), "missing")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			registry := useTestConsoles(t, time.Minute)
+			registry.command = func(ctx context.Context) (*exec.Cmd, error) {
+				if tc.err != nil {
+					return nil, tc.err
+				}
+
+				return exec.CommandContext(ctx, tc.program), nil
+			}
+
+			events := captureAudit(t)
+
+			resp := do(t, http.MethodPost, consoleAPI(t, "alice", consoleRole())+"/console", "")
+			if body := readBody(t, resp); resp.StatusCode != http.StatusInternalServerError ||
+				!strings.Contains(body, "could not start terminal") {
+				t.Errorf("POST /console = %d %s, want %d could not start terminal", resp.StatusCode, body, http.StatusInternalServerError)
+			}
+
+			wantAudit(t, events(), "console-create", "failure", map[string]any{"user.name": "alice"})
+
+			if n := len(registry.sessions); n != 0 {
+				t.Errorf("consoles after a failed start = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// start returns the command's error, and wraps one starting its process.
+func TestConsoleRegistryStartFails(t *testing.T) {
+	t.Parallel()
+
+	refused := errors.New("no phenix executable")
+
+	registry := newConsoleRegistry(time.Minute, func(context.Context) (*exec.Cmd, error) { return nil, refused })
+	if _, err := registry.start(t.Context(), "alice"); !errors.Is(err, refused) {
+		t.Errorf("start() with a failing command error = %v, want %v", err, refused)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	registry = newConsoleRegistry(time.Minute, func(ctx context.Context) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, missing), nil
+	})
+	if _, err := registry.start(t.Context(), "alice"); err == nil || !strings.Contains(err.Error(), "starting console process") {
+		t.Errorf("start() of a missing program error = %v, want it to say starting console process", err)
+	}
+}
+
+// DELETE /console/{pid} of a console that does not end in time is a 500,
+// audited as a failure.
+func TestDeleteConsoleThatDoesNotEnd(t *testing.T) {
+	registry := useTestConsoles(t, time.Minute)
+	console := consoleStuckSession(t, registry, "alice", consoleTempFile(t))
+	api := consoleAPI(t, "alice", consoleRole())
+	events := captureAudit(t)
+
+	path := "/console/" + strconv.Itoa(console.pid)
+
+	resp := do(t, http.MethodDelete, api+path, "")
+	if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); resp.StatusCode != http.StatusInternalServerError ||
+		got != "console did not end" {
+		t.Errorf("DELETE %s = %d %q, want %d %q", path, resp.StatusCode, got, http.StatusInternalServerError, "console did not end")
+	}
+
+	if failed := wantAudit(t, events(), "console-terminate", "failure", map[string]any{"process.pid": console.pid}); failed != nil {
+		wantErrorMessage(t, failed, errConsoleNotEnded.Error())
+	}
+
+	console.mu.Lock()
+	defer console.mu.Unlock()
+
+	if console.endReason != consoleEndedByUser {
+		t.Errorf("end reason of a console the user ended = %q, want %q", console.endReason, consoleEndedByUser)
+	}
+}
+
+// A resize needs a pid and both sizes as 16-bit numbers; one the pty refuses
+// is a 500.
+func TestResizeConsoleRefuses(t *testing.T) {
+	registry := useTestConsoles(t, time.Minute)
+	api := consoleAPI(t, "alice", consoleRole())
+	pid := strconv.Itoa(createTestConsole(t, api))
+	notTTY := strconv.Itoa(consoleStuckSession(t, registry, "alice", consoleTempFile(t)).pid)
+	closed := strconv.Itoa(consoleStuckSession(t, registry, "alice", consoleClosedFile(t)).pid)
+
+	for name, tc := range map[string]struct {
+		path, msg string
+		want      int
+	}{
+		"pid not a number": {"/console/abc/size?cols=80&rows=24", "invalid pid", http.StatusBadRequest},
+		"unknown pid":      {"/console/0/size?cols=80&rows=24", "console not found", http.StatusNotFound},
+		"bad query":        {"/console/" + pid + "/size?cols=80;rows=24", "invalid form", http.StatusBadRequest},
+		"rows too many":    {"/console/" + pid + "/size?cols=80&rows=65536", "invalid rows", http.StatusBadRequest},
+		"cols too many":    {"/console/" + pid + "/size?cols=99999999999&rows=24", "invalid cols", http.StatusBadRequest},
+		"not a terminal":   {"/console/" + notTTY + "/size?cols=80&rows=24", "set winsize failed", http.StatusInternalServerError},
+		"closed pty":       {"/console/" + closed + "/size?cols=80&rows=24", "set winsize failed", http.StatusInternalServerError},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := do(t, http.MethodPost, api+tc.path, "")
+			if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); resp.StatusCode != tc.want || got != tc.msg {
+				t.Errorf("POST %s = %d %q, want %d %q", tc.path, resp.StatusCode, got, tc.want, tc.msg)
+			}
+		})
+	}
+
+	// sizes the router's patterns would not route here
+	console := consoleStuckSession(t, registry, "test-user", consoleTempFile(t))
+
+	for query, msg := range map[string]string{
+		"cols=80":         "invalid rows",
+		"cols=80&rows=":   "invalid rows",
+		"cols=80&rows=ab": "invalid rows",
+		"rows=24":         "invalid cols",
+		"rows=24&cols=-1": "invalid cols",
+	} {
+		t.Run(query, func(t *testing.T) {
+			req := roleRequest(http.MethodPost, "/console/size?"+query, "", map[string]string{"pid": strconv.Itoa(console.pid)},
+				consoleRole())
+
+			status, werr := webErrorStatus(t, ResizeConsole(httptest.NewRecorder(), req))
+			if status != http.StatusBadRequest || werr.Message != msg {
+				t.Errorf("ResizeConsole(%s) = %d %+v, want %d %q", query, status, werr, http.StatusBadRequest, msg)
+			}
+		})
+	}
+}
+
+// resize sets the size of a pty, and fails on a file that is not one, is
+// closed or is missing.
+func TestConsoleSessionResize(t *testing.T) {
+	registry := useTestConsoles(t, time.Minute)
+	console := registry.lookup(createTestConsole(t, consoleAPI(t, "alice", consoleRole())))
+
+	if err := console.resize(40, 100); err != nil {
+		t.Errorf("resize(40, 100) of a pty error = %v", err)
+	}
+
+	tests := map[string]struct {
+		tty  *os.File
+		want string
+	}{
+		"not a terminal": {consoleTempFile(t), syscall.ENOTTY.Error()},
+		"closed":         {consoleClosedFile(t), "closed file"},
+		"missing":        {nil, os.ErrInvalid.Error()},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := &consoleSession{tty: tc.tty}
+			if err := s.resize(24, 80); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("resize() of a %s file error = %v, want it to hold %q", name, err, tc.want)
+			}
+		})
+	}
+}
+
+// Attaching to a console that ended after it was looked up fails, audited,
+// and the websocket closes.
+func TestWsConsoleAttachToEndedConsole(t *testing.T) {
+	registry := useTestConsoles(t, time.Minute)
+	console := consoleStuckSession(t, registry, "alice", consoleTempFile(t))
+	console.ended = true
+
+	api := consoleAPI(t, "alice", consoleRole())
+	events := captureAudit(t)
+
+	ws, err := dialTestConsole(t, api, console.pid)
+	if err != nil {
+		t.Fatalf("dialing console %d: %v", console.pid, err)
+	}
+
+	_ = ws.SetReadDeadline(time.Now().Add(consoleTestTimeout))
+
+	if _, err := ws.Read(make([]byte, 64)); !errors.Is(err, io.EOF) {
+		t.Errorf("reading the websocket of an ended console = %v, want %v", err, io.EOF)
+	}
+
+	if failed := wantAudit(t, events(), "console-attach", "failure", map[string]any{"process.pid": console.pid}); failed != nil {
+		wantErrorMessage(t, failed, errConsoleEnded.Error())
+	}
+}
+
+// Once the server starts shutting down, a console websocket is refused with
+// 503.
+func TestWsConsoleRefusedAtShutdown(t *testing.T) {
+	useTestConsoles(t, time.Minute)
+
+	lifecycle.Start()
+	t.Cleanup(lifecycle.Start)
+
+	api := consoleAPI(t, "alice", consoleRole())
+	pid := createTestConsole(t, api)
+
+	lifecycle.Stop()
+
+	resp := do(t, http.MethodGet, api+"/console/"+strconv.Itoa(pid)+"/ws", "")
+	if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); resp.StatusCode != http.StatusServiceUnavailable ||
+		got != lifecycle.Unavailable || resp.Header.Get("Retry-After") != lifecycle.RetryAfter {
+		t.Errorf("GET console websocket at shutdown = %d %q Retry-After %q, want %d %q %q", resp.StatusCode, got,
+			resp.Header.Get("Retry-After"), http.StatusServiceUnavailable, lifecycle.Unavailable, lifecycle.RetryAfter)
+	}
+}
+
+// endAll ends every console for the reason, counts those not ended once ctx
+// is done, and lets no console start afterwards.
+func TestConsoleRegistryEndAllLeavesStuckConsoles(t *testing.T) {
+	registry := useTestConsoles(t, time.Minute)
+	stuck := consoleStuckSession(t, registry, "alice", consoleTempFile(t))
+	running := registry.lookup(createTestConsole(t, consoleAPI(t, "alice", consoleRole())))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	if left := registry.endAll(ctx, consoleEndedShutdown); left != 1 {
+		t.Errorf("endAll() with one console that never ends = %d left, want 1", left)
+	}
+
+	waitConsoleEnded(t, running)
+
+	for _, console := range []*consoleSession{stuck, running} {
+		console.mu.Lock()
+		reason := console.endReason
+		console.mu.Unlock()
+
+		if reason != consoleEndedShutdown {
+			t.Errorf("console %d end reason = %q, want %q", console.pid, reason, consoleEndedShutdown)
+		}
+	}
+
+	if _, err := registry.start(t.Context(), "alice"); !errors.Is(err, errServerStopping) {
+		t.Errorf("start() after endAll() error = %v, want %v", err, errServerStopping)
+	}
+}
+
+// isDone reports whether a channel is closed, without waiting.
+func TestIsDone(t *testing.T) {
+	t.Parallel()
+
+	open, closed := make(chan struct{}), make(chan struct{})
+	close(closed)
+
+	if isDone(open) || !isDone(closed) {
+		t.Errorf("isDone(open), isDone(closed) = %t, %t; want false, true", isDone(open), isDone(closed))
+	}
+}
+
+// An ended console keeps no more output and sends none, and takes no new
+// websocket.
+func TestEndedConsoleSessionIgnoresOutput(t *testing.T) {
+	t.Parallel()
+
+	s := &consoleSession{clients: make(map[*consoleClient]struct{}), history: newConsoleHistory(64)}
+
+	client, err := s.attach()
+	if err != nil {
+		t.Fatalf("attach() error = %v", err)
+	}
+
+	s.broadcast([]byte("before\n"))
+
+	s.mu.Lock()
+	s.ended = true
+	s.mu.Unlock()
+
+	s.broadcast([]byte("after\n"))
+
+	if got := string(s.history.Bytes()); got != "before\n" {
+		t.Errorf("history after output once ended = %q, want %q", got, "before\n")
+	}
+
+	if got := len(client.out); got != 1 {
+		t.Errorf("chunks sent to the client = %d, want 1, from before the console ended", got)
+	}
+
+	if _, err := s.attach(); !errors.Is(err, errConsoleEnded) {
+		t.Errorf("attach() to an ended console error = %v, want %v", err, errConsoleEnded)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.idle != nil {
+		t.Error("an attached console has an idle timer running")
+	}
+}
+
+// A client writes its queued output to its websocket in order, and stops at
+// the first write that fails, closing the websocket either way.
+func TestConsoleClientServe(t *testing.T) {
+	t.Parallel()
+
+	for name, closeFirst := range map[string]bool{"written": false, "write fails": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &consoleClient{out: make(chan []byte, 3)}
+			client.out <- []byte("one ")
+			client.out <- []byte("two")
+
+			served := make(chan struct{})
+
+			server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+				if closeFirst {
+					_ = ws.Close()
+				} else {
+					close(client.out)
+				}
+
+				written := make(chan struct{})
+				client.serve(ws, written)
+				<-written
+
+				close(served)
+			}))
+			t.Cleanup(server.Close)
+
+			ws, err := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http"), "", server.URL)
+			if err != nil {
+				t.Fatalf("websocket.Dial() error = %v", err)
+			}
+			defer ws.Close()
+
+			_ = ws.SetReadDeadline(time.Now().Add(consoleTestTimeout))
+			got, _ := io.ReadAll(ws)
+
+			select {
+			case <-served:
+			case <-time.After(consoleTestTimeout):
+				t.Fatal("serve() did not return")
+			}
+
+			want, left := "one two", 0
+			if closeFirst {
+				want, left = "", 1
+			}
+
+			if string(got) != want || len(client.out) != left {
+				t.Errorf("serve() wrote %q, left %d chunks; want %q, %d", got, len(client.out), want, left)
+			}
+		})
 	}
 }

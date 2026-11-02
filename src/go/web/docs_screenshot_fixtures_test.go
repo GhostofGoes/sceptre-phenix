@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"maps"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/google/go-cmp/cmp"
 )
 
 // screenshotFixtures holds the API responses the docs screenshot script stands in for, keyed
@@ -29,10 +29,7 @@ func TestDocsScreenshotFixturesMatchOpenAPI(t *testing.T) {
 		t.Fatalf("parsing %s: %v", screenshotFixtures, err)
 	}
 
-	doc, err := openapi3.NewLoader().LoadFromFile("public/docs/openapi.yml")
-	if err != nil {
-		t.Fatalf("loading openapi.yml: %v", err)
-	}
+	doc := contractSpec(t)
 
 	for key, body := range fixtures {
 		t.Run(key, func(t *testing.T) {
@@ -54,39 +51,27 @@ func TestDocsScreenshotFixturesMatchOpenAPI(t *testing.T) {
 	}
 }
 
-// responseSchema returns the JSON schema of the 200 response of the operation serving path.
+// responseSchema returns the JSON schema of the 200 response of the operation serving the
+// /api/v1 path, chosen as specOperation chooses it.
 func responseSchema(t *testing.T, doc *openapi3.T, method, path string) *openapi3.Schema {
 	t.Helper()
 
-	for template, item := range doc.Paths {
-		quoted := regexp.QuoteMeta(pathParams.ReplaceAllString(template, "{}"))
-		pattern := "^" + strings.ReplaceAll(quoted, `\{\}`, `[^/]+`) + "$"
-
-		if !regexp.MustCompile(pattern).MatchString(path) {
-			continue
-		}
-
-		op := item.GetOperation(strings.ToUpper(method))
-		if op == nil {
-			t.Fatalf("openapi.yml has no %s %s", method, template)
-		}
-
-		resp := op.Responses.Get(200)
-		if resp == nil || resp.Value == nil {
-			t.Fatalf("openapi.yml has no 200 response for %s %s", method, template)
-		}
-
-		media := resp.Value.Content.Get("application/json")
-		if media == nil || media.Schema == nil {
-			t.Fatalf("openapi.yml has no JSON 200 response for %s %s", method, template)
-		}
-
-		return media.Schema.Value
+	template, op := specOperation(doc, method, "/api/v1"+path)
+	if op == nil {
+		t.Fatalf("openapi.yml documents no %s matching %s", method, path)
 	}
 
-	t.Fatalf("openapi.yml documents no path matching %s", path)
+	resp := op.Responses.Get(200)
+	if resp == nil || resp.Value == nil {
+		t.Fatalf("openapi.yml has no 200 response for %s %s", method, template)
+	}
 
-	return nil
+	media := resp.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil {
+		t.Fatalf("openapi.yml has no JSON 200 response for %s %s", method, template)
+	}
+
+	return media.Schema.Value
 }
 
 // undocumentedFields lists the object keys in v, written as JSON paths under at, that schema
@@ -142,4 +127,54 @@ func properties(schema *openapi3.Schema) map[string]*openapi3.Schema {
 	}
 
 	return props
+}
+
+// undocumentedFields names each key of an object, at any depth, that its
+// schema neither declares (allOf included) nor lets through, each once.
+func TestUndocumentedFields(t *testing.T) {
+	t.Parallel()
+
+	item := openapi3.NewObjectSchema().WithProperty("k", openapi3.NewStringSchema())
+	schema := openapi3.NewObjectSchema().
+		WithProperty("name", openapi3.NewStringSchema()).
+		WithProperty("tags", openapi3.NewArraySchema().WithItems(item)).
+		WithProperty("meta", openapi3.NewObjectSchema().WithAnyAdditionalProperties()).
+		WithProperty("labels", openapi3.NewObjectSchema().WithAdditionalProperties(item)).
+		WithProperty("free", openapi3.NewObjectSchema()).
+		WithProperty("closed", openapi3.NewObjectSchema().WithProperty("a", openapi3.NewStringSchema()).
+			WithoutAdditionalProperties())
+	schema.AllOf = openapi3.SchemaRefs{{Value: openapi3.NewObjectSchema().WithProperty("extra", openapi3.NewIntegerSchema())}}
+
+	tests := map[string]struct {
+		schema *openapi3.Schema
+		body   string
+		want   []string
+	}{
+		"documented":         {schema, `{"name":"a","tags":[{"k":"v"}],"extra":1}`, nil},
+		"unknown key":        {schema, `{"name":"a","bogus":true}`, []string{".bogus"}},
+		"in array items":     {schema, `{"tags":[{"k":"v","bad":1},{"bad":2}]}`, []string{".tags[].bad"}},
+		"any extra allowed":  {schema, `{"meta":{"anything":{"deep":1}}}`, nil},
+		"extra by schema":    {schema, `{"labels":{"x":{"k":"v","bad":1}}}`, []string{".labels.x.bad"}},
+		"free-form object":   {schema, `{"free":{"x":1}}`, nil},
+		"closed object":      {schema, `{"closed":{"a":"v","b":"w"}}`, []string{".closed.b"}},
+		"several, sorted":    {schema, `{"z":1,"a":2}`, []string{".a", ".z"}},
+		"scalar body":        {schema, `"text"`, nil},
+		"no schema":          {nil, `{"x":1}`, nil},
+		"array without item": {openapi3.NewArraySchema(), `[{"x":1}]`, nil},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var body any
+			if err := json.Unmarshal([]byte(tc.body), &body); err != nil {
+				t.Fatalf("json.Unmarshal(%s) error = %v", tc.body, err)
+			}
+
+			if diff := cmp.Diff(tc.want, undocumentedFields("", tc.schema, body)); diff != "" {
+				t.Errorf("undocumentedFields(%s) mismatch (-want +got):\n%s", tc.body, diff)
+			}
+		})
+	}
 }

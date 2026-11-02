@@ -3,9 +3,11 @@ package experiment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +18,11 @@ import (
 	"phenix/store"
 	"phenix/store/storetest"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
+	v1 "phenix/types/version/v1"
 	"phenix/util/mm"
 	"phenix/util/mm/mmtest"
+	"phenix/util/polltest"
 )
 
 // resumeMM is a delayedMM that also reports VM states, or fails to.
@@ -99,6 +104,14 @@ func TestPlanResume(t *testing.T) {
 			c2:       map[string]map[string]bool{"client": {"server": false}},
 			states:   map[string]string{"client": "BUILDING"},
 			wantGone: ": client",
+		},
+		{
+			name:   "re-arms a VM whose due time does not parse at once",
+			timers: map[string]string{"odd": "soon"},
+			states: map[string]string{"odd": "BUILDING"},
+			want: resumePlan{
+				delays: map[string]time.Duration{"odd": 0}, timers: map[string]string{"odd": "soon"}, postStart: true,
+			},
 		},
 		{
 			name:      "interrupts a start when minimega cannot list the VMs",
@@ -391,5 +404,547 @@ func TestAfterLaunchRecordsTheStartsAsTheyHappen(t *testing.T) { //nolint:parall
 
 	if got := experimentNamed(t, "exp"); hasPendingStart(got.Status) {
 		t.Errorf("stored pending starts after afterLaunch() = %v, %t; want none", got.Status.DelayedTimers(), got.Status.PostStartPending())
+	}
+}
+
+func TestPendingStepsDelayed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		steps pendingSteps
+		want  bool
+	}{
+		{name: "nothing pending", steps: pendingSteps{}},
+		{name: "only post-start apps", steps: pendingSteps{postStart: true, ccScript: "exp-cc.mm"}},
+		{name: "empty maps", steps: pendingSteps{delays: map[string]time.Duration{}, c2s: map[string]map[string]bool{}}},
+		{name: "a timer-delayed VM", steps: pendingSteps{delays: map[string]time.Duration{"a": 0}}, want: true},
+		{name: "a C2-delayed VM", steps: pendingSteps{c2s: map[string]map[string]bool{"a": {"b": false}}}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.steps.delayed(); got != tc.want {
+				t.Errorf("pendingSteps%+v.delayed() = %t, want %t", tc.steps, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDueTimes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2024, 1, 1, 6, 0, 0, 0, time.FixedZone("", -6*60*60))
+
+	tests := []struct {
+		name   string
+		delays map[string]time.Duration
+		want   map[string]string
+	}{
+		{name: "nil", want: map[string]string{}},
+		{name: "empty", delays: map[string]time.Duration{}, want: map[string]string{}},
+		{
+			name:   "in UTC, with fractions of a second",
+			delays: map[string]time.Duration{"now": 0, "soon": 1500 * time.Millisecond, "later": time.Hour},
+			want: map[string]string{
+				"now": "2024-01-01T12:00:00Z", "soon": "2024-01-01T12:00:01.5Z", "later": "2024-01-01T13:00:00Z",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := dueTimes(now, tc.delays)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("dueTimes() mismatch (-want +got):\n%s", diff)
+			}
+
+			// a due time parses back to now plus its delay, as planResume reads it
+			for vm, due := range got {
+				at, err := time.Parse(time.RFC3339Nano, due)
+				if err != nil || !at.Equal(now.Add(tc.delays[vm])) {
+					t.Errorf("due time of %s = %q (%v), want %v", vm, due, err, now.Add(tc.delays[vm]))
+				}
+			}
+		})
+	}
+}
+
+func TestHasPendingStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		timers    map[string]string
+		c2        map[string]map[string]bool
+		postStart bool
+		want      bool
+	}{
+		{name: "nothing pending"},
+		{name: "empty maps", timers: map[string]string{}, c2: map[string]map[string]bool{}},
+		{name: "a timer", timers: map[string]string{"a": "2024-01-01T00:00:00Z"}, want: true},
+		{name: "a C2 wait", c2: map[string]map[string]bool{"a": {"b": true}}, want: true},
+		{name: "the post-start apps", postStart: true, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := hasPendingStart(pendingStatus(tc.timers, tc.c2, tc.postStart).Status); got != tc.want {
+				t.Errorf("hasPendingStart() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAllPresent(t *testing.T) {
+	t.Parallel()
+
+	states := map[string]string{"a": "RUNNING", "b": "BUILDING"}
+
+	tests := []struct {
+		name   string
+		others map[string]bool
+		want   bool
+	}{
+		{name: "waits on nothing", want: true},
+		{name: "waits on VMs minimega holds", others: map[string]bool{"a": false, "b": true}, want: true},
+		{name: "waits on a VM that is gone", others: map[string]bool{"a": false, "gone": false}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := allPresent(tc.others, states); got != tc.want {
+				t.Errorf("allPresent(%v) = %t, want %t", tc.others, got, tc.want)
+			}
+		})
+	}
+}
+
+// The lock of one experiment serializes its holders and leaves other experiments' locks free.
+func TestLockStatus(t *testing.T) {
+	t.Parallel()
+
+	name := "resume-test-" + t.Name()
+
+	var (
+		wg    sync.WaitGroup
+		count int // the race detector fails the test unless the lock serializes the writes
+	)
+
+	for range 8 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for range 100 {
+				unlock := lockStatus(name)
+				count++
+
+				unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if count != 800 {
+		t.Errorf("count after 800 locked increments = %d, want 800", count)
+	}
+
+	unlock := lockStatus(name)
+	defer unlock()
+
+	polltest.Within(t, "locking another experiment's status", func() { lockStatus(name + "-other")() })
+}
+
+// resumeStored reads experiment exp's status back from the store.
+//
+//nolint:ireturn // the status as the experiment holds it
+func resumeStored(t *testing.T) ifaces.ExperimentStatus {
+	t.Helper()
+
+	return experimentNamed(t, "exp").Status
+}
+
+func TestUpdateStatus(t *testing.T) { //nolint:paralleltest // replaces the package store
+	failed := errors.New("store is read-only")
+
+	tests := []struct {
+		name        string
+		exp         string
+		updateErr   error
+		change      bool
+		wantErr     error  // nil for none
+		wantText    string // part of the error
+		wantUpdates int64
+		wantPending bool // whether the stored status still records the post-start apps
+	}{
+		{name: "writes a change", exp: "exp", change: true, wantUpdates: 1},
+		{name: "writes nothing when nothing changed", exp: "exp", wantPending: true},
+		{
+			name: "an experiment not in the store", exp: "missing", change: true, wantErr: store.ErrNotExist,
+			wantText: "getting experiment missing from store", wantPending: true,
+		},
+		{
+			name: "a store that fails the write", exp: "exp", change: true, updateErr: failed, wantErr: failed,
+			wantText: "updating experiment exp", wantUpdates: 1, wantPending: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := useRecoverStore(t)
+			storeExperiment(t, "exp", map[string]any{"startTime": stopTestStart, "postStartPending": true})
+
+			s.updateErr = tc.updateErr
+
+			err := updateStatus(tc.exp, func(st ifaces.ExperimentStatus) bool {
+				st.SetDelayedStarts(nil, nil, false)
+
+				return tc.change
+			})
+
+			if !errors.Is(err, tc.wantErr) || (err == nil) != (tc.wantErr == nil) {
+				t.Errorf("updateStatus(%s) error = %v, want %v", tc.exp, err, tc.wantErr)
+			}
+
+			if err != nil && !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("updateStatus(%s) error = %q, want it to contain %q", tc.exp, err, tc.wantText)
+			}
+
+			if got := s.updates.Load(); got != tc.wantUpdates {
+				t.Errorf("updateStatus(%s) store updates = %d, want %d", tc.exp, got, tc.wantUpdates)
+			}
+
+			if got := resumeStored(t).PostStartPending(); got != tc.wantPending {
+				t.Errorf("stored post-start pending after updateStatus(%s) = %t, want %t", tc.exp, got, tc.wantPending)
+			}
+		})
+	}
+}
+
+// An experiment whose spec does not decode is not written.
+func TestUpdateStatusUndecodable(t *testing.T) { //nolint:paralleltest // replaces the package store
+	s := useRecoverStore(t)
+
+	err := store.Create(&store.Config{
+		Version: "phenix.sandia.gov/v0", Kind: "Experiment", Metadata: store.ConfigMetadata{Name: "bad"},
+		Spec: map[string]any{}, Status: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(experiment bad) error = %v", err)
+	}
+
+	called := false
+
+	err = updateStatus("bad", func(ifaces.ExperimentStatus) bool {
+		called = true
+
+		return true
+	})
+	if err == nil || !strings.Contains(err.Error(), "decoding experiment bad") {
+		t.Errorf("updateStatus(bad) error = %v, want a decoding error", err)
+	}
+
+	if called || s.updates.Load() != 0 {
+		t.Errorf("updateStatus(bad) called the change %t and updated %d times, want neither", called, s.updates.Load())
+	}
+}
+
+func TestDelayedVMStarted(t *testing.T) { //nolint:paralleltest // replaces the package store
+	const due = "2024-01-01T00:00:00Z"
+
+	tests := []struct {
+		name        string
+		exp, host   string
+		wantTimers  map[string]string
+		wantC2      map[string]map[string]bool
+		wantUpdates int64
+	}{
+		{
+			name: "drops a timer-delayed VM", exp: "exp", host: "timed",
+			wantTimers:  map[string]string{"other": due},
+			wantC2:      map[string]map[string]bool{"client": {"server": true}},
+			wantUpdates: 1,
+		},
+		{
+			name: "drops a C2-delayed VM", exp: "exp", host: "client",
+			wantTimers:  map[string]string{"timed": due, "other": due},
+			wantUpdates: 1,
+		},
+		{
+			name: "writes nothing for a VM not pending", exp: "exp", host: "server",
+			wantTimers: map[string]string{"timed": due, "other": due},
+			wantC2:     map[string]map[string]bool{"client": {"server": true}},
+		},
+		{
+			name: "only logs for an experiment not in the store", exp: "missing", host: "timed",
+			wantTimers: map[string]string{"timed": due, "other": due},
+			wantC2:     map[string]map[string]bool{"client": {"server": true}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := useRecoverStore(t)
+			storeExperiment(t, "exp", map[string]any{
+				"startTime":        stopTestStart,
+				"delayedTimers":    map[string]any{"timed": due, "other": due},
+				"delayedC2":        map[string]any{"client": map[string]any{"server": true}},
+				"postStartPending": true,
+			})
+
+			delayedVMStarted(tc.exp, tc.host)
+
+			got := resumeStored(t)
+
+			if diff := cmp.Diff(tc.wantTimers, got.DelayedTimers(), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("stored timers mismatch (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tc.wantC2, got.DelayedC2(), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("stored C2 waits mismatch (-want +got):\n%s", diff)
+			}
+
+			if !got.PostStartPending() {
+				t.Error("stored post-start pending = false, want it kept")
+			}
+
+			if n := s.updates.Load(); n != tc.wantUpdates {
+				t.Errorf("delayedVMStarted(%s, %s) store updates = %d, want %d", tc.exp, tc.host, n, tc.wantUpdates)
+			}
+		})
+	}
+}
+
+// VMs that start at once each drop their own pending start, losing none of the others' updates.
+func TestDelayedVMStartedConcurrently(t *testing.T) { //nolint:paralleltest // replaces the package store
+	timers := make(map[string]string, 16)
+	for i := range 16 {
+		timers[fmt.Sprintf("vm%02d", i)] = "2024-01-01T00:00:00Z"
+	}
+
+	storePendingExperiment(t, timers, nil)
+
+	var wg sync.WaitGroup
+
+	for vm := range timers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			delayedVMStarted("exp", vm)
+		}()
+	}
+
+	wg.Wait()
+
+	got := resumeStored(t)
+	if len(got.DelayedTimers()) != 0 || !got.PostStartPending() {
+		t.Errorf("stored status after every VM started: timers %v, post-start %t; want no timers and post-start pending",
+			got.DelayedTimers(), got.PostStartPending())
+	}
+}
+
+func TestSetPending(t *testing.T) { //nolint:paralleltest // replaces the package store
+	timers := map[string]string{"a": "2024-01-01T00:00:00Z"}
+	c2 := map[string]map[string]bool{"b": {"a": false}}
+
+	t.Run("records in memory and in the store", func(t *testing.T) {
+		storePendingExperiment(t, nil, nil)
+
+		exp := experimentNamed(t, "exp")
+		setPending(exp, timers, c2, false)
+
+		for where, st := range map[string]ifaces.ExperimentStatus{"in memory": exp.Status, "stored": resumeStored(t)} {
+			if diff := cmp.Diff(timers, st.DelayedTimers()); diff != "" {
+				t.Errorf("%s timers mismatch (-want +got):\n%s", where, diff)
+			}
+
+			if diff := cmp.Diff(c2, st.DelayedC2()); diff != "" {
+				t.Errorf("%s C2 waits mismatch (-want +got):\n%s", where, diff)
+			}
+
+			if st.PostStartPending() {
+				t.Errorf("%s post-start pending = true, want false", where)
+			}
+		}
+	})
+
+	t.Run("records in memory an experiment not in the store", func(t *testing.T) {
+		storetest.Use(t)
+
+		exp := pendingStatus(nil, nil, false)
+		setPending(exp, timers, nil, true)
+
+		if diff := cmp.Diff(timers, exp.Status.DelayedTimers()); diff != "" || !exp.Status.PostStartPending() {
+			t.Errorf("in-memory status: timers diff %s, post-start %t; want the timers and post-start", diff,
+				exp.Status.PostStartPending())
+		}
+	})
+}
+
+// finishStart closes the channel after the steps, and stops the experiment after a failed step unless its caller
+// canceled the delayed VM starts, as the web UI does before it calls Stop itself.
+func TestFinishStart(t *testing.T) { //nolint:paralleltest // replaces package globals
+	expired, cancelExpired := context.WithTimeout(context.Background(), 0)
+	defer cancelExpired()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	hour := map[string]time.Duration{"vm": time.Hour}
+
+	tests := []struct {
+		name        string
+		ctx         context.Context //nolint:containedctx // each case's context
+		dryrun      bool
+		steps       pendingSteps
+		readErr     error
+		want        []string // the start of each error sent
+		wantCleared []string
+	}{
+		{name: "nothing left to run", ctx: context.Background(), dryrun: true},
+		{
+			name: "a failed cc script stops the experiment", ctx: context.Background(),
+			steps:   pendingSteps{ccScript: "exp-cc.mm"},
+			readErr: errors.New("bad cc script"),
+			want: []string{
+				"reading minimega cc script: bad cc script",
+				"stopping experiment: getting experiment exp from store",
+			},
+		},
+		{
+			name: "delayed VMs the caller canceled leave the stop to it", ctx: canceled,
+			steps: pendingSteps{delays: hour},
+			want:  []string{"handling delayed VMs: "},
+		},
+		{
+			name: "delayed VMs out of time stop the experiment", ctx: expired,
+			steps:       pendingSteps{delays: hour},
+			want:        []string{"handling delayed VMs: ", "stopping experiment: getting experiment exp from store"},
+			wantCleared: []string{"exp"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			storetest.Use(t) // without exp, so a Stop fails at once
+			fake := useStartMM(t, &startMM{readErr: tc.readErr})
+
+			exp := types.NewExperiment(store.ConfigMetadata{Name: "exp"})
+			exp.Spec.SetExperimentName("exp")
+			exp.Spec.SetTopology(&v1.TopologySpec{
+				NodesF: []*v1.Node{{GeneralF: &v1.General{HostnameF: "vm"}, CommandsF: []string{"cc exec ls"}}},
+			})
+
+			errChan := make(chan error, 4)
+			finishStart(tc.ctx, exp, tc.dryrun, tc.steps, errChan)
+
+			errs := waitClosed(t, errChan)
+			if len(errs) != len(tc.want) {
+				t.Fatalf("finishStart() errors = %v, want %d starting with %q", errs, len(tc.want), tc.want)
+			}
+
+			for i, err := range errs {
+				if !strings.HasPrefix(err.Error(), tc.want[i]) {
+					t.Errorf("finishStart() error %d = %q, want it to start with %q", i, err, tc.want[i])
+				}
+			}
+
+			if diff := cmp.Diff(tc.wantCleared, fake.cleared, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("finishStart() cleared namespaces mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// ResumeStart closes the channel and resumes nothing when it cannot read or record the experiment, or when
+// minimega cannot list the VMs.
+func TestResumeStartFailures(t *testing.T) { //nolint:paralleltest // replaces package globals
+	failed := errors.New("store is read-only")
+	soon := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+
+	tests := []struct {
+		name            string
+		exp             string
+		start           string
+		statesErr       error
+		updateErr       error
+		wantErr         string // part of the error, "" for none
+		wantInterrupted string // part of the stored reason, "" for none
+	}{
+		{name: "an experiment not in the store", exp: "missing", start: stopTestStart, wantErr: "getting experiment missing"},
+		{name: "a dry run", exp: "exp", start: stopTestStart + "-DRYRUN"},
+		{
+			name: "minimega cannot list the VMs", exp: "exp", start: stopTestStart,
+			statesErr:       errors.New("minimega unreachable"),
+			wantInterrupted: "minimega could not list the VMs: minimega unreachable",
+		},
+		{
+			name: "the plan cannot be recorded", exp: "exp", start: stopTestStart, updateErr: failed,
+			wantErr: "updating experiment exp: " + failed.Error(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := useRecoverStore(t)
+			storeExperiment(t, "exp", map[string]any{
+				"startTime": tc.start, "delayedTimers": map[string]any{"vm": soon}, "postStartPending": true,
+			})
+
+			received := useResumeMM(t, map[string]string{"vm": "BUILDING"}, tc.statesErr)
+			s.updateErr = tc.updateErr
+
+			errChan := make(chan error)
+
+			resumed, err := ResumeStart(context.Background(), tc.exp, errChan)
+			if resumed {
+				t.Errorf("ResumeStart(%s) resumed, want not", tc.exp)
+			}
+
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("ResumeStart(%s) error = %v, want nil", tc.exp, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("ResumeStart(%s) error = %v, want one containing %q", tc.exp, err, tc.wantErr)
+			}
+
+			if errs := waitClosed(t, errChan); len(errs) != 0 {
+				t.Errorf("ResumeStart(%s) sent errors %v, want the channel closed empty", tc.exp, errs)
+			}
+
+			if got := received(); len(got) != 0 {
+				t.Errorf("ResumeStart(%s) sent %q, want nothing", tc.exp, mmtest.Bases(got))
+			}
+
+			got := resumeStored(t).Interrupted()
+			if (got == "") != (tc.wantInterrupted == "") || !strings.Contains(got, tc.wantInterrupted) {
+				t.Errorf("stored interrupted reason = %q, want it to contain %q", got, tc.wantInterrupted)
+			}
+		})
+	}
+}
+
+func TestPendingStartsReportsTheStore(t *testing.T) { //nolint:paralleltest // replaces the package store
+	failed := errors.New("store is down")
+
+	s := useRecoverStore(t)
+	s.listErr = failed
+
+	names, err := PendingStarts()
+	if names != nil || !errors.Is(err, failed) || !strings.Contains(err.Error(), "listing running experiments") {
+		t.Errorf("PendingStarts() = %q, %v; want nil and the listing error", names, err)
 	}
 }

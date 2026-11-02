@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"sync"
@@ -80,27 +81,37 @@ func TestGetScreenshotSizes(t *testing.T) {
 func TestScreenshotWidth(t *testing.T) {
 	t.Parallel()
 
-	for size, want := range map[string]string{
-		"1":    "200",
-		"100":  "200",
-		"200":  "200",
-		"201":  "400",
-		"215":  "400",
-		"500":  "600",
-		"800":  "800",
-		"0200": "200",
-		"4001": "4096",
-		"4096": "4096",
-	} {
-		if got, err := ScreenshotWidth(size); err != nil || got != want {
-			t.Errorf("ScreenshotWidth(%q) = %q, %v; want %q, nil", size, got, err, want)
-		}
+	tests := []struct {
+		size, want string
+		wantErr    error
+	}{
+		{size: "1", want: "200"},
+		{size: "100", want: "200"},
+		{size: "200", want: "200"},
+		{size: "201", want: "400"},
+		{size: "215", want: "400"},
+		{size: "500", want: "600"},
+		{size: "800", want: "800"},
+		{size: "0200", want: "200"},
+		{size: "4001", want: "4096"},
+		{size: "4096", want: "4096"},
+		{size: "", wantErr: ErrInvalidScreenshotSize},
+		{size: "0", wantErr: ErrInvalidScreenshotSize},
+		{size: "-200", wantErr: ErrInvalidScreenshotSize},
+		{size: "4097", wantErr: ErrInvalidScreenshotSize},
+		{size: "12.5", wantErr: ErrInvalidScreenshotSize},
+		{size: "200 file /etc/x", wantErr: ErrInvalidScreenshotSize},
 	}
 
-	for _, size := range []string{"", "0", "4097", "12.5", "200 file /etc/x"} {
-		if got, err := ScreenshotWidth(size); !errors.Is(err, ErrInvalidScreenshotSize) {
-			t.Errorf("ScreenshotWidth(%q) = %q, %v; want ErrInvalidScreenshotSize", size, got, err)
-		}
+	for _, tc := range tests {
+		t.Run(tc.size, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ScreenshotWidth(tc.size)
+			if got != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Errorf("ScreenshotWidth(%q) = %q, %v; want %q, %v", tc.size, got, err, tc.want, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -237,5 +248,86 @@ func TestGetScreenshotSharesARequest(t *testing.T) {
 
 	if n := fake.calls.Load(); n != 1 {
 		t.Errorf("%d concurrent GetScreenshot(exp, vm, 200) calls asked minimega for %d screenshots, want 1", callers, n)
+	}
+}
+
+// A caller whose context ends stops waiting, while the minimega command it
+// started runs on and caches the screenshot for the next caller.
+//
+//nolint:paralleltest // replaces minimega and the web cache
+func TestGetScreenshotContextGivesUp(t *testing.T) {
+	var (
+		started = make(chan struct{})
+		release = make(chan struct{})
+	)
+
+	fake := fakeScreenshots(t, func(int32) ([]byte, error) {
+		close(started)
+		<-release
+
+		return []byte("png"), nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := GetScreenshotContext(ctx, "exp", "vm", "200")
+		done <- err
+	}()
+
+	<-started
+	cancel()
+
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("GetScreenshotContext(canceled ctx, exp, vm, 200) = %v, want %v", err, context.Canceled)
+	}
+
+	close(release)
+
+	if shot, err := GetScreenshot("exp", "vm", "200"); err != nil || string(shot) != "png" {
+		t.Errorf("GetScreenshot(exp, vm, 200) after a caller gave up = %q, %v; want png", shot, err)
+	}
+
+	if n := fake.calls.Load(); n != 1 {
+		t.Errorf("minimega was asked for %d screenshots, want 1", n)
+	}
+}
+
+// screenshotRacedCache is a cache whose first Get misses, as if another
+// flight cached the screenshot just after the caller looked.
+type screenshotRacedCache struct {
+	cache.WebCache
+
+	gets atomic.Int32
+}
+
+func (c *screenshotRacedCache) Get(key string) ([]byte, bool) {
+	if c.gets.Add(1) == 1 {
+		return nil, false
+	}
+
+	return c.WebCache.Get(key)
+}
+
+// A flight that starts after another cached the screenshot uses that one
+// rather than asking minimega again.
+//
+//nolint:paralleltest // replaces minimega and the web cache
+func TestGetScreenshotFlightRereadsTheCache(t *testing.T) {
+	fake := fakeScreenshots(t, func(int32) ([]byte, error) { return []byte("new"), nil })
+
+	if err := cache.SetWithExpire("exp_vm_200", []byte("cached"), ScreenshotCacheDuration); err != nil {
+		t.Fatal(err)
+	}
+
+	cache.DefaultWebCache = &screenshotRacedCache{WebCache: cache.DefaultWebCache} //nolint:reassign // install test double
+
+	if shot, err := GetScreenshot("exp", "vm", "200"); err != nil || string(shot) != "cached" {
+		t.Errorf("GetScreenshot(exp, vm, 200) = %q, %v; want the cached screenshot", shot, err)
+	}
+
+	if n := fake.calls.Load(); n != 0 {
+		t.Errorf("minimega was asked for %d screenshots, want 0", n)
 	}
 }

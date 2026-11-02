@@ -150,8 +150,6 @@ func TestChangesFinishOnceStarted(t *testing.T) { //nolint:paralleltest // share
 // A read whose commands gave up reports its context's error, not an empty
 // answer such as a VM not found.
 func TestReadsReportTheirContextEnding(t *testing.T) { //nolint:paralleltest // shares the fake minimega
-	received := useFakeMinimega(t, nil)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -173,18 +171,27 @@ func TestReadsReportTheirContextEnding(t *testing.T) { //nolint:paralleltest // 
 
 			return err
 		},
+		"GetVLANs": func() error {
+			_, err := (Minimega{}).GetVLANs(opts...)
+
+			return err
+		},
 		"StopVMCapture": func() error { return StopVMCapture(opts...) },
 		"RedeployVM":    func() error { return RedeployVM(opts...) },
 	}
 
 	for name, read := range reads {
-		if err := read(); !errors.Is(err, context.Canceled) {
-			t.Errorf("%s(vm1, canceled ctx) error = %v, want %v", name, err, context.Canceled)
-		}
-	}
+		t.Run(name, func(t *testing.T) {
+			received := useFakeMinimega(t, nil)
 
-	if got := received(); len(got) != 0 {
-		t.Errorf("reads with a canceled ctx sent %q, want nothing", mmtest.Bases(got))
+			if err := read(); !errors.Is(err, context.Canceled) {
+				t.Errorf("%s(vm1, canceled ctx) error = %v, want %v", name, err, context.Canceled)
+			}
+
+			if got := received(); len(got) != 0 {
+				t.Errorf("%s(vm1, canceled ctx) sent %q, want nothing", name, mmtest.Bases(got))
+			}
+		})
 	}
 }
 

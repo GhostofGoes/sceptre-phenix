@@ -124,3 +124,76 @@ func TestShutdownContextGivesUpAtTheDeadline(t *testing.T) {
 		t.Errorf("ShutdownContext(%s deadline) jobs left mismatch (-want +got):\n%s", deadline, diff)
 	}
 }
+
+// ShutdownContext does not wait out the drain period once every job has
+// finished, or once ctx ends; a second call returns at once.
+func TestShutdownContextReturnsBeforeTheDrainEnds(t *testing.T) {
+	t.Parallel()
+
+	const drain = time.Minute
+
+	for name, tc := range map[string]struct {
+		// the job ignores being canceled until the test ends
+		stubborn bool
+		// ctx has ended before ShutdownContext is called
+		ended bool
+		left  bool
+	}{
+		"every job finishes":     {},
+		"ctx ends while waiting": {stubborn: true, ended: true, left: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newTestRegistry(t)
+			release := make(chan struct{})
+
+			// before the registry's cleanup, which waits for every job
+			t.Cleanup(func() { close(release) })
+
+			started, err := r.Start(Spec{Kind: "test", Owner: "alice", Cancelable: true, Run: func(ctx context.Context, _ *Run) error {
+				if tc.stubborn {
+					<-release
+
+					return nil
+				}
+
+				<-ctx.Done()
+
+				return ctx.Err()
+			}})
+			if err != nil {
+				t.Fatalf("Start() error = %v", err)
+			}
+
+			if !tc.stubborn {
+				// finishes the job, as if it ended on its own within the drain
+				if _, err := r.Cancel(started.ID); err != nil {
+					t.Fatalf("Cancel() error = %v", err)
+				}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.ended {
+				cancel()
+			}
+
+			defer cancel()
+
+			began := time.Now()
+			left := r.ShutdownContext(ctx, drain)
+
+			if took := time.Since(began); took > drain/2 {
+				t.Errorf("ShutdownContext(drain %s) took %s, want it to return early", drain, took)
+			}
+
+			if (len(left) != 0) != tc.left {
+				t.Errorf("ShutdownContext(drain %s) left %d jobs running, want some %t", drain, len(left), tc.left)
+			}
+
+			if again := r.ShutdownContext(ctx, 0); len(again) != len(left) {
+				t.Errorf("second ShutdownContext() left %d jobs running, want %d as the first", len(again), len(left))
+			}
+		})
+	}
+}

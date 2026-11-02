@@ -321,3 +321,102 @@ func TestViewerQueuesWhatItAccepts(t *testing.T) {
 		}
 	})
 }
+
+// viewerDeadlineConn is a viewer's websocket whose write deadline cannot be set.
+type viewerDeadlineConn struct {
+	writes int
+	closed chan struct{}
+}
+
+func (c *viewerDeadlineConn) Write(b []byte) (int, error) {
+	c.writes++
+
+	return len(b), nil
+}
+
+func (c *viewerDeadlineConn) SetWriteDeadline(time.Time) error { return os.ErrDeadlineExceeded }
+
+func (c *viewerDeadlineConn) Close() error {
+	close(c.closed)
+
+	return nil
+}
+
+// serve writes nothing when it cannot set a write deadline, and closes the connection.
+func TestViewerStopsWhenItCannotSetADeadline(t *testing.T) {
+	t.Parallel()
+
+	conn := &viewerDeadlineConn{closed: make(chan struct{})}
+	v := newViewer(conn)
+
+	v.offer([]byte("a"))
+
+	polltest.Within(t, "serving", v.serve)
+
+	if conn.writes != 0 || !v.isGone() {
+		t.Errorf("viewer.serve() without a deadline: writes = %d, gone = %v; want 0, true", conn.writes, v.isGone())
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("viewer.serve() without a deadline left the connection open, want it closed")
+	}
+}
+
+// watch marks the viewer gone once its client's stream ends, and a viewer
+// already gone is served nothing; leaving again changes nothing.
+func TestViewerWatchNoticesTheClientLeaving(t *testing.T) {
+	t.Parallel()
+
+	conn := newFastConn()
+	v := newViewer(conn)
+
+	if v.isGone() {
+		t.Fatal("new viewer is gone, want it served")
+	}
+
+	polltest.Within(t, "watching a client that sends a little and leaves", func() { v.watch(bytes.NewBufferString("ignored")) })
+
+	if !v.isGone() {
+		t.Error("viewer after watch returned is not gone, want gone")
+	}
+
+	select {
+	case <-conn.closed:
+	default:
+		t.Error("viewer after watch returned left its connection open, want it closed")
+	}
+
+	polltest.Within(t, "serving a viewer that is gone", v.serve)
+	v.leave()
+
+	if got := conn.String(); got != "" {
+		t.Errorf("viewer that was gone before serve wrote %q, want nothing", got)
+	}
+}
+
+// An empty chunk is skipped rather than written as an empty frame.
+func TestViewerSkipsEmptyChunks(t *testing.T) {
+	t.Parallel()
+
+	conn := &failingConn{closed: make(chan struct{})}
+	v := newViewer(conn)
+
+	v.offer(nil)
+	v.offer([]byte{})
+	v.finish()
+
+	polltest.Within(t, "serving", v.serve)
+
+	if conn.writes != 0 {
+		t.Errorf("viewer.serve() of empty chunks wrote %d times, want none", conn.writes)
+	}
+
+	if v.offer([]byte("late")) {
+		t.Error("offer after finish = true, want false")
+	}
+
+	// finishing twice does not close the queue twice
+	v.finish()
+}

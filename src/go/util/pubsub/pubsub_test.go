@@ -1,8 +1,12 @@
 package pubsub
 
 import (
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // Unsubscribing ends a publish blocked on the subscriber, and later
@@ -103,15 +107,204 @@ func TestUnsubscribeWithOtherPublisherBlocked(t *testing.T) {
 	}
 }
 
-// A second Unsubscribe of the same channel does nothing.
+// A second Unsubscribe of the same channel does nothing: it neither closes the channel nor drops another
+// subscriber of the topic.
 func TestUnsubscribeTwice(t *testing.T) {
 	t.Parallel()
 
 	const topic = "unsubscribe-twice"
 
 	ch := Subscribe(topic)
+	other := Subscribe(topic)
+
+	t.Cleanup(func() { Unsubscribe(topic, other) })
 
 	Unsubscribe(topic, ch)
 	Unsubscribe(topic, ch)
-	Publish(topic, "msg")
+
+	go Publish(topic, "msg")
+
+	select {
+	case got := <-other:
+		if got != "msg" {
+			t.Errorf("other subscriber got %v, want msg", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("other subscriber got nothing for 5s after the second Unsubscribe(), want msg")
+	}
+
+	select {
+	case got, open := <-ch:
+		t.Errorf("unsubscribed channel received %v (open %t), want nothing", got, open)
+	default:
+	}
+}
+
+// pubsubReceive reads up to n messages from ch, giving up once none comes for 5s.
+func pubsubReceive(ch chan any, n int) []any {
+	got := make([]any, 0, n)
+
+	for range n {
+		select {
+		case msg := <-ch:
+			got = append(got, msg)
+		case <-time.After(5 * time.Second):
+			return got
+		}
+	}
+
+	return got
+}
+
+// Publish sends each message of a topic, in order, to every subscriber of that topic and to no other.
+func TestPublish(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		subscribers int
+		msgs        []any
+	}{
+		"no subscribers":   {subscribers: 0, msgs: []any{"lost"}},
+		"one subscriber":   {subscribers: 1, msgs: []any{"a", 1, nil}},
+		"many subscribers": {subscribers: 3, msgs: []any{"a", "b"}},
+		"no messages":      {subscribers: 2, msgs: nil},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			topic, otherTopic := "publish-"+name, "publish-other-"+name
+
+			other := Subscribe(otherTopic)
+			t.Cleanup(func() { Unsubscribe(otherTopic, other) })
+
+			subs := make([]chan any, tc.subscribers)
+			for i := range subs {
+				subs[i] = Subscribe(topic)
+				t.Cleanup(func() { Unsubscribe(topic, subs[i]) })
+			}
+
+			published := make(chan struct{})
+
+			go func() {
+				defer close(published)
+
+				for _, msg := range tc.msgs {
+					Publish(topic, msg)
+				}
+			}()
+
+			// each subscriber reads on its own, as Publish waits for each in turn
+			got := make([][]any, len(subs))
+			read := make(chan int)
+
+			for i, ch := range subs {
+				go func() {
+					got[i] = pubsubReceive(ch, len(tc.msgs))
+					read <- i
+				}()
+			}
+
+			for range subs {
+				<-read
+			}
+
+			select {
+			case <-published:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Publish() still blocked 5s after every subscriber read, want it to return")
+			}
+
+			for i := range subs {
+				if diff := cmp.Diff(tc.msgs, got[i], cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("subscriber %d messages mismatch (-want +got):\n%s", i, diff)
+				}
+			}
+
+			select {
+			case msg := <-other:
+				t.Errorf("subscriber of %s received %v, want nothing", otherTopic, msg)
+			default:
+			}
+		})
+	}
+}
+
+// Subscribers that come and go while others publish neither race nor block a publisher for good.
+func TestPublishConcurrent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		topic      = "publish-concurrent"
+		publishers = 4
+		messages   = 50
+		churners   = 4
+	)
+
+	reader := Subscribe(topic)
+	stop := make(chan struct{})
+	read := make(chan int)
+
+	go func() {
+		n := 0
+
+		for {
+			select {
+			case <-reader:
+				n++
+			case <-stop:
+				read <- n
+
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+
+	for range churners {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for range messages {
+				Unsubscribe(topic, Subscribe(topic))
+			}
+		}()
+	}
+
+	for range publishers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for i := range messages {
+				Publish(topic, i)
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("publishers and subscribers still running after 10s, want them done")
+	}
+
+	close(stop)
+	Unsubscribe(topic, reader)
+
+	if n := <-read; n != publishers*messages {
+		t.Errorf("steady subscriber read %d messages, want %d", n, publishers*messages)
+	}
 }

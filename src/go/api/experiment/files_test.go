@@ -210,7 +210,7 @@ func TestLocalFileFindsTheExperimentsFile(t *testing.T) { //nolint:paralleltest 
 
 func TestDeleteFilesDeletesListedFilesAndRefusesTheRest(t *testing.T) { //nolint:paralleltest // replaces package state
 	useExperiment(t, "exp", true)
-	useCapture(t, "/phenix/images/exp/files/live.pcap")
+	captures := useCapture(t, "/phenix/images/exp/files/live.pcap")
 
 	fake := useListedFiles(t,
 		file.File{Name: "a.log", Path: "a.log"},
@@ -265,36 +265,77 @@ func TestDeleteFilesDeletesListedFilesAndRefusesTheRest(t *testing.T) { //nolint
 	if !errors.As(refused["live.pcap"], &writing) || writing.Capture.VM != "vm" {
 		t.Errorf("DeleteFiles(exp, ...) refused live.pcap with %v, want a %T naming VM vm", refused["live.pcap"], writing)
 	}
+
+	// the captures are listed once, for the first pcap
+	if captures.lookups != 1 {
+		t.Errorf("DeleteFiles(exp, ...) GetExperimentCaptures calls = %d, want 1", captures.lookups)
+	}
 }
 
 func TestCaptureFile(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"/phenix/images/exp/files/a.pcap":    "a.pcap",
-		"/other/base/exp/files/sub/a.pcap":   "sub/a.pcap",
-		"/phenix/images/exp2/files/a.pcap":   "",
-		"/phenix/images/myexp/files/a.pcap":  "",
-		"/phenix/images/exp/files/":          "",
-		"/phenix/images/exp/captures/a.pcap": "",
-		"relative/exp/files/a.pcap":          "a.pcap",
+		"/phenix/images/exp/files/a.pcap":           "a.pcap",
+		"/other/base/exp/files/sub/a.pcap":          "sub/a.pcap",
+		"/phenix/images/exp2/files/a.pcap":          "",
+		"/phenix/images/myexp/files/a.pcap":         "",
+		"/phenix/images/exp/files/":                 "",
+		"/phenix/images/exp/captures/a.pcap":        "",
+		"relative/exp/files/a.pcap":                 "a.pcap",
+		"":                                          "",
+		"/phenix/images/exp/files/exp/files/a.pcap": "exp/files/a.pcap",
 	}
 
 	for capturePath, want := range tests {
-		got, ok := experiment.CaptureFile("exp", capturePath)
-		if got != want || ok != (want != "") {
-			t.Errorf("CaptureFile(exp, %q) = %q, %t; want %q, %t", capturePath, got, ok, want, want != "")
-		}
+		t.Run(capturePath, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := experiment.CaptureFile("exp", capturePath)
+			if got != want || ok != (want != "") {
+				t.Errorf("CaptureFile(exp, %q) = %q, %t; want %q, %t", capturePath, got, ok, want, want != "")
+			}
+		})
 	}
 }
 
-func TestDeleteFilesReportsDeleteFailure(t *testing.T) { //nolint:paralleltest // replaces package state
-	fake := useListedFiles(t, file.File{Name: "a.log", Path: "a.log"})
-	fake.err = errors.New("mesh down")
+// DeleteFiles reports a cluster that cannot list or delete the files, and deletes nothing it cannot list.
+func TestDeleteFilesReportsClusterFailures(t *testing.T) { //nolint:paralleltest // replaces package state
+	down := errors.New("mesh down")
 
-	deleted, _, err := experiment.DeleteFiles("exp", []string{"a.log"})
-	if err == nil || deleted != nil {
-		t.Errorf("DeleteFiles(exp, [a.log]) with a failing delete = %v, %v; want nil and the failure", deleted, err)
+	tests := []struct {
+		name        string
+		listErr     error
+		deleteErr   error
+		want        string
+		wantDeleted []string
+	}{
+		{name: "a failing delete", deleteErr: down, want: "deleting experiment files", wantDeleted: []string{"exp/files/a.log"}},
+		{name: "a failing listing", listErr: down, want: "getting list of experiment files"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := useListedFiles(t, file.File{Name: "a.log", Path: "a.log"})
+			fake.err = tc.deleteErr
+
+			if tc.listErr != nil {
+				useFilesBrokenListing(t, fake, tc.listErr)
+			}
+
+			deleted, refused, err := experiment.DeleteFiles("exp", []string{"a.log"})
+			if !errors.Is(err, down) || !strings.Contains(err.Error(), tc.want) || deleted != nil {
+				t.Errorf("DeleteFiles(exp, [a.log]) = %v, %v; want nil and an error containing %q", deleted, err, tc.want)
+			}
+
+			if len(refused) != 0 {
+				t.Errorf("DeleteFiles(exp, [a.log]) refused %v, want nothing", refused)
+			}
+
+			if diff := cmp.Diff(tc.wantDeleted, fake.deleted, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("DeleteFiles(exp, [a.log]) DeleteExistingFiles names mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -822,4 +863,327 @@ func TestZipFilesProperties(t *testing.T) { //nolint:paralleltest // replaces pa
 			t.Fatalf("ZipFiles(exp, %q, %+v) archive entries mismatch (-want +got):\n%s", paths, limits, diff)
 		}
 	})
+}
+
+// filesBrokenListing is a listedFiles whose listing fails with err.
+type filesBrokenListing struct {
+	*listedFiles
+
+	err error
+}
+
+func (l *filesBrokenListing) GetExperimentFiles(string, string) (file.Files, error) {
+	l.listings++
+
+	return nil, l.err
+}
+
+// useFilesBrokenListing makes the cluster's listing of files fail with err; fake does the rest.
+func useFilesBrokenListing(t *testing.T, fake *listedFiles, err error) {
+	t.Helper()
+
+	original := file.DefaultClusterFiles
+	file.DefaultClusterFiles = &filesBrokenListing{listedFiles: fake, err: err} //nolint:reassign // install test double
+
+	t.Cleanup(func() { file.DefaultClusterFiles = original }) //nolint:reassign // restore test double
+}
+
+func TestCaptureWritingError(t *testing.T) {
+	t.Parallel()
+
+	err := error(&experiment.CaptureWritingError{Path: "sub/a.pcap", Capture: mm.Capture{VM: "vm"}})
+
+	if got, want := err.Error(), mm.ErrCaptureExists.Error()+": minimega is still writing a capture to sub/a.pcap"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+
+	if !errors.Is(fmt.Errorf("deleting: %w", err), mm.ErrCaptureExists) {
+		t.Errorf("errors.Is(%v, mm.ErrCaptureExists) = false, want true", err)
+	}
+
+	if errors.Is(err, experiment.ErrFileNotFound) {
+		t.Errorf("errors.Is(%v, ErrFileNotFound) = true, want false", err)
+	}
+}
+
+// A file only a mesh node has is not found when the cluster cannot list its files or the copy to the headnode
+// fails.
+func TestLocalFileClusterFailures(t *testing.T) { //nolint:paralleltest // replaces package state
+	down := errors.New("mesh down")
+
+	tests := []struct {
+		name     string
+		listErr  error
+		wantErr  error
+		wantText string
+	}{
+		{name: "the listing fails", listErr: down, wantErr: down, wantText: "getting list of experiment files"},
+		{name: "the copy fails", wantErr: experiment.ErrFileNotFound, wantText: "copying remote.log to the headnode"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useFilesDir(t, "exp", nil)
+
+			// no mesh node holds the file it lists
+			fake := useListedFiles(t, file.File{Name: "remote.log", Path: "remote.log"})
+			if tc.listErr != nil {
+				useFilesBrokenListing(t, fake, tc.listErr)
+			}
+
+			local, err := experiment.LocalFile("exp", "remote.log")
+			if local != "" || !errors.Is(err, tc.wantErr) || !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("LocalFile(exp, remote.log) = %q, %v; want \"\" and an error matching %v, containing %q",
+					local, err, tc.wantErr, tc.wantText)
+			}
+		})
+	}
+}
+
+// PlanZip lists the cluster's files at most once, for the files the headnode does not have, and fails when it
+// cannot list them.
+func TestPlanZipListsTheClusterOnce(t *testing.T) { //nolint:paralleltest // replaces package state
+	useFilesDir(t, "exp", map[string]string{"a.log": "alpha"})
+
+	t.Run("listed once", func(t *testing.T) {
+		fake := useListedFiles(t, file.File{Path: "r1.log", Size: 3}, file.File{Path: "r2.log", Size: 4})
+
+		plan, err := experiment.PlanZip("exp", []string{"r1.log", "a.log", "r2.log"}, zipLimits)
+		if err != nil {
+			t.Fatalf("PlanZip() error = %v", err)
+		}
+
+		want := experiment.ZipPlan{
+			Name: "exp", Paths: []string{"r1.log", "a.log", "r2.log"},
+			Sizes: map[string]int64{"r1.log": 3, "a.log": 5, "r2.log": 4}, Total: 12,
+		}
+		if diff := cmp.Diff(want, plan); diff != "" {
+			t.Errorf("PlanZip() mismatch (-want +got):\n%s", diff)
+		}
+
+		if fake.listings != 1 {
+			t.Errorf("PlanZip() GetExperimentFiles calls = %d, want 1", fake.listings)
+		}
+	})
+
+	t.Run("not listed for headnode files", func(t *testing.T) {
+		fake := useListedFiles(t)
+
+		if _, err := experiment.PlanZip("exp", []string{"a.log"}, zipLimits); err != nil || fake.listings != 0 {
+			t.Errorf("PlanZip(a.log) error = %v, listings %d; want nil, 0", err, fake.listings)
+		}
+	})
+
+	t.Run("the listing fails", func(t *testing.T) {
+		down := errors.New("mesh down")
+		useFilesBrokenListing(t, useListedFiles(t), down)
+
+		_, err := experiment.PlanZip("exp", []string{"a.log", "r1.log"}, zipLimits)
+		if !errors.Is(err, down) || !strings.Contains(err.Error(), "getting list of experiment files") {
+			t.Errorf("PlanZip() error = %v, want a listing error wrapping %v", err, down)
+		}
+	})
+
+	t.Run("a limit of zero files", func(t *testing.T) {
+		useListedFiles(t)
+
+		_, err := experiment.PlanZip("exp", []string{"a.log"}, experiment.ZipLimits{MaxFiles: 0, MaxBytes: 1 << 20})
+		if !errors.Is(err, experiment.ErrDownloadTooLarge) {
+			t.Errorf("PlanZip(MaxFiles 0) error = %v, want %v", err, experiment.ErrDownloadTooLarge)
+		}
+	})
+
+	t.Run("files at the byte limit", func(t *testing.T) {
+		useListedFiles(t)
+
+		plan, err := experiment.PlanZip("exp", []string{"a.log"}, experiment.ZipLimits{MaxFiles: 1, MaxBytes: 5})
+		if err != nil || plan.Total != 5 {
+			t.Errorf("PlanZip(MaxBytes 5) = %+v, %v; want a total of 5", plan, err)
+		}
+	})
+}
+
+// A request that ends before or while a file is archived stops the archive with the context's error, archiving
+// nothing more.
+func TestZipPlanWriteStopsWhenCanceledEarly(t *testing.T) { //nolint:paralleltest // replaces package state
+	useFilesDir(t, "exp", map[string]string{"big.gz": string(make([]byte, 256<<10)), "b.log": "beta"})
+	useListedFiles(t)
+
+	plan, err := experiment.PlanZip("exp", []string{"big.gz", "b.log"}, zipLimits)
+	if err != nil {
+		t.Fatalf("PlanZip() error = %v", err)
+	}
+
+	t.Run("before the first file", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		started := 0
+
+		archived, err := plan.Write(ctx, io.Discard, experiment.ZipHooks{OnStart: func(string) { started++ }})
+		if !errors.Is(err, context.Canceled) || len(archived) != 0 || started != 0 {
+			t.Errorf("Write(canceled) = %q, %v, %d files started; want none, %v", archived, err, started, context.Canceled)
+		}
+	})
+
+	t.Run("while copying a file", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var (
+			bytesIn int64
+			outcome []string
+		)
+
+		archived, err := plan.Write(ctx, io.Discard, experiment.ZipHooks{
+			OnBytes: func(n int64) {
+				bytesIn += n
+
+				cancel()
+			},
+			OnFile:     func(p string, _ error) { outcome = append(outcome, p) },
+			SkipFailed: true,
+		})
+		if !errors.Is(err, context.Canceled) || len(archived) != 0 || len(outcome) != 0 {
+			t.Errorf("Write(canceled while copying) = %q, %v, OnFile for %q; want none, %v", archived, err, outcome, context.Canceled)
+		}
+
+		if bytesIn >= plan.Sizes["big.gz"] {
+			t.Errorf("Write(canceled while copying) read %d bytes, want fewer than the file's %d", bytesIn, plan.Sizes["big.gz"])
+		}
+	})
+}
+
+// A file that grows while it is archived fails an archive without SkipFailed, as one grown before it is archived does.
+func TestZipPlanRefusesAFileThatGrowsWhileArchived(t *testing.T) { //nolint:paralleltest // replaces package state
+	useFilesDir(t, "grow", map[string]string{"during.gz": string(make([]byte, 40<<10))})
+	useListedFiles(t)
+
+	plan, err := experiment.PlanZip("grow", []string{"during.gz"}, zipLimits)
+	if err != nil {
+		t.Fatalf("PlanZip() error = %v", err)
+	}
+
+	grown := false
+
+	archived, err := plan.Write(t.Context(), io.Discard, experiment.ZipHooks{OnBytes: func(int64) {
+		if !grown {
+			grown = true
+
+			growFile(t, "grow", "during.gz", 1)
+		}
+	}})
+
+	if !errors.Is(err, experiment.ErrDownloadTooLarge) || !strings.Contains(err.Error(), "during.gz grew to more than") {
+		t.Errorf("Write() of a file grown while archived error = %v, want %v naming it", err, experiment.ErrDownloadTooLarge)
+	}
+
+	if len(archived) != 0 {
+		t.Errorf("Write() of a file grown while archived archived %q, want nothing", archived)
+	}
+}
+
+// filesFailingWriter takes ok writes, then fails every later one.
+type filesFailingWriter struct {
+	ok, writes int
+}
+
+func (w *filesFailingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > w.ok {
+		return 0, errors.New("client went away")
+	}
+
+	return len(p), nil
+}
+
+// A writer that fails ends the archive with an error naming the step it failed at, even with SkipFailed.
+func TestZipPlanWriteReportsWriterFailures(t *testing.T) { //nolint:paralleltest // replaces package state
+	// a file larger than the zip writer's buffer, stored as it is
+	big := string(make([]byte, 16<<10))
+	useFilesDir(t, "exp", map[string]string{"a.log": "alpha", "big.gz": big, "b.log": "beta"})
+	useListedFiles(t)
+
+	tests := []struct {
+		name         string
+		paths        []string
+		ok           int
+		skip         bool
+		want         string
+		wantArchived []string
+		wantFailed   []string // files OnFile reported failing
+	}{
+		{name: "the first flush", paths: []string{"a.log"}, want: "writing zip archive"},
+		{name: "the end of the archive", paths: []string{"a.log"}, ok: 1, want: "finishing zip archive", wantArchived: []string{"a.log"}},
+		{
+			name: "a large file, skipped, then the next file and the list of the missing", paths: []string{"big.gz", "b.log"},
+			skip: true, want: "adding MISSING.txt to zip archive", wantFailed: []string{"big.gz", "b.log"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := experiment.PlanZip("exp", tc.paths, zipLimits)
+			if err != nil {
+				t.Fatalf("PlanZip() error = %v", err)
+			}
+
+			var failed []string
+
+			archived, err := plan.Write(t.Context(), &filesFailingWriter{ok: tc.ok}, experiment.ZipHooks{
+				OnFile: func(p string, err error) {
+					if err != nil {
+						failed = append(failed, p)
+					}
+				},
+				SkipFailed: tc.skip,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "client went away") {
+				t.Errorf("Write() error = %v, want one containing %q", err, tc.want)
+			}
+
+			if diff := cmp.Diff(tc.wantArchived, archived, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Write() archived mismatch (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tc.wantFailed, failed, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Write() OnFile failures mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A file phenix cannot open is left out with SkipFailed and fails the archive without it.
+func TestZipPlanWriteUnreadableFile(t *testing.T) { //nolint:paralleltest // replaces package state
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a file of any mode")
+	}
+
+	useFilesDir(t, "exp", map[string]string{"a.log": "alpha", "secret.log": "x"})
+	useListedFiles(t)
+
+	plan, err := experiment.PlanZip("exp", []string{"secret.log", "a.log"}, zipLimits)
+	if err != nil {
+		t.Fatalf("PlanZip() error = %v", err)
+	}
+
+	if err := os.Chmod(filepath.Join(common.PhenixBase, "images", "exp", "files", "secret.log"), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+
+	archived, err := plan.Write(t.Context(), &buf, experiment.ZipHooks{SkipFailed: true})
+	if err != nil || !slices.Equal(archived, []string{"a.log"}) {
+		t.Errorf("Write(SkipFailed) = %q, %v; want [a.log], nil", archived, err)
+	}
+
+	entries := readZip(t, &buf)
+	if len(entries) != 2 || !strings.Contains(entries[1].Data, "secret.log: opening secret.log: ") {
+		t.Errorf("Write(SkipFailed) entries = %+v, want a.log and MISSING.txt naming secret.log", entries)
+	}
+
+	if _, err := plan.Write(t.Context(), io.Discard, experiment.ZipHooks{}); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Write() error = %v, want %v", err, os.ErrPermission)
+	}
 }

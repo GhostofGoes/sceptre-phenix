@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -269,52 +270,104 @@ func TestStartRefusesBrokenDisks(t *testing.T) { //nolint:paralleltest // replac
 	}
 }
 
-// A dry run starts an experiment with a broken disk and reports the problem as a warning.
+// A dry run starts an experiment with a broken disk and reports the problem as a warning, also for a VM the startup
+// app marks do not boot because its first disk image is missing.
 func TestStartDryRunWarnsOfBrokenDisks(t *testing.T) { //nolint:paralleltest // replaces package globals
-	image := t.TempDir() + "/a.qc2"
-	dct.WriteQcow2(t, image, dct.Qcow2{Backing: "a.qc2"})
-
-	storeDiskExperiment(t, image)
-	useStartMM(t, &startMM{})
-
-	ctx := notes.Context(t.Context(), false)
-
-	if err := Start(ctx, StartWithName("exp"), StartWithDryRun(true)); err != nil {
-		t.Fatalf("Start(dry run) error = %v, want none", err)
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, image string)
+		want  func(image string) string // the start of the warning
+		exact bool                      // whether it is the only warning, all of it
+	}{
+		{
+			name: "a backing chain that loops",
+			setup: func(t *testing.T, image string) {
+				t.Helper()
+				dct.WriteQcow2(t, image, dct.Qcow2{Backing: "a.qc2"})
+			},
+			want:  func(image string) string { return "VM a: disk " + image + ": backing chain loops back to " + image },
+			exact: true,
+		},
+		{
+			name:  "a missing image the startup app stops the VM for",
+			setup: func(*testing.T, string) {},
+			want:  func(image string) string { return "VM a: disk " + image + ": disk image " + image + " is missing" },
+		},
 	}
 
-	got := notes.Warnings(ctx, true)
-	warnings := make([]string, 0, len(got))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			image := t.TempDir() + "/a.qc2"
+			tc.setup(t, image)
 
-	for _, w := range got {
-		warnings = append(warnings, w.Error())
-	}
+			storeDiskExperiment(t, image)
+			useStartMM(t, &startMM{})
 
-	want := []string{"VM a: disk " + image + ": backing chain loops back to " + image}
-	if diff := cmp.Diff(want, warnings); diff != "" {
-		t.Errorf("Start(dry run) warnings mismatch (-want +got):\n%s", diff)
+			ctx := notes.Context(t.Context(), false)
+
+			if err := Start(ctx, StartWithName("exp"), StartWithDryRun(true)); err != nil {
+				t.Fatalf("Start(dry run) error = %v, want none", err)
+			}
+
+			got := notes.Warnings(ctx, true)
+			warnings := make([]string, 0, len(got))
+
+			for _, w := range got {
+				warnings = append(warnings, w.Error())
+			}
+
+			want := tc.want(image)
+
+			if tc.exact {
+				if diff := cmp.Diff([]string{want}, warnings); diff != "" {
+					t.Errorf("Start(dry run) warnings mismatch (-want +got):\n%s", diff)
+				}
+
+				return
+			}
+
+			if !slices.ContainsFunc(warnings, func(w string) bool { return strings.HasPrefix(w, want) }) {
+				t.Errorf("Start(dry run) warnings = %q, want one starting with %q", warnings, want)
+			}
+		})
 	}
 }
 
-// The startup app marks a VM whose first disk image is missing do not boot; the check still reports the image.
-func TestStartChecksVMTheStartupAppStops(t *testing.T) { //nolint:paralleltest // replaces package globals
-	image := t.TempDir() + "/gone.qc2"
-
-	storeDiskExperiment(t, image)
-	useStartMM(t, &startMM{})
-
-	ctx := notes.Context(t.Context(), false)
-
-	if err := Start(ctx, StartWithName("exp"), StartWithDryRun(true)); err != nil {
-		t.Fatalf("Start(dry run) error = %v, want none", err)
+// Start refuses an experiment it cannot find or that is already running before it runs an app or tells minimega
+// anything.
+func TestStartRefusesBeforeTheApps(t *testing.T) { //nolint:paralleltest // replaces package globals
+	tests := []struct {
+		name  string
+		exp   string
+		start string
+		want  string
+	}{
+		{name: "an experiment not in the store", exp: "missing", want: "getting experiment missing from store"},
+		{
+			name: "a running experiment", exp: "exp", start: stopTestStart,
+			want: "experiment already running (started at: " + stopTestStart + ")",
+		},
 	}
 
-	want := "VM a: disk " + image + ": disk image " + image + " is missing"
-	for _, w := range notes.Warnings(ctx, true) {
-		if strings.HasPrefix(w.Error(), want) {
-			return
-		}
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			storetest.Use(t)
+			storeExperiment(t, "exp", map[string]any{"startTime": tc.start})
 
-	t.Errorf("Start(dry run) warnings = %v, want one starting with %q", notes.Warnings(ctx, true), want)
+			fake := useStartMM(t, &startMM{readErr: errors.New("minimega got the script")})
+
+			err := Start(notes.Context(t.Context(), false), StartWithName(tc.exp))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Start(%s) error = %v, want one containing %q", tc.exp, err, tc.want)
+			}
+
+			if len(fake.cleared) != 0 {
+				t.Errorf("Start(%s) cleared namespaces %q, want none", tc.exp, fake.cleared)
+			}
+
+			if got := experimentNamed(t, "exp").Status.StartTime(); got != tc.start {
+				t.Errorf("stored start time after Start(%s) = %q, want %q", tc.exp, got, tc.start)
+			}
+		})
+	}
 }

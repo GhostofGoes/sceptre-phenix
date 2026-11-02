@@ -42,7 +42,7 @@ func colorTables(t *testing.T, render func(termcolor.Palette, *bytes.Buffer)) (s
 }
 
 // The Started column of a running experiment is green, its interrupted mark
-// yellow, and a stopped experiment's empty.
+// yellow, and a stopped experiment's empty, even when it was interrupted.
 func TestPrintTableOfExperimentsColors(t *testing.T) {
 	t.Parallel()
 
@@ -55,9 +55,17 @@ func TestPrintTableOfExperimentsColors(t *testing.T) {
 
 	stopped := types.NewExperiment(store.ConfigMetadata{Name: "stopped"})
 
-	_, colored := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) {
-		PrintTableOfExperiments(out, p, *running, *interrupted, *stopped)
+	// an interruption is shown only while the experiment runs
+	stoppedInterrupted := types.NewExperiment(store.ConfigMetadata{Name: "stopped-interrupted"})
+	stoppedInterrupted.Status.SetInterrupted("minimega could not list the VMs")
+
+	plain, colored := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) {
+		PrintTableOfExperiments(out, p, *running, *interrupted, *stopped, *stoppedInterrupted)
 	})
+
+	if got := strings.Count(plain, "(interrupted)"); got != 1 {
+		t.Errorf("experiments table has %d interrupted marks, want 1:\n%s", got, plain)
+	}
 
 	for _, want := range []string{"\x1b[32m2024-01-01T00:00:00Z\x1b[0m", "\x1b[33m(interrupted)\x1b[0m"} {
 		if !strings.Contains(colored, want) {
@@ -98,10 +106,14 @@ func TestPrintTableOfVMsColors(t *testing.T) {
 	if !strings.Contains(single, "\x1b[31mfalse\x1b[0m") {
 		t.Errorf("single VM table lacks a red false:\n%s", single)
 	}
+
+	if none, _ := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) { PrintTableOfVMs(out, p, true) }); none != "" {
+		t.Errorf("table of no VMs = %q, want nothing written", none)
+	}
 }
 
 // Each job state has its color in the jobs table, and in the job and item
-// table of one job.
+// table of one job; an unknown state has none.
 func TestPrintJobColors(t *testing.T) {
 	t.Parallel()
 
@@ -113,13 +125,15 @@ func TestPrintJobColors(t *testing.T) {
 		{ID: "j4", Status: job.StatusPartial, Created: created},
 		{ID: "j5", Status: job.StatusFailed, Created: created},
 		{ID: "j6", Status: job.StatusCanceled, Created: created},
+		// a state the palette does not know stays plain
+		{ID: "j8", Status: "mystery", Created: created},
 	}
 
 	_, colored := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) { PrintTableOfJobs(out, p, jobs...) })
 
 	for _, want := range []string{
 		"\x1b[2mqueued\x1b[22m", "\x1b[36mrunning\x1b[0m", "\x1b[32msucceeded\x1b[0m",
-		"\x1b[33mpartial\x1b[0m", "\x1b[31mfailed\x1b[0m", "\x1b[33mcanceled\x1b[0m",
+		"\x1b[33mpartial\x1b[0m", "\x1b[31mfailed\x1b[0m", "\x1b[33mcanceled\x1b[0m", "| mystery ",
 	} {
 		if !strings.Contains(colored, want) {
 			t.Errorf("colored jobs table lacks %q:\n%s", want, colored)

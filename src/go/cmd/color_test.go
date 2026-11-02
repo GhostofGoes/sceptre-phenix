@@ -14,6 +14,7 @@ import (
 	"pgregory.net/rapid"
 
 	"phenix/api/workflow"
+	"phenix/util/termcolor"
 )
 
 // ansiCodes matches the escape codes the palettes write.
@@ -116,13 +117,55 @@ func TestPrintCommandError(t *testing.T) { //nolint:paralleltest // sets PHENIX_
 	}
 }
 
-// colorMode refuses a value other than the three modes, naming the options.
-func TestColorModeRefusesUnknown(t *testing.T) { //nolint:paralleltest // sets PHENIX_COLOR
-	t.Setenv("PHENIX_COLOR", "yes")
+// colorMode reads the three modes, and auto when the setting is empty. It refuses any other value as auto, with an
+// error that names the options.
+func TestColorMode(t *testing.T) { //nolint:paralleltest // sets PHENIX_COLOR
+	tests := map[string]struct {
+		color   string
+		want    termcolor.Mode
+		wantErr bool
+	}{
+		"empty":      {color: "", want: termcolor.Auto},
+		"auto":       {color: "auto", want: termcolor.Auto},
+		"on":         {color: "on", want: termcolor.On},
+		"off":        {color: "off", want: termcolor.Off},
+		"capitals":   {color: "ON", want: termcolor.Auto, wantErr: true},
+		"yes":        {color: "yes", want: termcolor.Auto, wantErr: true},
+		"with space": {color: " on", want: termcolor.Auto, wantErr: true},
+	}
 
-	_, err := colorMode()
-	if err == nil || !strings.Contains(err.Error(), colorOptions) {
-		t.Errorf("colorMode() error = %v, want one that lists %q", err, colorOptions)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PHENIX_COLOR", tc.color)
+
+			got, err := colorMode()
+
+			switch {
+			case got != tc.want:
+				t.Errorf("colorMode() = %q, want %q", got, tc.want)
+			case tc.wantErr && (!errors.Is(err, termcolor.ErrUnknownMode) || !strings.Contains(err.Error(), colorOptions)):
+				t.Errorf("colorMode() error = %v, want an unknown mode that lists %q", err, colorOptions)
+			case !tc.wantErr && err != nil:
+				t.Errorf("colorMode() error = %v, want none", err)
+			}
+		})
+	}
+}
+
+// outputPalette colors only with --color on, or a refused --color as auto does, which leaves a buffer plain.
+func TestOutputPalette(t *testing.T) { //nolint:paralleltest // sets PHENIX_COLOR
+	tests := map[string]string{"on": "\x1b[31mx\x1b[0m", "off": "x", "auto": "x", "sometimes": "x"}
+
+	for color, want := range tests {
+		t.Run(color, func(t *testing.T) {
+			t.Setenv("PHENIX_COLOR", color)
+
+			var out bytes.Buffer
+
+			if got := outputPalette(&out).Red("x"); got != want {
+				t.Errorf("outputPalette().Red(x) = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

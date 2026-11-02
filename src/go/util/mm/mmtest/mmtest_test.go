@@ -2,14 +2,22 @@ package mmtest_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"path"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
+	"github.com/sandia-minimega/minimega/v2/pkg/miniclient"
 
+	"phenix/util/common"
 	"phenix/util/mm/mmcli"
 	"phenix/util/mm/mmtest"
 )
@@ -221,5 +229,151 @@ func TestUseRefusesAnotherTestAtTheSameTime(t *testing.T) {
 	if first.failed || !during.failed || after.failed {
 		t.Errorf("Use as %q failed = %v, then as %q while it runs = %v and after it ended = %v, want false, true, false",
 			first.name, first.failed, during.name, during.failed, after.failed)
+	}
+}
+
+func TestResponses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		got  *minicli.Response
+		want *minicli.Response
+	}{
+		{name: "Text", got: mmtest.Text("h1", "body"), want: &minicli.Response{Host: "h1", Response: "body"}},
+		{name: "empty Text", got: mmtest.Text("", ""), want: &minicli.Response{}},
+		{name: "Error", got: mmtest.Error("h2", "failed"), want: &minicli.Response{Host: "h2", Error: "failed"}},
+		{
+			name: "Tabular",
+			got:  mmtest.Tabular("h3", []string{"name"}, []string{"vm1"}, []string{"vm2"}),
+			want: &minicli.Response{Host: "h3", Header: []string{"name"}, Tabular: [][]string{{"vm1"}, {"vm2"}}},
+		},
+		{name: "Tabular without rows", got: mmtest.Tabular("h4", nil), want: &minicli.Response{Host: "h4"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, tc.got); diff != "" {
+				t.Errorf("mmtest.%s mismatch (-want +got):\n%s", tc.name, diff)
+			}
+		})
+	}
+}
+
+// Truncated adds its marker to a copy, leaving the caller's responses alone,
+// and Disconnect is a reply of its own.
+func TestTruncatedAndDisconnect(t *testing.T) {
+	t.Parallel()
+
+	resps := []*minicli.Response{mmtest.Text("h", "a"), mmtest.Text("h", "b")}
+	reply := mmtest.Truncated(slices.Clip(resps)...)
+
+	if len(reply) != 3 || reply[0] != resps[0] || reply[1] != resps[1] {
+		t.Errorf("Truncated(%d responses) = %d responses, want them followed by its marker", len(resps), len(reply))
+	}
+
+	if len(resps) != 2 || cap(resps) != 2 {
+		t.Errorf("Truncated changed its argument to len %d, cap %d; want 2, 2", len(resps), cap(resps))
+	}
+
+	if got := mmtest.Truncated(); len(got) != 1 {
+		t.Errorf("Truncated() = %d responses, want only its marker", len(got))
+	}
+
+	if got := mmtest.Disconnect(); len(got) != 1 || got[0] == reply[2] {
+		t.Errorf("Disconnect() = %v, want one marker that is not Truncated's", got)
+	}
+}
+
+// mmtestDial connects to the fake minimega's socket as miniclient does.
+func mmtestDial(t *testing.T) net.Conn {
+	t.Helper()
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(t.Context(), "unix", path.Join(common.MinimegaBase, "minimega"))
+	if err != nil {
+		t.Fatalf("dialing the fake minimega: %v", err)
+	}
+
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	return conn
+}
+
+// The fake strips the prefixes mmcli adds, in any order and number, to find
+// a command's namespace and base, and leaves anything else in the base.
+func TestFakeParsesCommands(t *testing.T) {
+	received := mmtest.Use(t, nil)
+
+	tests := []struct {
+		raw, namespace, base string
+	}{
+		{raw: "vm info", base: "vm info"},
+		{raw: "", base: ""},
+		{
+			raw:       `.record false namespace "exp" .columns "name","src port" .filter 'src port'=22 .filter name=vm1 vm info`,
+			namespace: "exp", base: "vm info",
+		},
+		{raw: `namespace "" vm start all`, base: "vm start all"},
+		{raw: `.columns "name" namespace "a b" vm info`, namespace: "a b", base: "vm info"},
+		{raw: `namespace exp vm info`, base: `namespace exp vm info`},
+		{raw: `.filter name=vm1`, base: `.filter name=vm1`},
+		{raw: `.record true vm info`, base: `.record true vm info`},
+		{raw: `vm info .filter name=vm1 `, base: `vm info .filter name=vm1 `},
+	}
+
+	conn := mmtestDial(t)
+	enc, dec := json.NewEncoder(conn), json.NewDecoder(conn)
+
+	for _, tc := range tests {
+		if err := enc.Encode(miniclient.Request{Command: tc.raw}); err != nil {
+			t.Fatalf("sending %q: %v", tc.raw, err)
+		}
+
+		var resp miniclient.Response
+		if err := dec.Decode(&resp); err != nil {
+			t.Fatalf("reading the answer to %q: %v", tc.raw, err)
+		}
+
+		// nil answers with one empty success from head
+		want := miniclient.Response{Resp: minicli.Responses{{Host: "head"}}}
+		if diff := cmp.Diff(want, resp); diff != "" {
+			t.Errorf("answer to %q mismatch (-want +got):\n%s", tc.raw, diff)
+		}
+	}
+
+	want := make([]mmtest.Command, 0, len(tests))
+	for _, tc := range tests {
+		want = append(want, mmtest.Command{Raw: tc.raw, Namespace: tc.namespace, Base: tc.base})
+	}
+
+	if diff := cmp.Diff(want, received()); diff != "" {
+		t.Errorf("received() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The fake closes a connection that sends something other than a command,
+// without recording anything.
+func TestFakeClosesAConnectionSendingGarbage(t *testing.T) {
+	received := mmtest.Use(t, nil)
+	conn := mmtestDial(t)
+
+	if _, err := conn.Write([]byte("not json\n")); err != nil {
+		t.Fatalf("writing to the fake minimega: %v", err)
+	}
+
+	if n, err := conn.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Errorf("reading after garbage = %d bytes, %v; want 0, %v", n, err, io.EOF)
+	}
+
+	if got := received(); len(got) != 0 {
+		t.Errorf("received() after garbage = %+v, want nothing", got)
 	}
 }

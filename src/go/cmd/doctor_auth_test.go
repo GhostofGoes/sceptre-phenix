@@ -154,9 +154,13 @@ func TestProxyJWTCheck(t *testing.T) {
 	}
 
 	for endpoint, want := range tests {
-		if diff := cmp.Diff(want, proxyJWTCheck(endpoint)); diff != "" {
-			t.Errorf("proxyJWTCheck(%q) mismatch (-want +got):\n%s", endpoint, diff)
-		}
+		t.Run(endpoint, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(want, proxyJWTCheck(endpoint)); diff != "" {
+				t.Errorf("proxyJWTCheck(%q) mismatch (-want +got):\n%s", endpoint, diff)
+			}
+		})
 	}
 }
 
@@ -191,9 +195,13 @@ func TestProxyHeaderCheck(t *testing.T) {
 	}
 
 	for name, tc := range tests {
-		if diff := cmp.Diff(tc.want, proxyHeaderCheck(env, tc.header, tc.key)); diff != "" {
-			t.Errorf("%s: proxyHeaderCheck(%q, key) mismatch (-want +got):\n%s", name, tc.header, diff)
-		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, proxyHeaderCheck(env, tc.header, tc.key)); diff != "" {
+				t.Errorf("proxyHeaderCheck(%q, key) mismatch (-want +got):\n%s", tc.header, diff)
+			}
+		})
 	}
 }
 
@@ -215,5 +223,109 @@ func TestJWTLifetimeCheck(t *testing.T) {
 		if read := viperWith("k", value).GetDuration("k"); (read >= minJWTLifetime) != (got.Status == doctorPass) {
 			t.Errorf("jwtLifetimeCheck(%q) = %s, but viper reads %s", value, got.Status, read)
 		}
+	}
+}
+
+// The JWT signing key gives the authentication mode, and a dev| key fails
+// when it does not parse and warns when its role is not built in. No row
+// shows the key.
+func TestDoctorAuthJWTKeyCheck(t *testing.T) {
+	t.Parallel()
+
+	roles := builtinRoles()
+	devAuth := "a dev| key, so phenix ui uses development authentication"
+
+	tests := map[string]struct {
+		key    string
+		roles  []string
+		want   doctorStatus
+		detail string
+	}{
+		"empty": {
+			key: "", roles: roles, want: doctorWarn, detail: "empty, so phenix ui serves without authentication",
+		},
+		"secret": {key: "s3cr3t-key", roles: roles, want: doctorPass, detail: "set, so phenix ui requires sign-in"},
+		"proxy JWTs": {
+			key: proxyJWTKey, roles: roles, want: doctorPass, detail: "proxy-jwt, so phenix ui trusts JWTs from the proxy",
+		},
+		"dev key":                  {key: "dev|alice|global-admin", roles: roles, want: doctorWarn, detail: devAuth},
+		"dev key, roles not known": {key: "dev|alice|wizard", want: doctorWarn, detail: devAuth},
+		"dev key, role not built in": {
+			key: "dev|alice|wizard", roles: roles, want: doctorWarn,
+			detail: "a dev| key whose role is not built in, so phenix ui refuses every request unless the store holds the role",
+		},
+		"dev key without a role": {
+			key: "dev|alice", roles: roles, want: doctorFail,
+			detail: "a dev| key that is not dev|<user>|<role>, so phenix ui refuses every request",
+		},
+		"dev key, empty user": {
+			key: "dev||global-admin", roles: roles, want: doctorFail,
+			detail: "a dev| key that is not dev|<user>|<role>, so phenix ui refuses every request",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			want := doctorCheck{Name: "ui.jwt-signing-key", Status: tc.want, Detail: tc.detail}
+			got := jwtKeyCheck(tc.key, tc.roles)
+
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("jwtKeyCheck() mismatch (-want +got):\n%s", diff)
+			}
+
+			if tc.key != "" && tc.key != proxyJWTKey && strings.Contains(got.Detail, tc.key) {
+				t.Errorf("jwtKeyCheck() detail %q shows the key", got.Detail)
+			}
+		})
+	}
+}
+
+// PHENIX_UI_USERS gives one row: the count of users, or each problem joined,
+// failing when any entry fails. No row shows a password.
+func TestDoctorAuthUsersCheck(t *testing.T) {
+	t.Parallel()
+
+	roles := builtinRoles()
+
+	tests := map[string]struct {
+		value string
+		want  doctorCheck
+	}{
+		"empty":    {value: "", want: passCheck("0 users")},
+		"one user": {value: "alice:Alicepass1!:global-admin", want: passCheck("1 user")},
+		"split on spaces": {
+			value: "  alice:Alicepass1!:global-admin\tbob:Bobpass1!:vm-viewer:exp1 ", want: passCheck("2 users"),
+		},
+		"warnings only": {
+			value: "alice:Alicepass1!:wizard bob:Bobpass1!:wizard",
+			want: warnCheck(`user 1 ("alice") has a role that is not built in, so phenix ui skips the user unless the ` +
+				`store holds the role. user 2 ("bob") has a role that is not built in, so phenix ui skips the user ` +
+				`unless the store holds the role`),
+		},
+		"a failure": {
+			value: "alice:Alicepass1!:wizard bob:Bobpass1!",
+			want: doctorCheck{Status: doctorFail, Detail: `user 1 ("alice") has a role that is not built in, so phenix ` +
+				`ui skips the user unless the store holds the role. default user 2 ("bob") is not ` +
+				`name:password:role[:resource...], so phenix ui skips it`},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := usersCheck(tc.value, roles)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("usersCheck(%q) mismatch (-want +got):\n%s", tc.value, diff)
+			}
+
+			for _, password := range []string{"Alicepass1!", "Bobpass1!"} {
+				if strings.Contains(got.Detail, password) {
+					t.Errorf("usersCheck(%q) row %q shows the password %s", tc.value, got.Detail, password)
+				}
+			}
+		})
 	}
 }

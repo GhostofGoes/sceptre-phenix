@@ -118,12 +118,118 @@ func TestBrokenImagesWhenCanceled(t *testing.T) {
 	}
 }
 
-// A folder that does not exist fails the scan.
-func TestBrokenImagesMissingFolder(t *testing.T) {
+// A folder that does not exist fails the scan; an empty folder, or a file given as the folder, holds no image.
+func TestBrokenImagesEdgeFolders(t *testing.T) {
 	t.Parallel()
 
-	_, err := BrokenImages(t.Context(), filepath.Join(t.TempDir(), "none"))
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("BrokenImages() error = %v, want os.ErrNotExist", err)
+	tests := map[string]struct {
+		dir     func(t *testing.T) string
+		wantErr error
+	}{
+		"a missing folder": {
+			dir:     func(t *testing.T) string { t.Helper(); return filepath.Join(t.TempDir(), "none") },
+			wantErr: os.ErrNotExist,
+		},
+		"an empty folder": {dir: func(t *testing.T) string { t.Helper(); return t.TempDir() }},
+		"a file": {
+			dir: func(t *testing.T) string {
+				t.Helper()
+
+				path := filepath.Join(t.TempDir(), "a.qc2")
+				dct.WriteQcow2(t, path, dct.Qcow2{Backing: "/gone"})
+
+				return path
+			},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := BrokenImages(t.Context(), tt.dir(t))
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("BrokenImages(%s) error = %v, want %v", name, err, tt.wantErr)
+			}
+
+			if diff := cmp.Diff(ChainScan{}, got); diff != "" {
+				t.Errorf("BrokenImages(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// formatOf names only what the image's own header shows: a refusal or external data file at the image, an old or
+// unchecked format, corruption and recent features. A dirty image, or anything a backing file shows, is no format issue.
+func TestFormatOf(t *testing.T) {
+	t.Parallel()
+
+	const (
+		image = "/f/a.qc2"
+		base  = "/f/base.qc2"
+	)
+
+	note := func(path string, kind diskchain.NoteKind) diskchain.Note {
+		return diskchain.Note{Path: path, Kind: kind}
+	}
+
+	tests := map[string]struct {
+		res    diskchain.Result
+		want   FormatImage
+		wantOK bool
+	}{
+		"a whole chain": {res: diskchain.Result{Members: []string{image}}},
+		"a dirty image": {res: diskchain.Result{Members: []string{image}, Notes: []diskchain.Note{note(image, diskchain.Dirty)}}},
+		"a refused image": {
+			res:    diskchain.Result{Members: []string{image}, Problem: diskchain.LUKSEncrypted, At: image},
+			want:   FormatImage{Problem: image + " uses LUKS encryption, and phenix cannot give qemu its key"},
+			wantOK: true,
+		},
+		"a refused backing file": {
+			res: diskchain.Result{Members: []string{image, base}, Problem: diskchain.BadVersion, At: base, Detail: "4"},
+		},
+		"an external data file": {
+			res:    diskchain.Result{Members: []string{image}, Problem: diskchain.DataFile, At: image},
+			want:   FormatImage{Needs: []QemuNeed{{Feature: "an external data file", Version: minDataFileQemu}}},
+			wantOK: true,
+		},
+		"an external data file of a backing file": {
+			res: diskchain.Result{Members: []string{image, base}, Problem: diskchain.DataFile, At: base},
+		},
+		"old and unchecked formats": {
+			res: diskchain.Result{Members: []string{image}, Notes: []diskchain.Note{
+				note(image, diskchain.Qcow2V2), note(base, diskchain.QcowV1),
+			}},
+			want:   FormatImage{Kind: diskchain.Qcow2V2},
+			wantOK: true,
+		},
+		"a qed image": {
+			res:    diskchain.Result{Members: []string{image}, Notes: []diskchain.Note{note(image, diskchain.QED)}},
+			want:   FormatImage{Kind: diskchain.QED},
+			wantOK: true,
+		},
+		"a corrupt image that needs a recent qemu": {
+			res: diskchain.Result{Members: []string{image}, Notes: []diskchain.Note{
+				note(image, diskchain.Corrupt), note(image, diskchain.ExtendedL2), note(base, diskchain.Zstd),
+			}},
+			want: FormatImage{
+				Problem: "qemu marked " + image + " as corrupt",
+				Needs:   []QemuNeed{{Feature: "extended L2 entries", Version: "5.2"}},
+			},
+			wantOK: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := formatOf(image, tt.res)
+
+			tt.want.Path = image
+			if diff := cmp.Diff(tt.want, got); diff != "" || ok != tt.wantOK {
+				t.Errorf("formatOf(%s) = _, %t, want %t; mismatch (-want +got):\n%s", image, ok, tt.wantOK, diff)
+			}
+		})
 	}
 }

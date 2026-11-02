@@ -14,46 +14,92 @@ import (
 	"phenix/util/mm/mmtest"
 )
 
+// testBridge is the bridge name in the minimega commands that the tests compile.
+const testBridge = "phenix"
+
 func TestValidateArg(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		value               string
-		wantBare, wantQuote bool // whether each accepts it
+		wantBare, wantQuote bool   // whether each accepts it
+		wantRune            string // the rune the error names, if any
 	}{
 		{value: "EXP_1", wantBare: true, wantQuote: true},
 		{value: "ns//vlan-1.a", wantBare: true, wantQuote: true},
+		{value: "ünïcode-✓", wantBare: true, wantQuote: true},
+		{value: "file", wantBare: true, wantQuote: true},
+		{value: "mailto:x", wantBare: true, wantQuote: true},
+		{value: "ftp://example.com/x", wantBare: true, wantQuote: true},
 		{value: "", wantBare: false, wantQuote: true},
-		{value: "two words", wantBare: false, wantQuote: true},
-		{value: "a#b", wantBare: false, wantQuote: true},
-		{value: "it's", wantBare: false, wantQuote: true},
-		{value: "line\nbreak", wantBare: false, wantQuote: true},
-		{value: `say "hi"`, wantBare: false, wantQuote: false},
-		{value: `back\slash`, wantBare: false, wantQuote: false},
-		{value: "$HOME", wantBare: false, wantQuote: false},
-		{value: "bell\a", wantBare: false, wantQuote: false},
+		{value: "two words", wantBare: false, wantQuote: true, wantRune: "' '"},
+		{value: "tab\there", wantBare: false, wantQuote: true, wantRune: `'\t'`},
+		{value: "no\u00a0break", wantBare: false, wantQuote: true, wantRune: `'\u00a0'`},
+		{value: "a#b", wantBare: false, wantQuote: true, wantRune: "'#'"},
+		{value: "it's", wantBare: false, wantQuote: true, wantRune: `'\''`},
+		{value: "line\nbreak", wantBare: false, wantQuote: true, wantRune: `'\n'`},
+		{value: `say "hi"`, wantBare: false, wantQuote: false, wantRune: "' '"},
+		{value: `say"hi"`, wantBare: false, wantQuote: false, wantRune: `'"'`},
+		{value: `back\slash`, wantBare: false, wantQuote: false, wantRune: `'\\'`},
+		{value: "$HOME", wantBare: false, wantQuote: false, wantRune: "'$'"},
+		{value: "bell\a", wantBare: false, wantQuote: false, wantRune: `'\a'`},
+		{value: "carriage\rreturn", wantBare: false, wantQuote: false},
+		{value: "nul\x00", wantBare: false, wantQuote: false, wantRune: `'\x00'`},
+		{value: "del\x7f", wantBare: false, wantQuote: false, wantRune: `'\x7f'`},
 		{value: "\xff", wantBare: false, wantQuote: false},
 		{value: "http://example.com/x", wantBare: false, wantQuote: false},
+		{value: "HTTPS://example.com/x", wantBare: false, wantQuote: false},
 		{value: "FILE:disk.qcow2", wantBare: false, wantQuote: false},
 		{value: "tar:a.tar", wantBare: false, wantQuote: false},
-		{value: "ftp://example.com/x", wantBare: true, wantQuote: true},
 	} {
-		if err := ValidateArg(tc.value); (err == nil) != tc.wantBare || (err != nil && !errors.Is(err, ErrUnsafeArg)) {
-			t.Errorf("ValidateArg(%q) = %v, want accepted %t", tc.value, err, tc.wantBare)
-		}
+		t.Run(tc.value, func(t *testing.T) {
+			t.Parallel()
 
-		if err := ValidateQuotedArg(tc.value); (err == nil) != tc.wantQuote || (err != nil && !errors.Is(err, ErrUnsafeArg)) {
-			t.Errorf("ValidateQuotedArg(%q) = %v, want accepted %t", tc.value, err, tc.wantQuote)
-		}
+			bare, quoted := ValidateArg(tc.value), ValidateQuotedArg(tc.value)
+
+			if (bare == nil) != tc.wantBare || (bare != nil && !errors.Is(bare, ErrUnsafeArg)) {
+				t.Errorf("ValidateArg(%q) = %v, want accepted %t", tc.value, bare, tc.wantBare)
+			}
+
+			if (quoted == nil) != tc.wantQuote || (quoted != nil && !errors.Is(quoted, ErrUnsafeArg)) {
+				t.Errorf("ValidateQuotedArg(%q) = %v, want accepted %t", tc.value, quoted, tc.wantQuote)
+			}
+
+			if tc.wantRune != "" && (bare == nil || !strings.HasSuffix(bare.Error(), " contains "+tc.wantRune)) {
+				t.Errorf("ValidateArg(%q) = %v, want it to name %s", tc.value, bare, tc.wantRune)
+			}
+		})
 	}
 }
 
-func TestValidateTagsNamesTheBadTag(t *testing.T) {
+func TestValidateTags(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateTags(map[string]string{"a": "1", "b": `"x" "y"`, "c": "$c"})
-	if !errors.Is(err, ErrUnsafeArg) || !strings.Contains(err.Error(), `tag "b"`) {
-		t.Errorf("ValidateTags(b and c unsafe) = %v, want %v naming tag b first", err, ErrUnsafeArg)
+	for name, tc := range map[string]struct {
+		tags    map[string]string
+		wantErr string // the error's prefix, "" for none
+	}{
+		"no tags":            {tags: nil},
+		"empty tags":         {tags: map[string]string{}},
+		"safe tags":          {tags: map[string]string{"a": "1", "two words": "it's #1", "": ""}},
+		"unsafe value":       {tags: map[string]string{"a": "1", "b": `"x" "y"`}, wantErr: `value of tag "b": `},
+		"unsafe key":         {tags: map[string]string{"a": "1", "$b": "2"}, wantErr: "tag key: "},
+		"first in key order": {tags: map[string]string{"a": "1", "b": `"x" "y"`, "c": "$c"}, wantErr: `value of tag "b": `},
+		"key before value":   {tags: map[string]string{"$a": "$1"}, wantErr: "tag key: "},
+		"URL value":          {tags: map[string]string{"a": "http://x"}, wantErr: `value of tag "a": `},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateTags(tc.tags)
+
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("ValidateTags(%q) = %v, want nil", tc.tags, err)
+			case tc.wantErr != "" && (!errors.Is(err, ErrUnsafeArg) || !strings.HasPrefix(err.Error(), tc.wantErr)):
+				t.Errorf("ValidateTags(%q) = %v, want %v starting with %q", tc.tags, err, ErrUnsafeArg, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -90,7 +136,7 @@ func TestValidateArgProperties(t *testing.T) { //nolint:paralleltest // minicli'
 
 		if ValidateArg(value) == nil {
 			cmd, err := minicli.Compile("vm net connect vm1 1 " + value + " phenix")
-			if err != nil || cmd == nil || cmd.StringArgs["vlan"] != value || cmd.StringArgs["bridge"] != "phenix" {
+			if err != nil || cmd == nil || cmd.StringArgs["vlan"] != value || cmd.StringArgs["bridge"] != testBridge {
 				t.Fatalf("ValidateArg(%q) accepted a value minimega reads as %#v (error %v)", value, cmd, err)
 			}
 		}

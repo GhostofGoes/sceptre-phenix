@@ -3,6 +3,10 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 
@@ -328,5 +332,270 @@ func TestScreenshotSentBeforeListIsResent(t *testing.T) {
 
 	if diff := cmp.Diff([]string{"screenshot exp/vm1"}, order()); diff != "" {
 		t.Errorf("messages sent after the list mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// pushFrames stops once ctx ends, takes no screenshot for clients that left,
+// and skips a screenshot it cannot take, logging only unexpected errors.
+//
+//nolint:paralleltest // replaces the client's dependencies and the frame cache
+func TestPushFramesSkips(t *testing.T) {
+	boom := errors.New("boom")
+
+	tests := map[string]struct {
+		cancelFirst bool
+		leave       bool
+		// the error the screenshot of vm1 fails with; cancel ends ctx first
+		vm1Err    error
+		cancel    bool
+		wantAsked []string
+		wantSent  map[string]string
+		wantLogs  []string
+	}{
+		"every screenshot": {
+			wantAsked: []string{"vm1", "vm2"},
+			wantSent:  map[string]string{"exp/vm1": "data:image/png;base64,b25l", "exp/vm2": "data:image/png;base64,dHdv"},
+		},
+		"ctx ended before":  {cancelFirst: true, wantSent: map[string]string{}},
+		"every viewer left": {leave: true, wantSent: map[string]string{}},
+		"a VM minimega does not have": {
+			vm1Err: mm.ErrVMNotFound, wantAsked: []string{"vm1", "vm2"},
+			wantSent: map[string]string{"exp/vm2": "data:image/png;base64,dHdv"},
+		},
+		"a VM without a screenshot": {
+			vm1Err: fmt.Errorf("wrapped: %w", mm.ErrScreenshotNotFound), wantAsked: []string{"vm1", "vm2"},
+			wantSent: map[string]string{"exp/vm2": "data:image/png;base64,dHdv"},
+		},
+		"another error": {
+			vm1Err: boom, wantAsked: []string{"vm1", "vm2"},
+			wantSent: map[string]string{"exp/vm2": "data:image/png;base64,dHdv"},
+			wantLogs: []string{"ERROR getting screenshot for WebSocket client err=boom"},
+		},
+		"ctx ended during a screenshot": {
+			vm1Err: context.Canceled, cancel: true, wantAsked: []string{"vm1"}, wantSent: map[string]string{},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useFakeShots(t, nil)
+
+			logged := brokerCaptureLogs(t, "error", "getting screenshot")
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var (
+				mu    sync.Mutex
+				asked []string
+			)
+
+			deps.screenshot = func(_ context.Context, _, vm, _ string) ([]byte, error) {
+				mu.Lock()
+				asked = append(asked, vm)
+				mu.Unlock()
+
+				if vm == "vm1" && tc.vm1Err != nil {
+					if tc.cancel {
+						cancel()
+					}
+
+					return nil, tc.vm1Err
+				}
+
+				return []byte(map[string]string{"vm1": "one", "vm2": "two"}[vm]), nil
+			}
+
+			c := viewer("200", "vm1", "vm2")
+			wanted := wantedShots([]*Client{c})
+
+			if tc.leave {
+				close(c.done)
+			}
+
+			if tc.cancelFirst {
+				cancel()
+			}
+
+			pushFrames(ctx, wanted)
+
+			if diff := cmp.Diff(tc.wantAsked, asked); diff != "" {
+				t.Errorf("screenshots asked for mismatch (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tc.wantSent, shotsOf(t, c)); diff != "" {
+				t.Errorf("screenshots sent mismatch (-want +got):\n%s", diff)
+			}
+
+			if diff := cmp.Diff(tc.wantLogs, logged()); diff != "" {
+				t.Errorf("errors logged mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// sendFrame sends a frame only to a client showing the VM running at the
+// frame's width, once per picture, and keeps it for the next round when the
+// client's queue is full.
+func TestSendFrame(t *testing.T) {
+	t.Parallel()
+
+	key := shotKey{exp: "exp", vm: "vm1", width: "200"}
+	f := frame{hash: pngHash{1}, msg: encodedPublish{data: []byte("one")}}
+
+	tests := map[string]struct {
+		client   func() *Client
+		wantSent bool
+		// the hash the client keeps for vm1 after
+		wantLast *pngHash
+	}{
+		"a new frame":                   {client: func() *Client { return viewer("200", "vm1") }, wantSent: true, wantLast: &f.hash},
+		"a client at another width":     {client: func() *Client { return viewer("400", "vm1") }},
+		"a VM out of the client's view": {client: func() *Client { return viewer("200", "vm2") }},
+		"a VM stopped": {
+			client: func() *Client {
+				c := viewer("200")
+				c.vms = []vmScope{{exp: "exp", name: "vm1", running: false}}
+
+				return c
+			},
+		},
+		"the frame last sent": {
+			client: func() *Client {
+				c := viewer("200", "vm1")
+				c.sent = map[vmKey]pngHash{{exp: "exp", name: "vm1"}: f.hash}
+
+				return c
+			},
+			wantLast: &f.hash,
+		},
+		"a changed frame": {
+			client: func() *Client {
+				c := viewer("200", "vm1")
+				c.sent = map[vmKey]pngHash{{exp: "exp", name: "vm1"}: {2}}
+
+				return c
+			},
+			wantSent: true, wantLast: &f.hash,
+		},
+		"a full queue": {
+			client: func() *Client {
+				c := viewer("200", "vm1")
+				c.publish = make(chan any)
+
+				return c
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := tc.client()
+			c.sendFrame(key, f)
+
+			if got := len(c.publish) == 1; got != tc.wantSent {
+				t.Errorf("sendFrame() sent = %t, want %t", got, tc.wantSent)
+			}
+
+			var last *pngHash
+			if h, ok := c.sent[vmKey{exp: "exp", name: "vm1"}]; ok {
+				last = &h
+			}
+
+			if diff := cmp.Diff(tc.wantLast, last); diff != "" {
+				t.Errorf("sendFrame() last frame kept mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A screenshot that cannot be taken gives its error and leaves the frame
+// cache as it was.
+//
+//nolint:paralleltest // replaces the client's dependencies and the frame cache
+func TestFrameCacheGetError(t *testing.T) {
+	useFakeShots(t, nil)
+
+	key := shotKey{exp: "exp", vm: "vm1", width: "200"}
+	kept := frame{hash: pngHash{1}}
+	frames.frames[key] = kept
+
+	deps.screenshot = func(context.Context, string, string, string) ([]byte, error) { return nil, mm.ErrVMNotFound }
+
+	got, err := frames.get(context.Background(), key)
+	if !errors.Is(err, mm.ErrVMNotFound) {
+		t.Errorf("frames.get() error = %v, want %v", err, mm.ErrVMNotFound)
+	}
+
+	if diff := cmp.Diff(frame{}, got, cmp.AllowUnexported(frame{}, encodedPublish{})); diff != "" {
+		t.Errorf("frames.get() on error mismatch (-want +got):\n%s", diff)
+	}
+
+	if frames.frames[key].hash != kept.hash || len(frames.frames) != 1 {
+		t.Errorf("frames.get() on error changed the cache to %v", frames.frames)
+	}
+}
+
+// retain keeps only the frames of the screenshots wanted.
+func TestFrameCacheRetain(t *testing.T) {
+	t.Parallel()
+
+	keep, drop := shotKey{exp: "exp", vm: "vm1", width: "200"}, shotKey{exp: "exp", vm: "vm1", width: "400"}
+
+	tests := map[string]struct {
+		wanted map[shotKey][]*Client
+		want   []shotKey
+	}{
+		"some wanted": {wanted: map[shotKey][]*Client{keep: nil}, want: []shotKey{keep}},
+		"none wanted": {wanted: map[shotKey][]*Client{}, want: nil},
+		"nil wanted":  {wanted: nil, want: nil},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			fc := &frameCache{frames: map[shotKey]frame{keep: {}, drop: {}}}
+			fc.retain(tc.wanted)
+
+			got := slices.Collect(maps.Keys(fc.frames))
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(shotKey{})); diff != "" {
+				t.Errorf("retain() kept mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A screenshot message names the VM, carries the PNG as a data URL and has no
+// policy, as it goes only to the clients showing the VM.
+func TestEncodeFrame(t *testing.T) {
+	t.Parallel()
+
+	out, err := encodeFrame(shotKey{exp: "exp", vm: "vm1", width: "200"}, []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatalf("encodeFrame() error = %v", err)
+	}
+
+	var got struct {
+		Resource *bt.Resource      `json:"resource"`
+		Result   map[string]string `json:"result"`
+		Seq      uint64            `json:"seq"`
+	}
+	if err := json.Unmarshal(out.data, &got); err != nil {
+		t.Fatalf("decoding encodeFrame() data %s: %v", out.data, err)
+	}
+
+	if diff := cmp.Diff(bt.NewResource("experiment/vm/screenshot", "exp/vm1", "update"), got.Resource); diff != "" {
+		t.Errorf("encodeFrame() resource mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff(map[string]string{"screenshot": "data:image/png;base64,iVBORw=="}, got.Result); diff != "" {
+		t.Errorf("encodeFrame() result mismatch (-want +got):\n%s", diff)
+	}
+
+	if out.pub.RequestPolicy != nil || got.Seq == 0 {
+		t.Errorf("encodeFrame() policy = %v, seq = %d; want none and a seq", out.pub.RequestPolicy, got.Seq)
 	}
 }

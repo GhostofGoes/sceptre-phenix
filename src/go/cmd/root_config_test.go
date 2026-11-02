@@ -118,25 +118,94 @@ func TestReadConfigCreatesMissingFile(t *testing.T) {
 	}
 }
 
-// When the config directory cannot be created, readConfig says so instead of
-// carrying on without a word.
-func TestReadConfigReportsUncreatableDirectory(t *testing.T) {
+// When readConfig cannot create the config directory or file, or cannot read
+// the file it created, it says so instead of carrying on without a word.
+func TestRootConfigReadConfigFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		setup    func(t *testing.T, dir string) string // the directory to create the file in, which v does not search
+		wantWarn func(createDir string) string
+	}{
+		"directory cannot be created": {
+			setup: func(t *testing.T, dir string) string {
+				t.Helper()
+
+				return filepath.Join(writeTestFile(t, dir, "not-a-dir", ""), "phenix")
+			},
+			wantWarn: func(string) string { return "phenix: warning: creating config directory: " },
+		},
+		"file cannot be created": {
+			setup: func(t *testing.T, dir string) string {
+				t.Helper()
+
+				create := filepath.Join(dir, "phenix")
+				if err := os.MkdirAll(filepath.Join(create, "config.yaml"), 0o750); err != nil {
+					t.Fatalf("os.MkdirAll() error = %v", err)
+				}
+
+				return create
+			},
+			wantWarn: func(create string) string {
+				return "phenix: warning: creating config file " + filepath.Join(create, "config.yaml") + ": "
+			},
+		},
+		"created file not searched": {
+			setup: func(_ *testing.T, dir string) string { return filepath.Join(dir, "phenix") },
+			wantWarn: func(create string) string {
+				return "phenix: warning: ignoring config file " + filepath.Join(create, "config.yaml") + ": it is not readable: "
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			create := tc.setup(t, t.TempDir())
+			v := newSearchViper(t.TempDir())
+
+			var warn bytes.Buffer
+
+			if readConfig(v, create, &warn, nil) {
+				t.Fatalf("readConfig() = true, want false")
+			}
+
+			if want := tc.wantWarn(create); !strings.HasPrefix(warn.String(), want) || !strings.HasSuffix(warn.String(), "\n") {
+				t.Errorf("readConfig() warning = %q, want one line starting %q", warn.String(), want)
+			}
+		})
+	}
+}
+
+// A config file that stops parsing is ignored on reload with a warning, and
+// v keeps what it read before, with the users file merged again.
+func TestRootConfigReloadReportsBadFile(t *testing.T) {
 	t.Parallel()
 
 	var (
-		dir  = t.TempDir()
-		file = writeTestFile(t, dir, "not-a-dir", "")
-		warn bytes.Buffer
+		dir    = t.TempDir()
+		config = writeTestFile(t, dir, "config.yaml", "log:\n  level: info\n")
+		_      = writeTestFile(t, dir, "users.yaml", "ui:\n  users: [admin:pw:global-admin]\n")
+		v      = newSearchViper(dir)
+		warn   bytes.Buffer
 	)
 
-	v := newSearchViper(dir)
-
-	if readConfig(v, filepath.Join(file, "phenix"), &warn, nil) {
-		t.Fatalf("readConfig() = true, want false")
+	if watch, _ := loadConfigFiles(v, []string{dir}, dir, &warn, nil); !watch || warn.Len() != 0 {
+		t.Fatalf("loadConfigFiles() = %t, warning %q; want true and no warning", watch, warn.String())
 	}
 
-	if !strings.Contains(warn.String(), "phenix: warning: creating config directory") {
-		t.Errorf("readConfig() warning = %q, want one about the config directory", warn.String())
+	writeTestFile(t, dir, "config.yaml", "log:\n  level: debug\n bad: [\n")
+	reloadConfigFiles(v, []string{dir}, &warn, nil)
+
+	want := "phenix: warning: ignoring config file " + config + ": it does not parse at line 2\n"
+	if diff := cmp.Diff(want, warn.String()); diff != "" {
+		t.Errorf("reloadConfigFiles() warning mismatch (-want +got):\n%s", diff)
+	}
+
+	got := []string{v.GetString("log.level"), strings.Join(v.GetStringSlice("ui.users"), ",")}
+	if diff := cmp.Diff([]string{"info", "admin:pw:global-admin"}, got); diff != "" {
+		t.Errorf("settings after a bad reload mismatch (-want +got):\n%s", diff)
 	}
 }
 

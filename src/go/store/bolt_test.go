@@ -527,3 +527,207 @@ func TestBoltDBOpenTimeout(t *testing.T) {
 		t.Fatal("open waited for the file lock without a timeout")
 	}
 }
+
+// boltRawPut writes value at key in bucket of the BoltDB file at path,
+// creating the bucket, as a damaged or older file may hold it.
+func boltRawPut(t *testing.T, path, bucket, key string, value []byte) {
+	t.Helper()
+
+	db, err := bbolt.Open(path, boltFileMode, nil)
+	if err != nil {
+		t.Fatalf("bbolt.Open(%s) error = %v", path, err)
+	}
+
+	defer func() { _ = db.Close() }()
+
+	err = db.Update(func(tx *bbolt.Tx) error {
+		bkt, err := tx.CreateBucketIfNotExists([]byte(bucket))
+		if err != nil {
+			return err
+		}
+
+		if value == nil {
+			_, err = bkt.CreateBucketIfNotExists([]byte(key))
+
+			return err
+		}
+
+		return bkt.Put([]byte(key), value)
+	})
+	if err != nil {
+		t.Fatalf("writing %s/%s to %s error = %v", bucket, key, path, err)
+	}
+}
+
+// Init refuses an endpoint that is not bolt:// and a file it cannot create.
+func TestBoltInitErrors(t *testing.T) {
+	t.Parallel()
+
+	for name, endpoint := range map[string]string{
+		"etcd":           "etcd://localhost:2379",
+		"bad URL":        "bolt://%zz",
+		"missing folder": "bolt://" + filepath.Join(t.TempDir(), "missing", "store.bdb"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := new(BoltDB).Init(Endpoint(endpoint)); err == nil {
+				t.Errorf("BoltDB.Init(%s) error = nil, want one", endpoint)
+			}
+		})
+	}
+}
+
+// InitializeComponent fails, marking nothing, for a store whose file cannot
+// be opened or a component without a name.
+func TestBoltInitializeComponentErrors(t *testing.T) {
+	t.Parallel()
+
+	missing := &BoltDB{path: filepath.Join(t.TempDir(), "missing", "store.bdb")}
+	if err := missing.InitializeComponent(ComponentConfigs); err == nil {
+		t.Errorf("InitializeComponent(%s) without the store file error = nil, want one", ComponentConfigs)
+	}
+
+	b := newTestBolt(t, filepath.Join(t.TempDir(), "store.bdb"))
+	if err := b.InitializeComponent(""); err == nil {
+		t.Error(`InitializeComponent("") error = nil, want one`)
+	}
+
+	if b.IsInitialized("") || b.IsInitialized(ComponentConfigs) {
+		t.Error("IsInitialized() after failed InitializeComponent calls = true, want false")
+	}
+
+	// a mark other than 1 is not initialized
+	boltRawPut(t, b.path, "phenix", string(ComponentConfigs), []byte{2})
+
+	if b.IsInitialized(ComponentConfigs) {
+		t.Errorf("IsInitialized(%s) marked 2 = true, want false", ComponentConfigs)
+	}
+}
+
+// A config whose stored JSON is damaged fails every read of it, and every
+// write guarded by IfRevision, without changing the store.
+func TestBoltReportsDamagedConfigs(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBolt(t, filepath.Join(t.TempDir(), "store.bdb"))
+	boltRawPut(t, b.path, "Topology", "bad", []byte("{not json"))
+
+	guarded := func() *Config {
+		c := newTestConfig(t, "topology/bad")
+		c.IfRevision = 1
+
+		return c
+	}
+
+	for name, operation := range map[string]func() error{
+		"List(Topology)": func() error {
+			_, err := b.List("Topology")
+
+			return err
+		},
+		"Get(topology/bad)":                  func() error { return b.Get(newTestConfig(t, "topology/bad")) },
+		"Update(topology/bad, IfRevision 1)": func() error { return b.Update(guarded()) },
+		"Delete(topology/bad, IfRevision 1)": func() error { return b.Delete(guarded()) },
+	} {
+		err := operation()
+		if err == nil || errors.Is(err, ErrConflict) || errors.Is(err, ErrNotExist) {
+			t.Errorf("%s of damaged JSON error = %v, want an unmarshaling error", name, err)
+		}
+	}
+
+	// a write without IfRevision replaces it
+	if err := b.Update(newTestConfig(t, "topology/bad")); err != nil {
+		t.Errorf("Update(topology/bad) of damaged JSON error = %v, want nil", err)
+	}
+}
+
+// A write the store cannot make fails, leaving the store and the caller's
+// metadata as they were; an update or delete of a name its kind lacks does
+// not exist.
+func TestBoltRefusedWrites(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		// a raw entry to write first: a bucket in place of a nil value
+		bucket, key string
+		value       []byte
+		// the config to write: topology/a, without a kind, with spec
+		noKind bool
+		spec   map[string]any
+		write  func(b *BoltDB, c *Config) error
+		// the error the write wraps, if a known one
+		wantErr error
+	}{
+		"create without a kind": {noKind: true, write: (*BoltDB).Create},
+		"create of a spec that is not JSON": {
+			spec: map[string]any{"ch": make(chan int)}, write: (*BoltDB).Create,
+		},
+		"create with a damaged revision counter": {bucket: "phenix", key: revisionKey, write: (*BoltDB).Create},
+		"update of a missing name": {
+			bucket: "Topology", key: "other", value: []byte("{}"), write: (*BoltDB).Update, wantErr: ErrNotExist,
+		},
+		"delete of a missing name": {
+			bucket: "Topology", key: "other", value: []byte("{}"), write: (*BoltDB).Delete, wantErr: ErrNotExist,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			b := newTestBolt(t, filepath.Join(t.TempDir(), "store.bdb"))
+			if tc.bucket != "" {
+				boltRawPut(t, b.path, tc.bucket, tc.key, tc.value)
+			}
+
+			c := &Config{Metadata: ConfigMetadata{Name: "a"}}
+			if !tc.noKind {
+				c = newTestConfig(t, "topology/a")
+				c.Spec = tc.spec
+			}
+
+			before := c.Metadata
+
+			err := tc.write(b, c)
+			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+				t.Fatalf("%s error = %v, want an error (%v)", name, err, tc.wantErr)
+			}
+
+			if diff := cmp.Diff(before, c.Metadata); diff != "" {
+				t.Errorf("%s changed the metadata (-before +after):\n%s", name, diff)
+			}
+
+			if c.Kind != "" {
+				if err := b.Get(&Config{Kind: c.Kind, Metadata: ConfigMetadata{Name: "a"}}); !errors.Is(err, ErrNotExist) {
+					t.Errorf("Get(%s/a) after %s error = %v, want %v", c.Kind, name, err, ErrNotExist)
+				}
+			}
+		})
+	}
+}
+
+// put and putWithRevision report a bucket they cannot create.
+func TestBoltPutErrors(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBolt(t, filepath.Join(t.TempDir(), "store.bdb"))
+
+	if err := b.open(); err != nil {
+		t.Fatalf("BoltDB.open() error = %v", err)
+	}
+
+	err := b.put("", "k", []byte{1})
+	if err == nil {
+		t.Error(`BoltDB.put("", k) error = nil, want one`)
+	}
+
+	err = b.db.View(func(tx *bbolt.Tx) error {
+		return putWithRevision(tx, nil, newTestConfig(t, "topology/a"))
+	})
+	if err == nil {
+		t.Error("putWithRevision() in a read-only transaction error = nil, want one")
+	}
+
+	if err := b.close(); err != nil {
+		t.Errorf("BoltDB.close() error = %v", err)
+	}
+}

@@ -71,45 +71,36 @@ func TestRolesCarryAPolicyIndex(t *testing.T) {
 }
 
 // A role allows nothing without a spec, or with a policy whose resource
-// pattern is invalid.
+// pattern is invalid, also one bad only past where a probe name stops
+// matching, such as "v*[".
 func TestRoleDeniesEverything(t *testing.T) {
 	t.Parallel()
 
 	invalid := testRoleSpec()
 	invalid.Policies = append(invalid.Policies, &v1.PolicySpec{Resources: []string{"[bad"}, Verbs: []string{"*"}})
 
+	partlyBad := &v1.RoleSpec{Name: "r", Policies: []*v1.PolicySpec{
+		{Resources: []string{"v*[", "vms"}, ResourceNames: []string{"*"}, Verbs: []string{"*"}},
+	}}
+
 	for name, r := range map[string]Role{
-		"no role":                    {},
-		"invalid pattern":            *newRole(invalid, nil),
-		"invalid pattern, unindexed": {Spec: invalid},
+		"no role":                       {},
+		"invalid pattern":               *newRole(invalid, nil),
+		"invalid pattern, unindexed":    {Spec: invalid},
+		"partly bad pattern":            *newRole(partlyBad, nil),
+		"partly bad pattern, unindexed": {Spec: partlyBad},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			if r.Allowed("vms", "list", "exp_a") {
-				t.Error("Allowed(vms, list, exp_a) = true, want false")
-			}
-
-			if r.Allowed("experiments/start", "update", "exp") {
-				t.Error("Allowed(experiments/start, update, exp) = true, want false")
+			for _, q := range [][]string{
+				{"vms", "list", "exp_a"}, {"experiments/start", "update", "exp"}, {"vms", "list"}, {"vms", "get", "vm1"},
+			} {
+				if r.Allowed(q[0], q[1], q[2:]...) {
+					t.Errorf("Allowed(%q) = true, want false", q)
+				}
 			}
 		})
-	}
-}
-
-// A resource pattern that is bad only past where a probe name stops matching,
-// such as "v*[", also makes the role allow nothing.
-func TestRoleDeniesEverythingForAPartlyBadPattern(t *testing.T) {
-	t.Parallel()
-
-	spec := &v1.RoleSpec{Name: "r", Policies: []*v1.PolicySpec{
-		{Resources: []string{"v*[", "vms"}, ResourceNames: []string{"*"}, Verbs: []string{"*"}},
-	}}
-
-	for kind, r := range map[string]Role{"indexed": *newRole(spec, nil), "unindexed": {Spec: spec}} {
-		if r.Allowed("vms", "list") || r.Allowed("vms", "get", "vm1") {
-			t.Errorf("Allowed(vms, ...) of the %s role with resources [v*[ vms] = true, want false", kind)
-		}
 	}
 }
 
@@ -133,5 +124,12 @@ func TestAddPolicy(t *testing.T) {
 
 	if earlier.Allowed("users", "get", "bob") {
 		t.Error("Allowed(users, get, bob) of a copy made before AddPolicy = true, want false")
+	}
+
+	// a policy with a bad resource pattern makes the role allow nothing
+	r.AddPolicy([]string{"[bad"}, nil, []string{"*"})
+
+	if r.Allowed("users", "get", "bob") {
+		t.Error("Allowed(users, get, bob) after AddPolicy([bad, *) = true, want false")
 	}
 }

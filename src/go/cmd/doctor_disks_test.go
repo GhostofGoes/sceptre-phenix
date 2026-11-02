@@ -238,3 +238,45 @@ func TestBrokenImagesListProperty(t *testing.T) {
 		}
 	})
 }
+
+// scanImages scans the images folder once in a run, and scans again only
+// for another folder, which it cleans first.
+func TestDoctorDisksScanImagesOnce(t *testing.T) {
+	t.Parallel()
+
+	dir := newDoctorTestDir(t)
+	files := filepath.Join(dir, "files")
+	in := fakeDoctorInput(dir, nil)
+	in.found = &doctorFound{minimegaUp: true, minimegaArgs: doctorMinimegaArgs(dir)}
+
+	var scanned []string
+
+	in.images = func(_ context.Context, dir string) (disk.ChainScan, error) {
+		scanned = append(scanned, dir)
+
+		return disk.ChainScan{Images: 2, Checked: 2}, nil
+	}
+
+	want := passCheck("2 images in " + files + ", and every backing chain is whole")
+
+	for i := range 2 {
+		if diff := cmp.Diff(want, diskChainsCheck(t.Context(), in)); diff != "" {
+			t.Errorf("diskChainsCheck() %d mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+
+	if diff := cmp.Diff([]string{files}, scanned); diff != "" {
+		t.Errorf("scans after two checks mismatch (-want +got):\n%s", diff)
+	}
+
+	other := filepath.Join(dir, "phenix")
+	in.found.minimegaArgs = map[string]string{"filepath": other + "/"}
+
+	if dir, _, stop := in.scanImages(t.Context()); dir != other || stop != nil {
+		t.Errorf("scanImages() for another folder = %q, %+v; want %q and no row", dir, stop, other)
+	}
+
+	if diff := cmp.Diff([]string{files, other}, scanned); diff != "" {
+		t.Errorf("scans after another folder mismatch (-want +got):\n%s", diff)
+	}
+}

@@ -182,51 +182,90 @@ func launchAllBatchable(names []string) bool {
 }
 
 func TestGetLaunchProgress(t *testing.T) { //nolint:paralleltest // shares the fake minimega
+	building := []string{"BUILDING", "RUNNING", "RUNNING", "RUNNING"}
+
 	// As minimega prints `ns queue`: each batch's VM count, its names
 	// compressed into ranges, then its VM config.
 	for name, tc := range map[string]struct {
-		queue    string
+		queue    []*minicli.Response // the answer to `ns queue`, one per node
+		states   []string            // the VMs' states in `vm info summary`
 		expected int
 		want     float64
+		wantErr  string // substring of the error, "" for none
 		wantCmds []string
 	}{
 		"counts the queued VMs": {
-			queue:    "VMs: 2\nNames: vm[1-2]\nVM Type: kvm\n\nMemory: 2048\n\n",
+			queue:    []*minicli.Response{mmtest.Text("head", "VMs: 2\nNames: vm[1-2]\nVM Type: kvm\n\nMemory: 2048\n\n")},
 			expected: 4,
 			want:     0.5,
 			wantCmds: []string{nsQueueCmd},
 		},
 		"counts every batch by its VM count": {
-			queue: "VMs: 50\nNames: vm[1-50]\nVM Type: kvm\n\nMemory: 2048\n\n" +
-				"VMs: 25\nNames: ctr[1-20],web,db[1-4]\nVM Type: container\n\nMemory: 512\n\n",
+			queue: []*minicli.Response{mmtest.Text("head",
+				"VMs: 50\nNames: vm[1-50]\nVM Type: kvm\n\nMemory: 2048\n\n"+
+					"VMs: 25\nNames: ctr[1-20],web,db[1-4]\nVM Type: container\n\nMemory: 512\n\n")},
 			expected: 100,
 			want:     0.75,
 			wantCmds: []string{nsQueueCmd},
 		},
+		"counts every node's queue and skips a node that cannot answer": {
+			queue: []*minicli.Response{
+				mmtest.Error("head", "boom"),
+				mmtest.Text("compute1", "VMs: 1\nNames: a\n"),
+				mmtest.Text("compute2", "VMs: 2\nNames: b[1-2]\n"),
+			},
+			expected: 4,
+			want:     0.75,
+			wantCmds: []string{nsQueueCmd},
+		},
 		"counts the VMs still building once none are queued": {
-			queue:    "",
+			queue:    []*minicli.Response{mmtest.Text("head", "")},
+			states:   building,
 			expected: 4,
 			want:     0.25,
 			wantCmds: []string{nsQueueCmd, vmInfoSummaryCmd},
+		},
+		"reports no progress without VMs": {
+			queue:    []*minicli.Response{mmtest.Text("head", "")},
+			expected: 4,
+			want:     0,
+			wantCmds: []string{nsQueueCmd, vmInfoSummaryCmd},
+		},
+		"reports a count it cannot read": {
+			queue:    []*minicli.Response{mmtest.Text("head", "VMs: 99999999999999999999\n")},
+			expected: 4,
+			wantErr:  `parsing queued VM count "99999999999999999999"`,
+			wantCmds: []string{nsQueueCmd},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			received := useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
 				switch cmd.Base {
 				case nsQueueCmd:
-					return []*minicli.Response{mmtest.Text("head", tc.queue)}
+					return tc.queue
 				case vmInfoSummaryCmd:
-					return []*minicli.Response{mmtest.Tabular("head", []string{"state"},
-						[]string{"BUILDING"}, []string{"RUNNING"}, []string{"RUNNING"}, []string{"RUNNING"},
-					)}
+					rows := make([][]string, 0, len(tc.states))
+					for _, state := range tc.states {
+						rows = append(rows, []string{state})
+					}
+
+					return []*minicli.Response{mmtest.Tabular("head", []string{"state"}, rows...)}
 				}
 
 				return nil
 			})
 
 			progress, err := (Minimega{}).GetLaunchProgress("exp", tc.expected)
-			if err != nil || progress != tc.want {
-				t.Errorf("GetLaunchProgress(exp, %d) = %v, %v; want %v, nil", tc.expected, progress, err, tc.want)
+
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("GetLaunchProgress(exp, %d) error = %v, want nil", tc.expected, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("GetLaunchProgress(exp, %d) error = %v, want one containing %q", tc.expected, err, tc.wantErr)
+			}
+
+			if progress != tc.want {
+				t.Errorf("GetLaunchProgress(exp, %d) = %v, want %v", tc.expected, progress, tc.want)
 			}
 
 			if diff := cmp.Diff(tc.wantCmds, mmtest.Bases(received())); diff != "" {

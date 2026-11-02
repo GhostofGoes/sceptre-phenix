@@ -151,6 +151,7 @@ func TestUpdateVMAutotunnelRequiresForwards(t *testing.T) {
 		role    rbac.Role
 		body    string
 		status  int
+		want    map[string]any
 	}{
 		"set with forward permission": {
 			role:   combinedRole(vmRole("get", "patch"), forwardRole()),
@@ -174,6 +175,19 @@ func TestUpdateVMAutotunnelRequiresForwards(t *testing.T) {
 			body:    `{"annotations": {"phenix/startup-autotunnel": ["8080"], "vncBanner": "hi"}}`,
 			status:  http.StatusOK,
 		},
+		"removed without forward permission": {
+			current: map[string]any{"phenix/startup-autotunnel": []any{"8080"}},
+			role:    vmRole("get", "patch"),
+			body:    `{"annotations": {"vncBanner": "hi"}}`,
+			status:  http.StatusOK,
+			want:    map[string]any{"vncBanner": "hi"},
+		},
+		"reordered without forward permission": {
+			current: map[string]any{"phenix/startup-autotunnel": []any{"8080", "22"}},
+			role:    vmRole("get", "patch"),
+			body:    `{"annotations": {"phenix/startup-autotunnel": ["22", "8080"]}}`,
+			status:  http.StatusForbidden,
+		},
 		"no autotunnel annotation": {
 			role:   vmRole("get", "patch"),
 			body:   `{"annotations": {"vncBanner": "hi"}}`,
@@ -191,8 +205,23 @@ func TestUpdateVMAutotunnelRequiresForwards(t *testing.T) {
 			}))
 
 			resp := patchVM(t, tc.role, tc.body)
-			if body := readBody(t, resp); resp.StatusCode != tc.status {
-				t.Errorf("PATCH vms/test-vm %s = %d, want %d: %s", tc.body, resp.StatusCode, tc.status, body)
+
+			body := readBody(t, resp)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("PATCH vms/test-vm %s = %d, want %d: %s", tc.body, resp.StatusCode, tc.status, body)
+			}
+
+			if tc.want == nil {
+				return
+			}
+
+			var vm proto.VM
+			if err := protojson.Unmarshal([]byte(body), &vm); err != nil {
+				t.Fatalf("PATCH vms/test-vm %s = %q, not a VM: %v", tc.body, body, err)
+			}
+
+			if diff := cmp.Diff(tc.want, vm.GetAnnotations().AsMap()); diff != "" {
+				t.Errorf("PATCH vms/test-vm %s annotations mismatch (-want +got):\n%s", tc.body, diff)
 			}
 		})
 	}

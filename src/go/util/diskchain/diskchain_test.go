@@ -493,6 +493,32 @@ func walkCases() []walkCase {
 				return diskchain.Result{Problem: diskchain.Unreadable, At: dir + "/top.qc2", Detail: "not a regular file"}
 			},
 		},
+		{
+			name: "a backing symlink to itself cannot be read",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				qcow2(t, dir+"/top.qc2", dct.Qcow2{Backing: "self.qc2"})
+				symlink(t, dir+"/self.qc2", dir+"/self.qc2")
+			},
+			want: func(dir string) diskchain.Result {
+				return diskchain.Result{
+					Members: []string{dir + "/top.qc2"}, Problem: diskchain.Unreadable, At: dir + "/self.qc2",
+					Detail: "too many levels of symbolic links",
+				}
+			},
+		},
+		{
+			name: "a backing name of the root folder is not a regular file",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				qcow2(t, dir+"/top.qc2", dct.Qcow2{Backing: "/"})
+			},
+			want: func(dir string) diskchain.Result {
+				return diskchain.Result{
+					Members: []string{dir + "/top.qc2"}, Problem: diskchain.Unreadable, At: "/", Detail: "not a regular file",
+				}
+			},
+		},
 	}
 }
 
@@ -638,30 +664,37 @@ func TestSentence(t *testing.T) {
 			result: diskchain.Result{Problem: diskchain.LUKSEncrypted, At: "/i/kali.qc2"},
 			want:   "/i/kali.qc2 uses LUKS encryption, and phenix cannot give qemu its key", refused: true,
 		},
+		{result: diskchain.Result{Problem: diskchain.Kind(99), At: "/i/kali.qc2"}},
 	}
 
 	for _, tc := range tests {
-		if got := tc.result.Sentence(); got != tc.want {
-			t.Errorf("%+v Sentence() = %q, want %q", tc.result, got, tc.want)
-		}
+		t.Run(fmt.Sprintf("kind %d", tc.result.Problem), func(t *testing.T) {
+			t.Parallel()
 
-		if got := tc.result.Broken(); got != tc.broken {
-			t.Errorf("%+v Broken() = %t, want %t", tc.result, got, tc.broken)
-		}
+			if got := tc.result.Sentence(); got != tc.want {
+				t.Errorf("%+v Sentence() = %q, want %q", tc.result, got, tc.want)
+			}
 
-		if got := tc.result.Refused(); got != tc.refused {
-			t.Errorf("%+v Refused() = %t, want %t", tc.result, got, tc.refused)
-		}
+			if got := tc.result.Broken(); got != tc.broken {
+				t.Errorf("%+v Broken() = %t, want %t", tc.result, got, tc.broken)
+			}
+
+			if got := tc.result.Refused(); got != tc.refused {
+				t.Errorf("%+v Refused() = %t, want %t", tc.result, got, tc.refused)
+			}
+		})
 	}
 }
 
+// Each note kind has its sentence, its start warning and the oldest qemu that opens it; an unknown kind has none.
 func TestNoteSentence(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		kind    diskchain.NoteKind
-		want    string
-		atStart bool
+		kind             diskchain.NoteKind
+		want             string
+		atStart          bool
+		version, feature string
 	}{
 		{
 			kind: diskchain.QcowV1, atStart: true,
@@ -670,57 +703,151 @@ func TestNoteSentence(t *testing.T) {
 		{kind: diskchain.Qcow2V2, want: "/i/kali.qcow is a qcow2 version 2 image"},
 		{kind: diskchain.Dirty, atStart: true, want: "qemu did not close /i/kali.qcow cleanly. Run qemu-img check -r all on it"},
 		{kind: diskchain.Corrupt, want: "qemu marked /i/kali.qcow as corrupt"},
-		{kind: diskchain.Zstd, want: "/i/kali.qcow uses zstd compression, which needs qemu 5.1 or later"},
-		{kind: diskchain.ExtendedL2, want: "/i/kali.qcow uses extended L2 entries, which needs qemu 5.2 or later"},
+		{
+			kind: diskchain.Zstd, want: "/i/kali.qcow uses zstd compression, which needs qemu 5.1 or later",
+			version: "5.1", feature: "zstd compression",
+		},
+		{
+			kind: diskchain.ExtendedL2, want: "/i/kali.qcow uses extended L2 entries, which needs qemu 5.2 or later",
+			version: "5.2", feature: "extended L2 entries",
+		},
 		{kind: diskchain.QED, want: "/i/kali.qcow is a qed image"},
 		{kind: diskchain.VMDK, want: "/i/kali.qcow is a vmdk image"},
+		{kind: 0},
+		{kind: diskchain.NoteKind(99)},
 	}
 
 	for _, tc := range tests {
-		note := diskchain.Note{Path: "/i/kali.qcow", Kind: tc.kind}
+		t.Run(fmt.Sprintf("kind %d", tc.kind), func(t *testing.T) {
+			t.Parallel()
 
-		if got := note.Sentence(); got != tc.want {
-			t.Errorf("Note{Kind: %d}.Sentence() = %q, want %q", tc.kind, got, tc.want)
-		}
+			note := diskchain.Note{Path: "/i/kali.qcow", Kind: tc.kind}
 
-		if got := note.AtStart(); got != tc.atStart {
-			t.Errorf("Note{Kind: %d}.AtStart() = %t, want %t", tc.kind, got, tc.atStart)
-		}
+			if got := note.Sentence(); got != tc.want {
+				t.Errorf("Note{Kind: %d}.Sentence() = %q, want %q", tc.kind, got, tc.want)
+			}
+
+			if got := note.AtStart(); got != tc.atStart {
+				t.Errorf("Note{Kind: %d}.AtStart() = %t, want %t", tc.kind, got, tc.atStart)
+			}
+
+			version, feature := tc.kind.MinQemu()
+			if diff := cmp.Diff([]string{tc.version, tc.feature}, []string{version, feature}); diff != "" {
+				t.Errorf("NoteKind(%d).MinQemu() mismatch (-want +got):\n%s", tc.kind, diff)
+			}
+		})
 	}
 }
 
-// MapPaths maps every file a result names, its notes included, and keeps the backing name of a NotAFile.
+// MapPaths maps every file a result names, its notes included, and keeps the backing name of a NotAFile, an empty
+// At and nil notes.
 func TestMapPaths(t *testing.T) {
 	t.Parallel()
 
-	upper := strings.ToUpper
+	mark := func(path string) string { return strings.ToUpper(path) + "!" }
 
-	tests := []struct {
+	tests := map[string]struct {
 		in, want diskchain.Result
 	}{
-		{
+		"members, notes and At": {
 			in: diskchain.Result{
 				Members: []string{"/a", "/b"}, Problem: diskchain.Missing, At: "/c",
 				Notes: []diskchain.Note{{Path: "/b", Kind: diskchain.QcowV1}},
 			},
 			want: diskchain.Result{
-				Members: []string{"/A", "/B"}, Problem: diskchain.Missing, At: "/C",
-				Notes: []diskchain.Note{{Path: "/B", Kind: diskchain.QcowV1}},
+				Members: []string{"/A!", "/B!"}, Problem: diskchain.Missing, At: "/C!",
+				Notes: []diskchain.Note{{Path: "/B!", Kind: diskchain.QcowV1}},
 			},
 		},
-		{
+		"the backing name of a NotAFile": {
 			in:   diskchain.Result{Members: []string{"/a"}, Problem: diskchain.NotAFile, At: "nbd://h/x"},
-			want: diskchain.Result{Members: []string{"/A"}, Problem: diskchain.NotAFile, At: "nbd://h/x"},
+			want: diskchain.Result{Members: []string{"/A!"}, Problem: diskchain.NotAFile, At: "nbd://h/x"},
+		},
+		"a whole chain": {
+			in:   diskchain.Result{Members: []string{"/a"}, Notes: []diskchain.Note{}},
+			want: diskchain.Result{Members: []string{"/A!"}, Notes: []diskchain.Note{}},
+		},
+		"an empty result": {
+			in:   diskchain.Result{},
+			want: diskchain.Result{Members: []string{}},
 		},
 	}
 
-	for _, tc := range tests {
-		if diff := cmp.Diff(tc.want, tc.in.MapPaths(upper)); diff != "" {
-			t.Errorf("MapPaths mismatch (-want +got):\n%s", diff)
-		}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, tc.in.MapPaths(mark)); diff != "" {
+				t.Errorf("MapPaths mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
+// Exists finds a regular file whole, a file that is not there missing, and anything else, or a done context,
+// unreadable.
+func TestExists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	raw(t, dir+"/cd.iso")
+	mkdir(t, dir+"/folder")
+	symlink(t, dir+"/self.iso", dir+"/self.iso")
+	qcow2(t, dir+"/top.qc2", dct.Qcow2{Backing: dir + "/gone.qc2"})
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tests := map[string]struct {
+		ctx  context.Context //nolint:containedctx // the table
+		path string
+		want diskchain.Result
+	}{
+		"a regular file": {path: dir + "/cd.iso", want: diskchain.Result{Members: []string{dir + "/cd.iso"}}},
+		"an image whose backing file is missing is only opened": {
+			path: dir + "/top.qc2", want: diskchain.Result{Members: []string{dir + "/top.qc2"}},
+		},
+		"a missing file": {path: dir + "/gone.iso", want: diskchain.Result{Problem: diskchain.Missing, At: dir + "/gone.iso"}},
+		"a path through a file": {
+			path: dir + "/cd.iso/x.iso", want: diskchain.Result{Problem: diskchain.Missing, At: dir + "/cd.iso/x.iso"},
+		},
+		"a folder": {
+			path: dir + "/folder",
+			want: diskchain.Result{Problem: diskchain.Unreadable, At: dir + "/folder", Detail: "not a regular file"},
+		},
+		"a symlink to itself": {
+			path: dir + "/self.iso",
+			want: diskchain.Result{
+				Problem: diskchain.Unreadable, At: dir + "/self.iso", Detail: "too many levels of symbolic links",
+			},
+		},
+		"a system directory": {
+			path: "/dev/zero",
+			want: diskchain.Result{Problem: diskchain.Unreadable, At: "/dev/zero", Detail: "in a system directory"},
+		},
+		"a done context": {
+			ctx: canceled, path: dir + "/cd.iso",
+			want: diskchain.Result{Problem: diskchain.Unreadable, At: dir + "/cd.iso", Detail: "context canceled"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = t.Context()
+			}
+
+			if diff := cmp.Diff(tc.want, diskchain.Exists(ctx, tc.path)); diff != "" {
+				t.Errorf("Exists(%s) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+//nolint:maintidx // the table
 func TestParseHeader(t *testing.T) {
 	t.Parallel()
 
@@ -758,6 +885,30 @@ func TestParseHeader(t *testing.T) {
 
 		return data
 	}
+
+	// a version 3 header with clusters of 1<<bits bytes and a header of length bytes
+	layout := func(bits, length uint32) []byte {
+		data := dct.Qcow2{}.Bytes()
+		binary.BigEndian.PutUint32(data[20:], bits)
+		binary.BigEndian.PutUint32(data[100:], length)
+
+		return data
+	}
+
+	// a version 3 header of 104 bytes and then the extensions of typ type holding data, with no end extension
+	extensions := func(exts ...string) []byte {
+		data := dct.Qcow2{}.Bytes()[:104]
+		for i := 0; i < len(exts); i += 2 {
+			head := binary.BigEndian.AppendUint32(nil, uint32(len(exts[i+1])))
+			data = append(append(append(data, exts[i]...), head...), exts[i+1]...)
+			data = append(data, make([]byte, (8-len(data)%8)%8)...)
+		}
+
+		return data
+	}
+
+	noLength := dct.Qcow2{Backing: "b.qc2"}.Bytes()
+	binary.BigEndian.PutUint32(noLength[16:], 0)
 
 	qcow := diskchain.Header{Format: diskchain.FormatQcow, Version: 1}
 	qcow2 := diskchain.Header{Format: diskchain.FormatQcow2, Version: 3}
@@ -880,6 +1031,39 @@ func TestParseHeader(t *testing.T) {
 			data: append(dct.Qcow2{}.Bytes(), 1),
 			want: qcow2,
 		},
+		{
+			name: "version 3 with clusters of 256 bytes", data: layout(8, 104), want: qcow2,
+			wantErr: "invalid qcow2 header: cluster bits 8",
+		},
+		{
+			name: "version 3 with clusters of 4 MiB", data: layout(22, 104), want: qcow2,
+			wantErr: "invalid qcow2 header: cluster bits 22",
+		},
+		{
+			name: "version 3 with a header length under 104", data: layout(16, 96), want: qcow2,
+			wantErr: "invalid qcow2 header: header length 96",
+		},
+		{
+			name: "version 3 with a header longer than its cluster", data: layout(9, 513), want: qcow2,
+			wantErr: "invalid qcow2 header: header length 513",
+		},
+		{name: "version 3 with a header as long as its cluster", data: layout(9, 512), want: qcow2},
+		{
+			name: "version 2 shorter than its header", data: dct.Qcow2{Version: 2}.Bytes()[:40],
+			want:    diskchain.Header{Format: diskchain.FormatQcow2, Version: 2},
+			wantErr: "invalid qcow2 header: 40 bytes long",
+		},
+		{
+			name: "version 3 shorter than its header", data: dct.Qcow2{}.Bytes()[:80], want: qcow2,
+			wantErr: "invalid qcow2 header: 80 bytes long",
+		},
+		{name: "extensions that end with the file need no end extension", data: extensions(), want: qcow2},
+		{
+			name: "an unknown extension is skipped and a backing format loses its padding",
+			data: extensions("\x12\x34\x56\x78", "abc", "\xe2\x79\x2a\xca", "raw\x00\x00"),
+			want: diskchain.Header{Format: diskchain.FormatQcow2, Version: 3, BackingFormat: "raw"},
+		},
+		{name: "a backing name of no bytes is no backing name", data: noLength, want: qcow2},
 	}
 
 	for _, tc := range tests {
@@ -919,6 +1103,9 @@ func headerSeeds() [][]byte {
 		dct.Qcow{Encryption: 1}.Bytes(),
 		dct.Qcow2{Encryption: 2, Features: 1 | 2 | 1<<9}.Bytes(),
 		dct.Qcow2{Zstd: true, Features: 1 << 4}.Bytes(),
+		dct.Qcow2{Version: 4}.Bytes(),
+		dct.Qcow2{}.Bytes()[:104],
+		append(dct.Qcow2{}.Bytes()[:104], "\xe2\x79\x2a\xca\x00\x00\x00\x03raw\x00\x00\x00\x00\x00"...),
 	}
 }
 

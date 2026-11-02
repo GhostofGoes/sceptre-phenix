@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -569,5 +573,283 @@ func TestConsoleStartAfterEndAllIsRefused(t *testing.T) {
 
 	if n := len(registry.sessions); n != 0 {
 		t.Errorf("consoles after start() following endAll() = %d, want none", n)
+	}
+}
+
+// shutdownUIServer is a uiServer of the servers with the grace period, the broker running, and a job registry and
+// consoles of the test's own. The returned function reports whether its background loops were stopped.
+func shutdownUIServer(t *testing.T, grace time.Duration, servers ...servedHTTP) (*uiServer, func() bool) {
+	t.Helper()
+
+	useJobs(t)
+	useTestConsoles(t, time.Minute)
+	lifecycle.Start()
+
+	var (
+		background, stopBroker = context.WithCancel(context.Background())
+		brokerStopped          = make(chan struct{})
+		stopped                atomic.Bool
+	)
+
+	go func() {
+		defer close(brokerStopped)
+
+		broker.Start(background)
+	}()
+
+	t.Cleanup(func() {
+		stopBroker()
+		<-brokerStopped
+		lifecycle.Start()
+	})
+
+	s := &uiServer{grace: grace, servers: servers, socket: "", stopBackground: func() {
+		stopped.Store(true)
+		stopBroker()
+	}}
+
+	return s, stopped.Load
+}
+
+// shutdownRecords returns the log records whose message is msg.
+func shutdownRecords(t *testing.T, records []string, msg string) []map[string]any {
+	t.Helper()
+
+	var found []map[string]any
+
+	for _, line := range records {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log record %s is not JSON: %v", line, err)
+		}
+
+		if record["msg"] == msg {
+			found = append(found, record)
+		}
+	}
+
+	return found
+}
+
+// A signal is the cause of a canceled Start context, which names it.
+func TestSignalError(t *testing.T) {
+	t.Parallel()
+
+	for signal, want := range map[os.Signal]string{
+		syscall.SIGTERM: "received signal terminated",
+		syscall.SIGINT:  "received signal interrupt",
+		os.Interrupt:    "received signal interrupt",
+	} {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(SignalError{Signal: signal})
+
+		var got SignalError
+		if !errors.As(context.Cause(ctx), &got) || got.Error() != want {
+			t.Errorf("cause of a context canceled by %v = %v, want a SignalError %q", signal, context.Cause(ctx), want)
+		}
+	}
+}
+
+// run returns, after shutting down, the failure of a server that stops serving, and nil once its context ends with
+// a signal; a server closed for the shutdown is no failure. Either way it says why it shuts down.
+//
+//nolint:paralleltest // runs the broker and swaps the job registry, consoles and logs
+func TestRunReturnsServerFailures(t *testing.T) {
+	tests := map[string]struct {
+		served    error
+		signal    bool
+		wantErr   string
+		wantField string // of the "shutting down server" record
+		wantValue string
+	}{
+		"a server fails": {
+			served:    errors.New("address in use"),
+			wantErr:   "serving test server: address in use",
+			wantField: "reason",
+			wantValue: "serving test server: address in use",
+		},
+		"a signal": {
+			served:    http.ErrServerClosed,
+			signal:    true,
+			wantField: "signal",
+			wantValue: "terminated",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s, stopped := shutdownUIServer(t, time.Second, servedHTTP{
+				name: "test server", srv: newHTTPServer("", http.NotFoundHandler()), ln: nil,
+				serve: func(*http.Server, net.Listener) error { return tc.served },
+			})
+			records := captureRecords(t)
+
+			ctx, cancel := context.WithCancelCause(context.Background())
+			if tc.signal {
+				cancel(SignalError{Signal: syscall.SIGTERM})
+			}
+
+			t.Cleanup(func() { cancel(nil) })
+
+			if err := s.run(ctx); fmt.Sprint(err) != tc.wantErr && (err != nil || tc.wantErr != "") {
+				t.Errorf("run() = %v, want %q", err, tc.wantErr)
+			}
+
+			if !stopped() {
+				t.Error("run() returned without stopping the background loops")
+			}
+
+			got := records()
+
+			if n := len(shutdownRecords(t, got, "server failed")); (n == 1) != (tc.wantErr != "") {
+				t.Errorf("run() logged %d server failures, want 1 only for a failure", n)
+			}
+
+			down := shutdownRecords(t, got, "shutting down server")
+			if len(down) != 1 || down[0][tc.wantField] != tc.wantValue {
+				t.Errorf("run() logged shutting down %v, want once with %s %q", down, tc.wantField, tc.wantValue)
+			}
+		})
+	}
+}
+
+// closeListeners closes the listener of every server, which never served, and stops the background loops.
+func TestCloseListeners(t *testing.T) {
+	t.Parallel()
+
+	var (
+		servers = make([]servedHTTP, 0, 2)
+		stopped atomic.Bool
+	)
+
+	for _, name := range []string{"HTTP server", "Unix socket server"} {
+		ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listening on 127.0.0.1: %v", err)
+		}
+
+		t.Cleanup(func() { _ = ln.Close() })
+
+		servers = append(servers, servedHTTP{name: name, srv: nil, ln: ln, serve: nil})
+	}
+
+	s := &uiServer{grace: 0, servers: servers, socket: "", stopBackground: func() { stopped.Store(true) }}
+	s.closeListeners()
+
+	for _, h := range servers {
+		if _, err := h.ln.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Accept() on the %s listener after closeListeners() error = %v, want %v", h.name, err, net.ErrClosed)
+		}
+	}
+
+	if !stopped.Load() {
+		t.Error("closeListeners() did not stop the background loops")
+	}
+}
+
+// Shutting down removes the Unix socket, if any; one it cannot remove is logged.
+//
+//nolint:paralleltest // runs the broker and swaps the job registry, consoles and logs
+func TestShutdownRemovesTheUnixSocket(t *testing.T) {
+	tests := map[string]struct {
+		setup    func(t *testing.T, path string)
+		none     bool // no socket at all
+		wantLeft bool
+		wantWarn bool
+	}{
+		"a socket": {setup: func(t *testing.T, path string) {
+			t.Helper()
+
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("writing %s: %v", path, err)
+			}
+		}},
+		"already gone": {setup: func(*testing.T, string) {}},
+		"no socket":    {setup: func(*testing.T, string) {}, none: true},
+		"a folder that is not empty": {
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+
+				writeDisks(t, filepath.Join(path, "kept"))
+			},
+			wantLeft: true,
+			wantWarn: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "phenix.sock")
+			tc.setup(t, path)
+
+			s, stopped := shutdownUIServer(t, time.Second)
+			if !tc.none {
+				s.socket = path
+			}
+
+			records := captureRecords(t)
+
+			s.shutdown(SignalError{Signal: syscall.SIGTERM})
+
+			if _, err := os.Stat(path); tc.wantLeft != (err == nil) {
+				t.Errorf("os.Stat(socket) after shutdown error = %v, want it left %t", err, tc.wantLeft)
+			}
+
+			if !stopped() {
+				t.Error("shutdown did not stop the background loops")
+			}
+
+			got := records()
+
+			if n := len(shutdownRecords(t, got, "removing Unix socket")); (n == 1) != tc.wantWarn {
+				t.Errorf("shutdown logged %d failures to remove the socket, want one %t", n, tc.wantWarn)
+			}
+
+			if n := len(shutdownRecords(t, got, "shutdown complete")); n != 1 {
+				t.Errorf("shutdown logged %d completions, want 1", n)
+			}
+		})
+	}
+}
+
+// A long-lived handler that does not end within the grace period is reported by kind as still open.
+//
+//nolint:paralleltest // runs the broker and stops the lifecycle
+func TestShutdownReportsOpenHandlers(t *testing.T) {
+	const grace = 100 * time.Millisecond
+
+	s, _ := shutdownUIServer(t, grace)
+
+	release := lifecycle.Track("stuck", func() {})
+	t.Cleanup(release)
+
+	records := captureRecords(t)
+	began := time.Now()
+
+	s.shutdown(errors.New("test"))
+
+	if took := time.Since(began); took < grace {
+		t.Errorf("shutdown with a handler that never ends took %s, want at least the %s grace period", took, grace)
+	}
+
+	got := records()
+
+	left := shutdownRecords(t, got, "shutdown grace period ended with work still running")
+	if len(left) != 1 {
+		t.Fatalf("shutdown logged %d reports of work still running, want 1", len(left))
+	}
+
+	if diff := cmp.Diff(map[string]any{"stuck": float64(1)}, left[0]["open_handlers"]); diff != "" {
+		t.Errorf("shutdown open_handlers mismatch (-want +got):\n%s", diff)
+	}
+
+	for _, key := range []string{"requests_cut_off", "websocket_clients", "jobs", "minimega_consoles", "scorch_terminals"} {
+		if v, ok := left[0][key]; ok {
+			t.Errorf("shutdown reported %s %v left, want none", key, v)
+		}
+	}
+
+	if n := len(shutdownRecords(t, got, "shutdown complete")); n != 0 {
+		t.Errorf("shutdown with a handler left logged %d completions, want none", n)
 	}
 }

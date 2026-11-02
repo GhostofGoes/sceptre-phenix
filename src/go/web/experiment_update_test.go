@@ -17,6 +17,8 @@ func TestUpdateExperimentVLANs(t *testing.T) {
 		name, body string
 		want       int
 		aliases    map[string]int // the stored aliases afterwards
+		// the experiment the role may patch, if not name
+		allowed string
 	}{
 		"known and unknown aliases": {
 			name: "stopped", body: `{"EXP_1": 201, "OTHER": 300}`, want: http.StatusNoContent,
@@ -25,6 +27,13 @@ func TestUpdateExperimentVLANs(t *testing.T) {
 		"unknown experiment": {name: "none", body: `{"EXP_1": 201}`, want: http.StatusNotFound},
 		"malformed body":     {name: "stopped", body: `["EXP_1"]`, want: http.StatusBadRequest},
 		"running experiment": {name: "running", body: `{"EXP_1": 201}`, want: http.StatusBadRequest},
+		"no aliases": {
+			name: "stopped", body: `{}`, want: http.StatusNoContent, aliases: map[string]int{"EXP_1": 101, "EXP_2": 102},
+		},
+		"forbidden": {
+			name: "stopped", body: `{"EXP_1": 201}`, want: http.StatusForbidden, allowed: "running",
+			aliases: map[string]int{"EXP_1": 101, "EXP_2": 102},
+		},
 	}
 
 	for name, tc := range tests {
@@ -34,7 +43,12 @@ func TestUpdateExperimentVLANs(t *testing.T) {
 
 			useTestStore(t, stopped, namedExperiment(t, "running", "2024-01-01T00:00:00Z"))
 
-			server := serveAs(t, "alice", testRole("experiments", "patch", tc.name))
+			allowed := tc.name
+			if tc.allowed != "" {
+				allowed = tc.allowed
+			}
+
+			server := serveAs(t, "alice", testRole("experiments", "patch", allowed))
 			path := "/api/v1/experiments/" + tc.name
 
 			resp := do(t, http.MethodPatch, server.URL+path, tc.body)

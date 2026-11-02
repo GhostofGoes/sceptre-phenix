@@ -6,22 +6,31 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/gorilla/mux"
 	"pgregory.net/rapid"
 
 	"phenix/api/livecapture"
+	"phenix/util/file"
 	"phenix/util/mm"
+	"phenix/util/plog/plogtest"
+	"phenix/util/polltest"
 	"phenix/web/capability"
 	"phenix/web/rbac"
 )
@@ -758,4 +767,948 @@ func TestForwardedHTTPSProperties(t *testing.T) {
 			t.Fatalf("forwardedHTTPS(%q) = %t, want %t", f.header, got, f.https)
 		}
 	})
+}
+
+func TestFindWebShark(t *testing.T) {
+	dir := t.TempDir()
+	file, folder := filepath.Join(dir, "index.html"), filepath.Join(dir, "folder")
+
+	if err := os.WriteFile(file, []byte("<html>"), 0o600); err != nil {
+		t.Fatalf("writing index.html: %v", err)
+	}
+
+	if err := os.Mkdir(folder, 0o750); err != nil {
+		t.Fatalf("making folder: %v", err)
+	}
+
+	// stat answers for each build directory's index.html as one of these
+	statAs := func(kinds map[string]string) func(string) (os.FileInfo, error) {
+		return func(name string) (os.FileInfo, error) {
+			switch kinds[filepath.Dir(name)] {
+			case "file":
+				return os.Stat(file)
+			case "folder":
+				return os.Stat(folder)
+			default:
+				return nil, fs.ErrNotExist
+			}
+		}
+	}
+
+	tests := map[string]struct {
+		kinds   map[string]string
+		want    string
+		wantOK  bool
+		wantDir []string
+	}{
+		"none":             {map[string]string{}, "", false, nil},
+		"relative":         {map[string]string{"webshark": "file", "/opt/phenix/webshark": "file"}, "webshark", true, nil},
+		"installed":        {map[string]string{"/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true, nil},
+		"index.html a dir": {map[string]string{"webshark": "folder"}, "", false, nil},
+		"index.html a dir, then installed": {
+			map[string]string{"webshark": "folder", "/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true, nil,
+		},
+	}
+
+	for name, tc := range tests {
+		if got, ok := FindWebShark(statAs(tc.kinds)); got != tc.want || ok != tc.wantOK {
+			t.Errorf("FindWebShark(%s) = %q, %t, want %q, %t", name, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// WebSharkDirs lists the directories in order, as a copy.
+func TestWebSharkDirs(t *testing.T) {
+	t.Parallel()
+
+	dirs := WebSharkDirs()
+	if diff := cmp.Diff([]string{"webshark", "/opt/phenix/webshark"}, dirs); diff != "" {
+		t.Errorf("WebSharkDirs() mismatch (-want +got):\n%s", diff)
+	}
+
+	dirs[0] = "changed"
+
+	if got := WebSharkDirs()[0]; got != "webshark" {
+		t.Errorf("WebSharkDirs()[0] after changing a returned copy = %q, want webshark", got)
+	}
+}
+
+// A request that is not JSON, or too large, is refused before any lookup.
+func TestCreateWebSharkCaptureBadBodies(t *testing.T) {
+	useWebShark(t)
+
+	server := serveAs(t, "alice", sharkRole()).URL
+
+	for name, body := range map[string]string{
+		"not JSON":   "path=a.pcap",
+		"too large":  `{"path":"` + strings.Repeat("a", maxSharkRequestBytes) + `.pcap"}`,
+		"wrong type": `{"interface":"0","vm":"test-vm"}`,
+	} {
+		resp, _ := createSharkCapture(t, server, body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST webshark with a body %s = %d, want %d", name, resp.StatusCode, http.StatusBadRequest)
+		}
+
+		if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); !strings.HasPrefix(got, "invalid request body: ") {
+			t.Errorf("POST webshark with a body %s = %q, want invalid request body", name, got)
+		}
+	}
+}
+
+// websharkFailingFiles fails to list experiment files. Other file.ClusterFiles
+// methods panic.
+type websharkFailingFiles struct {
+	file.ClusterFiles
+}
+
+func (websharkFailingFiles) GetExperimentFiles(string, string) (file.Files, error) {
+	return nil, errors.New("mesh unreachable")
+}
+
+// websharkHostMM is the test minimega, failing to find VMs' hosts.
+type websharkHostMM struct {
+	*testMM
+}
+
+func (websharkHostMM) GetVMHost(...mm.Option) (string, error) {
+	return "", errors.New("mesh unreachable")
+}
+
+// A file or capture that cannot be looked up for a reason other than a bad
+// request is answered 500 and audited as failed.
+func TestCreateWebSharkCaptureServerErrors(t *testing.T) {
+	fake := useWebShark(t, mm.Capture{VM: "test-vm", Interface: 0, Filepath: "/phenix/images/test-experiment/files/live.pcap"})
+	useExperimentFilesDir(t, nil)
+
+	original := file.DefaultClusterFiles
+	t.Cleanup(func() { file.DefaultClusterFiles = original }) //nolint:reassign // restore test double
+
+	file.DefaultClusterFiles = websharkFailingFiles{} //nolint:reassign // test double
+
+	originalMM := mm.DefaultMM
+	t.Cleanup(func() { mm.DefaultMM = originalMM }) //nolint:reassign // restore test double
+
+	mm.DefaultMM = websharkHostMM{testMM: fake} //nolint:reassign // test double
+
+	server := serveAs(t, "alice", sharkRole()).URL
+
+	for _, body := range []string{`{"path":"captures/a.pcap"}`, `{"vm":"test-vm","interface":0}`} {
+		events := captureAudit(t)
+
+		resp, _ := createSharkCapture(t, server, body)
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("POST webshark %s with the mesh unreachable = %d, want %d", body, resp.StatusCode, http.StatusInternalServerError)
+		}
+
+		if got := errorMessage(t, resp.StatusCode, readBody(t, resp)); !strings.Contains(got, "mesh unreachable") {
+			t.Errorf("POST webshark %s with the mesh unreachable = %q, want the error", body, got)
+		}
+
+		wantAudit(t, events(), "capture-webshark-open", "failure", map[string]any{"user.name": "alice"})
+	}
+}
+
+// websharkGrant gives alice a grant of ops on target, returning its name.
+func websharkGrant(t *testing.T, target capability.Target, ops ...capability.Op) string {
+	t.Helper()
+
+	name := newCaptureSecret(false, sharkBaseName(target))
+	captureGrants.Mint(name, capability.Grant{
+		User: "alice", Target: target, Ops: ops, Expires: time.Now().Add(time.Hour),
+	})
+
+	return name
+}
+
+// websharkServe serves req to h, as WebShark's requests reach it, with the
+// capture name in the route.
+func websharkServe(h http.HandlerFunc, method, target, name string, header ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, nil)
+	req = mux.SetURLVars(req, map[string]string{"name": name})
+
+	for i := 0; i+1 < len(header); i += 2 {
+		req.Header.Set(header[i], header[i+1])
+	}
+
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	return rec
+}
+
+// websharkErrorBody is the error body WebShark reads.
+func websharkErrorBody(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+
+	var body struct {
+		Err    int    `json:"err"`
+		Errstr string `json:"errstr"`
+	}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Err != 1 {
+		t.Fatalf("WebShark error body %q: %v, want {\"err\":1,...}", rec.Body.String(), err)
+	}
+
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("WebShark error Content-Type = %q, want application/json", got)
+	}
+
+	return body.Errstr
+}
+
+// A capture is refused under a name no grant has, for an operation its grant
+// does not allow, and when its file is gone or is not a file.
+func TestServeSharkCaptureRefuses(t *testing.T) {
+	useWebShark(t)
+
+	dir := t.TempDir()
+	saved := filepath.Join(dir, "router.pcap")
+
+	if err := os.WriteFile(saved, testPcapHeader(), 0o600); err != nil {
+		t.Fatalf("writing router.pcap: %v", err)
+	}
+
+	var (
+		c        = grantChecker{}
+		viewOnly = websharkGrant(t, capability.Target{Exp: "test-experiment", File: "router.pcap", Local: saved},
+			capability.OpView)
+		gone = websharkGrant(t, capability.Target{Exp: "test-experiment", File: "gone.pcap", Local: filepath.Join(dir, "gone.pcap")},
+			viewOps...)
+		folder = websharkGrant(t, capability.Target{Exp: "test-experiment", File: "dir.pcap", Local: dir}, capability.OpView)
+		live   = websharkGrant(t, capability.Target{Exp: "test-experiment", VM: "test-vm", Interface: 3, Live: true},
+			capability.OpView)
+	)
+
+	tests := map[string]struct {
+		h          http.HandlerFunc
+		target     string
+		name       string
+		wantStatus int
+		wantErr    string
+		// the audit event's outcome, "" for none
+		wantAudit string
+	}{
+		"unknown name": {c.GetWebSharkCaptureFile, "/webshark/captures/x.pcap", "x.pcap", http.StatusNotFound, "Not Found", ""},
+		"download not granted": {
+			c.GetWebSharkJSON, "/webshark/json?method=download&capture=" + viewOnly, "", http.StatusForbidden, "Forbidden", "failure",
+		},
+		"file gone":   {c.GetWebSharkCaptureFile, "/webshark/captures/" + gone, gone, http.StatusNotFound, "not found", "failure"},
+		"not a file":  {c.GetWebSharkCaptureFile, "/webshark/captures/" + folder, folder, http.StatusNotFound, "not found", ""},
+		"not running": {c.GetWebSharkCaptureFile, "/webshark/captures/" + live, live, http.StatusNotFound, "not found", "failure"},
+		"watch, unknown name": {
+			c.GetWebSharkWatch, "/webshark/watch?capture=x.pcap", "", http.StatusNotFound, "Not Found", "",
+		},
+		"watch, file gone": {c.GetWebSharkWatch, "/webshark/watch?capture=" + gone, "", http.StatusNotFound, "not found", ""},
+		"watch not granted": {
+			c.GetWebSharkWatch, "/webshark/watch?capture=" + viewOnly, "", http.StatusForbidden, "Forbidden", "",
+		},
+		"unknown method": {
+			c.GetWebSharkJSON, "/webshark/json?method=status", "", http.StatusBadRequest, "method not allowed: status", "",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			events := captureAudit(t)
+
+			rec := websharkServe(tc.h, http.MethodGet, tc.target, tc.name)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("GET %s = %d, want %d", tc.target, rec.Code, tc.wantStatus)
+			}
+
+			if got := websharkErrorBody(t, rec); got != tc.wantErr {
+				t.Errorf("GET %s error = %q, want %q", tc.target, got, tc.wantErr)
+			}
+
+			got := events()
+
+			switch tc.wantAudit {
+			case "":
+				if n := countAudit(got, "capture-webshark-read", "success", nil); n != 0 {
+					t.Errorf("GET %s capture-webshark-read success audit events = %d, want 0", tc.target, n)
+				}
+			default:
+				if countAudit(got, "capture-webshark-read", tc.wantAudit, nil) == 0 &&
+					countAudit(got, "capture-webshark-download", tc.wantAudit, nil) == 0 {
+					t.Errorf("GET %s audit events = %v, want a %s", tc.target, got, tc.wantAudit)
+				}
+			}
+		})
+	}
+}
+
+// WebShark lists no files, and a HEAD of a capture, or a range resuming it,
+// is not audited as a read.
+func TestGetWebSharkJSONAndPartialReads(t *testing.T) {
+	useWebShark(t)
+
+	saved := filepath.Join(t.TempDir(), "router.pcap")
+	contents := append(testPcapHeader(), testPcapRecord(60)...)
+
+	if err := os.WriteFile(saved, contents, 0o600); err != nil {
+		t.Fatalf("writing router.pcap: %v", err)
+	}
+
+	c := grantChecker{}
+
+	rec := websharkServe(c.GetWebSharkJSON, http.MethodGet, "/webshark/json?method=files", "")
+	if got, want := rec.Body.String(), `{"files":[],"pwd":"."}`; got != want {
+		t.Errorf("GET /webshark/json?method=files = %q, want %q", got, want)
+	}
+
+	name := websharkGrant(t, capability.Target{Exp: "test-experiment", File: "router.pcap", Local: saved}, viewOps...)
+	events := captureAudit(t)
+
+	head := websharkServe(c.GetWebSharkCaptureFile, http.MethodHead, "/webshark/captures/"+name, name)
+	if head.Code != http.StatusOK || head.Header().Get("Content-Length") != strconv.Itoa(len(contents)) {
+		t.Errorf("HEAD /webshark/captures/%s = %d with Content-Length %q, want %d with %d",
+			name, head.Code, head.Header().Get("Content-Length"), http.StatusOK, len(contents))
+	}
+
+	resumed := websharkServe(c.GetWebSharkCaptureFile, http.MethodGet, "/webshark/captures/"+name, name, "Range", "bytes=24-")
+	if resumed.Code != http.StatusPartialContent || !bytes.Equal(resumed.Body.Bytes(), contents[24:]) {
+		t.Errorf("GET /webshark/captures/%s from byte 24 = %d with %d bytes, want %d with %d",
+			name, resumed.Code, resumed.Body.Len(), http.StatusPartialContent, len(contents)-24)
+	}
+
+	if n := countAudit(events(), "capture-webshark-read", "success", nil); n != 0 {
+		t.Errorf("capture-webshark-read audit events of a HEAD and a resumed range = %d, want 0", n)
+	}
+
+	full := websharkServe(c.GetWebSharkCaptureFile, http.MethodGet, "/webshark/captures/"+name, name)
+	if !bytes.Equal(full.Body.Bytes(), contents) {
+		t.Errorf("GET /webshark/captures/%s = %d bytes, want %d", name, full.Body.Len(), len(contents))
+	}
+
+	if n := countAudit(events(), "capture-webshark-read", "success", nil); n != 1 {
+		t.Errorf("capture-webshark-read audit events after a whole read = %d, want 1", n)
+	}
+}
+
+// A live capture that has stopped is read from its file from then on, and
+// its grant says so.
+func TestSharkSourceFallsBackToTheFile(t *testing.T) {
+	useWebShark(t)
+	useExperimentFilesDir(t, map[string]string{"live.pcap": "finished capture"})
+
+	target := capability.Target{Exp: "test-experiment", File: "live.pcap", VM: "test-vm", Interface: 0, Live: true}
+	name := websharkGrant(t, target, viewOps...)
+
+	rec := websharkServe(grantChecker{}.GetWebSharkCaptureFile, http.MethodGet, "/webshark/captures/"+name, name)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /webshark/captures/%s of a stopped capture = %d, want %d", name, rec.Code, http.StatusOK)
+	}
+
+	if got, want := rec.Body.String(), "finished capture"; got != want {
+		t.Errorf("GET /webshark/captures/%s of a stopped capture = %q, want %q", name, got, want)
+	}
+
+	// a saved file is resumable, which a running capture is not
+	if etag := rec.Header().Get("ETag"); etag == "" {
+		t.Errorf("GET /webshark/captures/%s of a stopped capture has no ETag, want the file's", name)
+	}
+
+	g, err := captureGrants.Use(name, capability.OpView)
+	if err != nil {
+		t.Fatalf("captureGrants.Use(%s) error = %v", name, err)
+	}
+
+	if g.Target.Live || g.Target.Local == "" {
+		t.Errorf("grant target after its capture stopped = %+v, want the saved file", g.Target)
+	}
+
+	// a stopped capture whose file is not there either is not found
+	missing := websharkGrant(t, capability.Target{Exp: "test-experiment", File: "gone.pcap", VM: "test-vm", Live: true}, viewOps...)
+
+	rec = websharkServe(grantChecker{}.GetWebSharkCaptureFile, http.MethodGet, "/webshark/captures/"+missing, missing)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /webshark/captures/%s of a stopped capture without its file = %d, want %d",
+			missing, rec.Code, http.StatusNotFound)
+	}
+}
+
+// A saved capture's watch tells its size once, then only sends heartbeats
+// until the watcher leaves.
+func TestGetWebSharkWatchOfSavedFile(t *testing.T) {
+	useWebShark(t)
+
+	saved := filepath.Join(t.TempDir(), "router.pcap")
+	if err := os.WriteFile(saved, testPcapHeader(), 0o600); err != nil {
+		t.Fatalf("writing router.pcap: %v", err)
+	}
+
+	name := websharkGrant(t, capability.Target{Exp: "test-experiment", File: "router.pcap", Local: saved}, viewOps...)
+
+	server := httptest.NewServer(http.HandlerFunc(grantChecker{}.GetWebSharkWatch))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	events := sharkEvents(ctx, t, server.URL+"/webshark/watch?capture="+name)
+
+	noMtime := cmpopts.IgnoreMapEntries(func(k string, _ any) bool { return k == "mtime" })
+
+	select {
+	case ev := <-events:
+		if diff := cmp.Diff(map[string]any{"kind": "init", "size": float64(len(testPcapHeader()))}, ev, noMtime); diff != "" {
+			t.Errorf("first /webshark/watch event of a saved file mismatch (-want +got):\n%s", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("/webshark/watch of a saved file sent no event within 5s, want init")
+	}
+
+	select {
+	case ev := <-events:
+		t.Errorf("/webshark/watch of a saved file sent %v after init, want nothing more", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// websharkWriter is a response writer that flushes and fails every write
+// after the first ok ones.
+type websharkWriter struct {
+	header http.Header
+	ok     int
+
+	mu   sync.Mutex
+	body bytes.Buffer
+}
+
+func (w *websharkWriter) Header() http.Header { return w.header }
+
+func (w *websharkWriter) WriteHeader(int) {}
+
+func (w *websharkWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.ok == 0 {
+		return 0, errors.New("watcher went away")
+	}
+
+	w.ok--
+
+	return w.body.Write(b)
+}
+
+// events counts the capture-changed events written so far.
+func (w *websharkWriter) events() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return strings.Count(w.body.String(), "event: capture-changed")
+}
+
+func (w *websharkWriter) Flush() {}
+
+// websharkNoFlush is a response writer that cannot flush.
+type websharkNoFlush struct {
+	http.ResponseWriter
+}
+
+// websharkNewWatch is a watch writing to w, with heartbeats every beat.
+func websharkNewWatch(t *testing.T, w http.ResponseWriter, beat time.Duration) *sharkWatch {
+	t.Helper()
+
+	watch := &sharkWatch{w: w, rc: http.NewResponseController(w), heartbeat: time.NewTicker(beat)}
+	t.Cleanup(watch.heartbeat.Stop)
+
+	return watch
+}
+
+// An event is sent and flushed, and a watcher that cannot take it ends the
+// watch.
+func TestSharkWatchSend(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	watch := websharkNewWatch(t, rec, time.Hour)
+
+	mtime := time.UnixMilli(1_700_000_000_123)
+	if !watch.changed(42, mtime, "append") {
+		t.Fatal("changed() to a recorder = false, want true")
+	}
+
+	want := `event: capture-changed` + "\n" + `data: {"kind":"append","mtime":1700000000123,"size":42}` + "\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("changed(42, %v, append) wrote %q, want %q", mtime, got, want)
+	}
+
+	if !rec.Flushed {
+		t.Error("changed() did not flush, want the event sent at once")
+	}
+
+	if websharkNewWatch(t, &websharkWriter{header: http.Header{}}, time.Hour).send("heartbeat", nil) {
+		t.Error("send() to a watcher that went away = true, want false")
+	}
+
+	if websharkNewWatch(t, websharkNoFlush{httptest.NewRecorder()}, time.Hour).send("heartbeat", nil) {
+		t.Error("send() to a writer that cannot flush = true, want false")
+	}
+}
+
+// wait sends heartbeats until a channel fires or the watch ends.
+func TestSharkWatchWait(t *testing.T) {
+	t.Parallel()
+
+	changed := make(chan struct{})
+	close(changed)
+
+	tests := map[string]struct {
+		due     bool
+		changed <-chan struct{}
+		// how long until the watch ends: 0 for never, below 0 for already
+		ends      time.Duration
+		w         func() http.ResponseWriter
+		want      bool
+		heartbeat bool
+	}{
+		"due":                     {due: true, w: websharkRecorder, want: true},
+		"changed":                 {changed: changed, w: websharkRecorder, want: true},
+		"watch ended":             {ends: -1, w: websharkRecorder},
+		"heartbeat, then ended":   {ends: 80 * time.Millisecond, w: websharkRecorder, heartbeat: true},
+		"heartbeat to no watcher": {w: func() http.ResponseWriter { return &websharkWriter{header: http.Header{}} }},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+
+			switch {
+			case tc.ends < 0:
+				cancel()
+			case tc.ends > 0:
+				time.AfterFunc(tc.ends, cancel)
+			}
+
+			var due chan time.Time
+			if tc.due {
+				due = make(chan time.Time, 1)
+				due <- time.Now()
+			}
+
+			w := tc.w()
+			watch := websharkNewWatch(t, w, 10*time.Millisecond)
+
+			var got bool
+
+			polltest.Within(t, "wait returning", func() { got = watch.wait(ctx, due, tc.changed) })
+
+			if got != tc.want {
+				t.Errorf("wait(%s) = %t, want %t", name, got, tc.want)
+			}
+
+			if rec, ok := w.(*httptest.ResponseRecorder); ok && tc.heartbeat &&
+				!strings.HasPrefix(rec.Body.String(), "event: heartbeat\ndata: {\"t\":") {
+				t.Errorf("wait(%s) wrote %q, want heartbeats", name, rec.Body.String())
+			}
+		})
+	}
+}
+
+// websharkRecorder is a new response recorder, as a writer.
+func websharkRecorder() http.ResponseWriter { return httptest.NewRecorder() }
+
+// A live watch ends as soon as the watcher cannot take an event: the first,
+// or the one telling that the capture grew.
+func TestWatchSharkTapEndsWhenTheWatcherLeaves(t *testing.T) {
+	fake := useWebShark(t)
+	live := useLiveCapture(t, fake)
+	live.write(t, testPcapHeader(), testPcapRecord(60))
+
+	followLiveCapture(t)
+
+	for name, ok := range map[string]int{"init": 0, "append": 1} {
+		t.Run(name, func(t *testing.T) {
+			tap, err := livecapture.Open("test-experiment", "test-vm", 0)
+			if err != nil {
+				t.Fatalf("livecapture.Open(test-experiment, test-vm, 0) = %v", err)
+			}
+
+			defer tap.Release()
+
+			w := &websharkWriter{header: http.Header{}, ok: ok}
+			done := make(chan struct{})
+
+			go func() {
+				defer close(done)
+
+				watchSharkTap(t.Context(), websharkNewWatch(t, w, time.Hour), tap)
+			}()
+
+			if ok > 0 {
+				live.write(t, testPcapRecord(60))
+			}
+
+			polltest.Within(t, "the watch ending", func() { <-done })
+
+			if got := w.events(); got != ok {
+				t.Errorf("events the watcher took = %d, want %d", got, ok)
+			}
+		})
+	}
+}
+
+// A capture that grows again soon after it was told of is told of once
+// sharkUpdateInterval has passed, not at once.
+func TestWatchSharkTapWaitsBetweenUpdates(t *testing.T) {
+	fake := useWebShark(t)
+	live := useLiveCapture(t, fake)
+	live.write(t, testPcapHeader(), testPcapRecord(60))
+
+	followLiveCapture(t)
+
+	tap, err := livecapture.Open("test-experiment", "test-vm", 0)
+	if err != nil {
+		t.Fatalf("livecapture.Open(test-experiment, test-vm, 0) = %v", err)
+	}
+
+	defer tap.Release()
+
+	w := &websharkWriter{header: http.Header{}, ok: 100}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		watchSharkTap(ctx, websharkNewWatch(t, w, time.Hour), tap)
+	}()
+
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	polltest.Until(t, "the init event", func() bool { return w.events() == 1 })
+
+	live.write(t, testPcapRecord(60))
+	polltest.Until(t, "the first append", func() bool { return w.events() == 2 })
+
+	told := time.Now()
+
+	live.write(t, testPcapRecord(60))
+	polltest.Until(t, "the second append", func() bool { return w.events() == 3 })
+
+	if waited := time.Since(told); waited < sharkMinUpdate-100*time.Millisecond {
+		t.Errorf("second append told %s after the first, want about %s", waited, sharkMinUpdate)
+	}
+}
+
+func TestSharkUpdateInterval(t *testing.T) {
+	t.Parallel()
+
+	for size, want := range map[int64]time.Duration{
+		0:                        time.Second,
+		sharkBytesPerSecond - 1:  time.Second,
+		sharkBytesPerSecond:      2 * time.Second,
+		5 * sharkBytesPerSecond:  6 * time.Second,
+		9 * sharkBytesPerSecond:  10 * time.Second,
+		10 * sharkBytesPerSecond: 10 * time.Second,
+		1 << 40:                  10 * time.Second,
+	} {
+		if got := sharkUpdateInterval(size); got != want {
+			t.Errorf("sharkUpdateInterval(%d) = %s, want %s", size, got, want)
+		}
+	}
+}
+
+func TestSharkBaseNameAndTitle(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		target          capability.Target
+		base, wantTitle string
+	}{
+		"saved file": {capability.Target{File: "captures/router.pcap"}, "router.pcap", "captures/router.pcap"},
+		"live with its file": {
+			capability.Target{File: "live.pcap", VM: "vm", Interface: 2, Live: true}, "live.pcap", "vm interface 2 (live)",
+		},
+		"live without a file": {capability.Target{VM: "vm", Interface: 0, Live: true}, "vm-0.pcap", "vm interface 0 (live)"},
+	}
+
+	for name, tc := range tests {
+		if got := sharkBaseName(tc.target); got != tc.base {
+			t.Errorf("sharkBaseName(%s) = %q, want %q", name, got, tc.base)
+		}
+
+		if got := sharkTitle(tc.target); got != tc.wantTitle {
+			t.Errorf("sharkTitle(%s) = %q, want %q", name, got, tc.wantTitle)
+		}
+	}
+}
+
+func TestReadsFromStart(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		method, rng string
+		want        bool
+	}{
+		{http.MethodGet, "", true},
+		{http.MethodGet, "bytes=0-", true},
+		{http.MethodGet, "bytes=0-99", true},
+		{http.MethodGet, "bytes=5-", false},
+		{http.MethodGet, "bytes=-100", false},
+		{http.MethodHead, "", false},
+	} {
+		req := httptest.NewRequest(tc.method, "/webshark/captures/a.pcap", nil)
+		if tc.rng != "" {
+			req.Header.Set("Range", tc.rng)
+		}
+
+		if got := readsFromStart(req); got != tc.want {
+			t.Errorf("readsFromStart(%s Range %q) = %t, want %t", tc.method, tc.rng, got, tc.want)
+		}
+	}
+}
+
+func TestSharkContentType(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]string{
+		"wiregasm.wasm":  "application/wasm",
+		"main.js":        "text/javascript; charset=utf-8",
+		"worker.mjs":     "text/javascript; charset=utf-8",
+		"wiregasm.data":  "application/octet-stream",
+		"styles.css":     "text/css; charset=utf-8",
+		"index.html":     "text/html; charset=utf-8",
+		"no-extension":   "application/octet-stream",
+		"file.unknownxx": "application/octet-stream",
+	} {
+		if got := sharkContentType(name); got != want {
+			t.Errorf("sharkContentType(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// websharkNoSeek hides its files' Seek, as a file system that cannot seek.
+type websharkNoSeek struct {
+	fs.FS
+}
+
+func (s websharkNoSeek) Open(name string) (fs.File, error) {
+	f, err := s.FS.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // as the file system answers
+	}
+
+	return struct{ fs.File }{f}, nil
+}
+
+// Only a regular file that can seek is served, gzipped when it is the
+// compressed copy.
+func TestServeSharkFile(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{"main.js": {Data: []byte("main")}, "assets/a.png": {Data: []byte("png")}}
+
+	tests := map[string]struct {
+		fsys     fs.FS
+		name     string
+		gzipped  bool
+		want     bool
+		wantBody string
+	}{
+		"file":        {fsys, "main.js", false, true, "main"},
+		"gzipped":     {fsys, "main.js", true, true, "main"},
+		"missing":     {fsys, "gone.js", false, false, ""},
+		"folder":      {fsys, "assets", false, false, ""},
+		"cannot seek": {websharkNoSeek{fsys}, "main.js", false, false, ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+
+			req := httptest.NewRequest(http.MethodGet, "/webshark/"+tc.name, nil)
+
+			if got := serveSharkFile(rec, req, tc.fsys, tc.name, tc.gzipped); got != tc.want {
+				t.Fatalf("serveSharkFile(%s) = %t, want %t", name, got, tc.want)
+			}
+
+			if rec.Body.String() != tc.wantBody {
+				t.Errorf("serveSharkFile(%s) body = %q, want %q", name, rec.Body.String(), tc.wantBody)
+			}
+
+			if got := rec.Header().Get("Content-Encoding") == "gzip"; got != (tc.want && tc.gzipped) {
+				t.Errorf("serveSharkFile(%s) gzip Content-Encoding = %t, want %t", name, got, tc.want && tc.gzipped)
+			}
+		})
+	}
+}
+
+// The build's file is read as it is, or from its compressed copy; a copy that
+// is not gzip, or is cut short, is an error.
+func TestReadSharkFile(t *testing.T) {
+	t.Parallel()
+
+	gz := gzipped(t, []byte("from the copy"))
+
+	fsys := fstest.MapFS{
+		"plain.js":      {Data: []byte("plain")},
+		"copy.js.gz":    {Data: gz},
+		"corrupt.js.gz": {Data: []byte("not gzip")},
+		"cut.js.gz":     {Data: gz[:len(gz)-8]},
+		"folder/x":      {Data: nil},
+	}
+
+	tests := map[string]struct {
+		want    string
+		wantErr bool
+	}{
+		"plain.js":   {"plain", false},
+		"copy.js":    {"from the copy", false},
+		"corrupt.js": {"", true},
+		"cut.js":     {"", true},
+		"gone.js":    {"", true},
+		"folder":     {"", true},
+	}
+
+	for name, tc := range tests {
+		b, _, err := readSharkFile(fsys, name)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("readSharkFile(%s) error = %v, want error: %t", name, err, tc.wantErr)
+		}
+
+		if err == nil && string(b) != tc.want {
+			t.Errorf("readSharkFile(%s) = %q, want %q", name, b, tc.want)
+		}
+	}
+}
+
+// The rebaser is off at the root and for a base path the build's scripts
+// cannot take, and rewrites each file once however many requests ask.
+func TestNewSharkRebaser(t *testing.T) {
+	logs := plogtest.Capture(t)
+
+	fsys := fstest.MapFS{"main.js": {Data: []byte(`fetch("/webshark/json")`)}, "corrupt.js.gz": {Data: []byte("not gzip")}}
+
+	for _, base := range []string{"/", `/a"b/`, "/no-trailing-slash", "relative/"} {
+		if r := newSharkRebaser(fsys, base); r != nil {
+			t.Errorf("newSharkRebaser(%q) = %v, want nil", base, r)
+		}
+
+		if (*sharkRebaser)(nil).serve(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/webshark/main.js", nil), "main.js") {
+			t.Error("nil sharkRebaser.serve() = true, want false")
+		}
+	}
+
+	const refused = "WebShark works only at /webshark/: the base path has characters its scripts cannot accept"
+
+	if got := len(logs.Take(t, plogtest.Message(refused))); got != 3 {
+		t.Errorf("warnings of base paths the scripts cannot take = %d, want 3", got)
+	}
+
+	r := newSharkRebaser(fsys, "/proxy/")
+
+	if f := r.file("gone.js"); f != nil {
+		t.Errorf("file(gone.js) = %v, want nil for a file the build does not have", f)
+	}
+
+	if f := r.file("corrupt.js"); f == nil || f.err == nil {
+		t.Errorf("file(corrupt.js) = %v, want its read error", f)
+	}
+
+	if r.serve(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/webshark/corrupt.js", nil), "corrupt.js") {
+		t.Error("serve(corrupt.js) = true, want false for a file that cannot be read")
+	}
+
+	files := make(chan *rebasedSharkFile, 16)
+
+	var wg sync.WaitGroup
+
+	for range cap(files) {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			files <- r.file("main.js")
+		}()
+	}
+
+	wg.Wait()
+	close(files)
+
+	first := <-files
+	for f := range files {
+		if f != first {
+			t.Fatal("concurrent file(main.js) calls returned different entries, want one rewritten once")
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	if !r.serve(rec, httptest.NewRequest(http.MethodGet, "/webshark/main.js", nil), "main.js") {
+		t.Fatal("serve(main.js) = false, want the rewritten file")
+	}
+
+	if got, want := rec.Body.String(), `fetch("/proxy/webshark/json")`; got != want {
+		t.Errorf("serve(main.js) = %q, want %q", got, want)
+	}
+}
+
+// A build file kept only as a compressed copy that is not gzip is answered
+// 500; a trustworthy origin gets the isolation headers, another does not.
+func TestWebSharkHandlerCorruptCopyAndIsolation(t *testing.T) {
+	t.Parallel()
+
+	handler := WebSharkHandler(writeSharkBuild(t, map[string][]byte{
+		"index.html":       []byte("<html>"),
+		"broken.wasm.gz":   []byte("not gzip"),
+		"assets/style.css": []byte("a{}"),
+	}), "/")
+
+	if rec := get(t, handler, "/webshark/broken.wasm", ""); rec.StatusCode != http.StatusInternalServerError {
+		t.Errorf("GET /webshark/broken.wasm of a corrupt copy = %d, want %d", rec.StatusCode, http.StatusInternalServerError)
+	}
+
+	for host, want := range map[string]bool{"localhost:3000": true, "[::1]:3000": true, "phenix.example.com": false} {
+		req := httptest.NewRequest(http.MethodGet, "/webshark/", nil)
+		req.Host = host
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		isolated := map[string]string{
+			"Cross-Origin-Opener-Policy":   rec.Header().Get("Cross-Origin-Opener-Policy"),
+			"Cross-Origin-Embedder-Policy": rec.Header().Get("Cross-Origin-Embedder-Policy"),
+		}
+
+		wantHeaders := map[string]string{"Cross-Origin-Opener-Policy": "", "Cross-Origin-Embedder-Policy": ""}
+		if want {
+			wantHeaders = map[string]string{
+				"Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "credentialless",
+			}
+		}
+
+		if diff := cmp.Diff(wantHeaders, isolated); diff != "" {
+			t.Errorf("GET /webshark/ from host %s isolation headers mismatch (-want +got):\n%s", host, diff)
+		}
+	}
+}
+
+func TestSharkError(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sharkError(rec, `bad "method"`, http.StatusTeapot)
+
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("sharkError() status = %d, want %d", rec.Code, http.StatusTeapot)
+	}
+
+	if got, want := rec.Body.String(), `{"err":1,"errstr":"bad \"method\""}`; got != want {
+		t.Errorf("sharkError() body = %q, want %q", got, want)
+	}
+
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("sharkError() Content-Type = %q, want application/json", got)
+	}
 }

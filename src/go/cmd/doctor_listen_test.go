@@ -76,12 +76,22 @@ func TestTLSCheck(t *testing.T) {
 	oldKey, oldCert, _ := writeTestKeyPair(t, dir, "old", now.Add(-30*day), now.Add(-day))
 	otherKey, _, _ := writeTestKeyPair(t, dir, "other", now.Add(-day), now.Add(365*day))
 	missing := filepath.Join(dir, "missing.crt")
+	missingKey := filepath.Join(dir, "missing.key")
 
 	tests := map[string]struct {
-		key, cert string
-		want      doctorCheck
-		prefix    bool // want.Detail is a prefix, before an error text that varies by Go version
+		key, cert  string
+		unreadable string // readFile fails for this path after stat and access pass
+		want       doctorCheck
+		prefix     bool // want.Detail is a prefix, before an error text that varies by Go version
 	}{
+		"missing key":      {key: missingKey, cert: cert, want: failCheck(missingKey + " does not exist")},
+		"cert a directory": {key: key, cert: dir, want: failCheck(dir + " is not a regular file")},
+		"cert unreadable": {
+			key: key, cert: cert, unreadable: cert, want: failCheck("reading " + cert + ": permission denied"),
+		},
+		"key unreadable": {
+			key: key, cert: cert, unreadable: key, want: failCheck("reading " + key + ": permission denied"),
+		},
 		"not set":      {want: passCheck("not set, so phenix ui serves plain HTTP")},
 		"only key":     {key: key, want: failCheck("ui.tls-key is set without ui.tls-cert, so phenix ui serves plain HTTP")},
 		"only cert":    {cert: cert, want: failCheck("ui.tls-cert is set without ui.tls-key, so phenix ui serves plain HTTP")},
@@ -100,6 +110,17 @@ func TestTLSCheck(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+
+			env := env
+			if tc.unreadable != "" {
+				env.readFile = func(path string) ([]byte, error) {
+					if path == tc.unreadable {
+						return nil, os.ErrPermission
+					}
+
+					return os.ReadFile(path)
+				}
+			}
 
 			got := env.tlsCheck(tc.key, tc.cert)
 			if tc.prefix && strings.HasPrefix(got.Detail, tc.want.Detail) {
@@ -270,6 +291,143 @@ func TestTLSCertRedacted(t *testing.T) {
 	for _, name := range []string{"secretlab", "corp.example"} {
 		if strings.Contains(got, name) {
 			t.Errorf("redact(%q) = %q, which keeps %s", rows[0].Detail, got, name)
+		}
+	}
+}
+
+// The host users reach is the host of ui.listen-endpoint, unless that is
+// every address or not host:port; then it is this host's name, if known.
+func TestDoctorListenTLSTarget(t *testing.T) {
+	t.Parallel()
+
+	const listenWhat, hostWhat = "the host of ui.listen-endpoint", "the host name of this host"
+
+	named := func(name string, err error) func() (string, error) {
+		return func() (string, error) { return name, err }
+	}
+
+	tests := map[string]struct {
+		listen   string
+		hostname func() (string, error)
+		want     [2]string
+	}{
+		"address": {
+			listen: "192.0.2.10:443", hostname: named("ws42", nil), want: [2]string{"192.0.2.10", listenWhat},
+		},
+		"IPv6 address": {listen: "[2001:db8::1]:443", want: [2]string{"2001:db8::1", listenWhat}},
+		"name":         {listen: "ui.example.com:443", want: [2]string{"ui.example.com", listenWhat}},
+		"every IPv4 address": {
+			listen: "0.0.0.0:3000", hostname: named("ws42", nil), want: [2]string{"ws42", hostWhat},
+		},
+		"every IPv6 address": {
+			listen: "[::]:3000", hostname: named("ws42", nil), want: [2]string{"ws42", hostWhat},
+		},
+		"no host":                {listen: ":3000", hostname: named("ws42", nil), want: [2]string{"ws42", hostWhat}},
+		"not host:port":          {listen: "3000", hostname: named("ws42", nil), want: [2]string{"ws42", hostWhat}},
+		"empty":                  {hostname: named("ws42", nil), want: [2]string{"ws42", hostWhat}},
+		"no host name reader":    {listen: "0.0.0.0:3000"},
+		"host name fails":        {listen: "0.0.0.0:3000", hostname: named("ws42", os.ErrPermission)},
+		"empty host name":        {listen: ":3000", hostname: named("", nil)},
+		"every address, no name": {listen: "[::]:443"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := &doctorInput{
+				settings: map[string]resolvedSetting{"ui.listen-endpoint": {text: tc.listen}},
+				hostname: tc.hostname,
+			}
+
+			host, what := tlsTarget(in)
+			if diff := cmp.Diff(tc.want, [2]string{host, what}); diff != "" {
+				t.Errorf("tlsTarget() with ui.listen-endpoint %q mismatch (-want +got):\n%s", tc.listen, diff)
+			}
+		})
+	}
+}
+
+// A certificate covers a host its names verify for, and a host name without
+// a domain whose full name it holds; never an IP address or a full name it lacks.
+func TestDoctorListenCertCovers(t *testing.T) {
+	t.Parallel()
+
+	cert := &x509.Certificate{
+		DNSNames:    []string{"ws42.example.com", "*.lab.example.com", "localhost"},
+		IPAddresses: []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1")},
+	}
+
+	tests := map[string]bool{
+		"ws42.example.com":    true,
+		"WS42.Example.com":    true,
+		"ws42":                true,
+		"WS42":                true,
+		"ui.lab.example.com":  true,
+		"localhost":           true,
+		"192.0.2.10":          true,
+		"2001:db8::1":         true,
+		"ws4":                 false,
+		"lab":                 false,
+		"example":             false,
+		"other.example.com":   false,
+		"a.b.lab.example.com": false,
+		"192.0.2.11":          false,
+		"2001:db8::2":         false,
+		"":                    false,
+	}
+
+	for host, want := range tests {
+		if got := certCovers(cert, host); got != want {
+			t.Errorf("certCovers(%v, %q) = %t, want %t", cert.DNSNames, host, got, want)
+		}
+	}
+
+	if certCovers(&x509.Certificate{}, "ws42") {
+		t.Error(`certCovers(no names, "ws42") = true, want false`)
+	}
+}
+
+// certNames is the DNS names, then the IP addresses, and leaves the
+// certificate as it was.
+func TestDoctorListenCertNames(t *testing.T) {
+	t.Parallel()
+
+	dns := make([]string, 1, 4)
+	dns[0] = "ws42.example.com"
+	cert := &x509.Certificate{DNSNames: dns, IPAddresses: []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("::1")}}
+
+	want := []string{"ws42.example.com", "192.0.2.10", "::1"}
+	if diff := cmp.Diff(want, certNames(cert)); diff != "" {
+		t.Errorf("certNames() mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff([]string{"ws42.example.com"}, cert.DNSNames); diff != "" || dns[:2][1] != "" {
+		t.Errorf("certNames() changed the certificate's DNS names (-want +got):\n%s", diff)
+	}
+
+	if got := certNames(&x509.Certificate{}); len(got) != 0 {
+		t.Errorf("certNames(no names) = %v, want none", got)
+	}
+}
+
+// worseStatus is the worse of two statuses, in either order: fail, then
+// warn, then pass.
+func TestDoctorListenWorseStatus(t *testing.T) {
+	t.Parallel()
+
+	ranked := []doctorStatus{doctorPass, doctorWarn, doctorFail}
+
+	for ra, a := range ranked {
+		for rb, b := range ranked {
+			want := a
+			if rb > ra {
+				want = b
+			}
+
+			if got := worseStatus(a, b); got != want {
+				t.Errorf("worseStatus(%s, %s) = %s, want %s", a, b, got, want)
+			}
 		}
 	}
 }

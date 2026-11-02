@@ -39,6 +39,11 @@ func TestVMTargetErrorResponse(t *testing.T) {
 			errs: []string{"", "vm not found: vm1", "vm not found: vm1"},
 		},
 		"single node succeeds": {errs: []string{""}},
+		"no node answers":      {errs: nil},
+		"several other errors": {
+			errs: []string{"VM state error: vm1", "", "bind: address already in use"},
+			want: "bind: address already in use",
+		},
 		"not found anywhere": {
 			errs: []string{"vm not found: vm1", "vm not found: vm1"},
 			want: "vm not found: vm1",

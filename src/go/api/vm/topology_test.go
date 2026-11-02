@@ -1,6 +1,8 @@
 package vm_test
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"testing"
@@ -261,4 +263,128 @@ func TestTopologyProperties(t *testing.T) {
 			t.Errorf("TopologySearchIndex(%q).VLAN mismatch (-want +got):\n%s", testExp, diff)
 		}
 	})
+}
+
+// Topology and TopologySearchIndex fail for an experiment the store lacks, and Topology fails once its context is
+// done, wrapping the context's error and caching no search index.
+func TestTopologyErrors(t *testing.T) {
+	useExperiment(t, startTime, vmNode("a", vmIface("IF0", "EXP_1", "10.0.0.1")))
+	useMM(t, &fakeMM{vms: mm.VMs{runningVM("a", "EXP_1 (101)")}})
+
+	fake := &recordingCache{vals: map[string]any{}, ttls: map[string]time.Duration{}}
+	original := cache.DefaultCache
+	cache.DefaultCache = fake //nolint:reassign // install test double
+
+	t.Cleanup(func() { cache.DefaultCache = original }) //nolint:reassign // restore
+
+	if _, err := vm.Topology(t.Context(), "missing", nil); err == nil {
+		t.Error("Topology(missing, nil) error = nil, want an error")
+	}
+
+	if _, err := vm.TopologySearchIndex("missing"); err == nil {
+		t.Error("TopologySearchIndex(missing) error = nil, want an error")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	topo, err := vm.Topology(ctx, testExp, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Topology(canceled, %q, nil) error = %v, want %v", testExp, err, context.Canceled)
+	}
+
+	if len(topo.Nodes) != 0 || len(topo.Edges) != 0 {
+		t.Errorf("Topology(canceled, %q, nil) = %+v, want an empty topology", testExp, topo)
+	}
+
+	if fake.sets != 0 {
+		t.Errorf("search index cache sets after failed calls = %d, want 0", fake.sets)
+	}
+}
+
+// topologyIndexOf returns the search index TopologySearchIndex builds for the VM a with the given cache entries.
+func topologyIndexOf(t *testing.T, cached map[string]any) vm.TopologySearch {
+	t.Helper()
+
+	stored := useExperiment(t, startTime, vmNode("a", vmIface("IF0", "EXP_1", "10.0.0.1")))
+	stored.experiment.Metadata.Revision = 3
+
+	running := runningVM("a", "EXP_1 (101)")
+	running.Disk = "/phenix/images/a.qc2" // as minimega reports it
+
+	useMM(t, &fakeMM{vms: mm.VMs{running}})
+
+	original := cache.DefaultCache
+	cache.DefaultCache = &recordingCache{vals: cached, ttls: map[string]time.Duration{}} //nolint:reassign // install test double
+
+	t.Cleanup(func() { cache.DefaultCache = original }) //nolint:reassign // restore
+
+	search, err := vm.TopologySearchIndex(testExp)
+	if err != nil {
+		t.Fatalf("TopologySearchIndex(%q) error = %v", testExp, err)
+	}
+
+	return search
+}
+
+// topologyWantIndex is the search index of the VM a that topologyIndexOf stores.
+func topologyWantIndex() vm.TopologySearch {
+	return vm.TopologySearch{
+		Hostname: map[string]int{"a": 0},
+		Disk:     map[string][]int{"/phenix/images/a.qc2": {0}},
+		Type:     map[string][]int{"VirtualMachine": {0}},
+		OSType:   map[string][]int{"linux": {0}},
+		VLAN:     map[string][]int{"EXP_1": {0}},
+		IP:       map[string][]int{"10.0.0.1": {0}},
+	}
+}
+
+// A new search index finds a VM by its name, minimega's disk, type, OS type, VLANs and addresses.
+func TestTopologySearchIndexFields(t *testing.T) {
+	search := topologyIndexOf(t, map[string]any{})
+
+	if diff := cmp.Diff(topologyWantIndex(), search); diff != "" {
+		t.Errorf("TopologySearchIndex(%q) mismatch (-want +got):\n%s", testExp, diff)
+	}
+}
+
+// A cached value that is not a search index is replaced by one built anew.
+func TestTopologySearchIndexReplacesOtherCachedValue(t *testing.T) {
+	t.Skip("bug: topologyFor treats any cached value as an index, so a value of another type gives an empty index")
+
+	search := topologyIndexOf(t, map[string]any{"experiment|" + testExp + "|search|r3": "not an index"})
+
+	if diff := cmp.Diff(topologyWantIndex(), search); diff != "" {
+		t.Errorf("TopologySearchIndex(%q) mismatch (-want +got):\n%s", testExp, diff)
+	}
+}
+
+// The search index finds a VM by each of its topology labels and annotations.
+func TestTopologySearchIndexFindsLabels(t *testing.T) {
+	t.Skip("bug: ListFor leaves mm.VM Labels and Annotations empty (only Tags), so topologyFor never indexes them")
+
+	node := vmNode("a")
+	node["labels"] = map[string]string{"role": "edge"}
+	node["annotations"] = map[string]any{"vncBanner": "x"}
+
+	useExperiment(t, startTime, node)
+	useMM(t, &fakeMM{vms: mm.VMs{runningVM("a")}})
+
+	original := cache.DefaultCache
+	cache.DefaultCache = &recordingCache{vals: map[string]any{}, ttls: map[string]time.Duration{}} //nolint:reassign // install test double
+
+	t.Cleanup(func() { cache.DefaultCache = original }) //nolint:reassign // restore
+
+	search, err := vm.TopologySearchIndex(testExp)
+	if err != nil {
+		t.Fatalf("TopologySearchIndex(%q) error = %v", testExp, err)
+	}
+
+	if diff := cmp.Diff(map[string][]int{"vncBanner": {0}}, search.Annotation); diff != "" {
+		t.Errorf("TopologySearchIndex(%q).Annotation mismatch (-want +got):\n%s", testExp, diff)
+	}
+
+	if diff := cmp.Diff(map[string][]int{"role=edge": {0}}, search.Label); diff != "" {
+		t.Errorf("TopologySearchIndex(%q).Label mismatch (-want +got):\n%s", testExp, diff)
+	}
 }

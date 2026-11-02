@@ -1,6 +1,9 @@
 package experiment
 
 import (
+	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -85,5 +88,134 @@ func TestResetAppsRunningClearsOnlyRunningExperiments(t *testing.T) { //nolint:p
 
 	if _, ok := running.Status.AppStatus()["soh"]; !ok {
 		t.Error("running experiment lost its soh app status in ResetAppsRunning(), want it kept")
+	}
+}
+
+// recoverStore is a BoltDB whose List or Update fails while listErr or updateErr is set, counting the updates.
+type recoverStore struct {
+	*store.BoltDB
+
+	listErr, updateErr error
+	updates            atomic.Int64
+}
+
+func (s *recoverStore) List(kinds ...string) (store.Configs, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+
+	return s.BoltDB.List(kinds...) //nolint:wrapcheck // the store's own error
+}
+
+func (s *recoverStore) Update(c *store.Config) error {
+	s.updates.Add(1)
+
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+
+	return s.BoltDB.Update(c) //nolint:wrapcheck // the store's own error
+}
+
+// useRecoverStore makes a new recoverStore the phenix store until the test ends.
+func useRecoverStore(t *testing.T) *recoverStore {
+	t.Helper()
+
+	s := &recoverStore{BoltDB: storetest.NewBolt(t)}
+	storetest.Use(t, s)
+
+	return s
+}
+
+// ResetAppsRunning writes only the experiments it changes, and reports a store that fails.
+func TestResetAppsRunningErrors(t *testing.T) { //nolint:paralleltest // replaces the package store
+	failed := errors.New("store is read-only")
+
+	tests := []struct {
+		name        string
+		status      map[string]any
+		listErr     error
+		updateErr   error
+		wantErr     []string // parts of the error, none for no error
+		wantUpdates int64
+	}{
+		{
+			name:   "no flag set writes nothing",
+			status: map[string]any{"startTime": stopTestStart, "appRunningStageStatus": map[string]any{"soh": false}},
+		},
+		{
+			name:   "no flags at all writes nothing",
+			status: map[string]any{"startTime": stopTestStart},
+		},
+		{
+			name:        "a set flag is written",
+			status:      map[string]any{"startTime": stopTestStart, "appRunningStageStatus": map[string]any{"soh": true}},
+			wantUpdates: 1,
+		},
+		{
+			name:    "the experiments cannot be listed",
+			status:  map[string]any{"startTime": stopTestStart},
+			listErr: failed,
+			wantErr: []string{"listing running experiments", failed.Error()},
+		},
+		{
+			name:        "the cleared flags cannot be written",
+			status:      map[string]any{"startTime": stopTestStart, "appRunningStageStatus": map[string]any{"soh": true}},
+			updateErr:   failed,
+			wantErr:     []string{"clearing app running flags of experiment exp", failed.Error()},
+			wantUpdates: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := useRecoverStore(t)
+			storeExperiment(t, "exp", tc.status)
+
+			s.listErr, s.updateErr = tc.listErr, tc.updateErr
+
+			err := ResetAppsRunning()
+
+			switch {
+			case len(tc.wantErr) == 0 && err != nil:
+				t.Errorf("ResetAppsRunning() error = %v, want nil", err)
+			case len(tc.wantErr) > 0 && (err == nil || !errors.Is(err, failed)):
+				t.Errorf("ResetAppsRunning() error = %v, want one wrapping %v", err, failed)
+			}
+
+			for _, part := range tc.wantErr {
+				if err != nil && !strings.Contains(err.Error(), part) {
+					t.Errorf("ResetAppsRunning() error = %q, want it to contain %q", err, part)
+				}
+			}
+
+			if got := s.updates.Load(); got != tc.wantUpdates {
+				t.Errorf("ResetAppsRunning() store updates = %d, want %d", got, tc.wantUpdates)
+			}
+		})
+	}
+}
+
+// A failure writing one experiment does not keep the others from being cleared.
+func TestResetAppsRunningGoesOnAfterAFailure(t *testing.T) { //nolint:paralleltest // replaces the package store
+	s := useRecoverStore(t)
+
+	for _, name := range []string{"a", "b"} {
+		storeExperiment(t, name, map[string]any{"startTime": stopTestStart, "appRunningStageStatus": map[string]any{"soh": true}})
+	}
+
+	s.updateErr = errors.New("store is read-only")
+
+	err := ResetAppsRunning()
+
+	if diff := cmp.Diff([]string{
+		"clearing app running flags of experiment a: saving experiment config: store is read-only",
+		"clearing app running flags of experiment b: saving experiment config: store is read-only",
+	}, errorTexts(err)); diff != "" {
+		t.Errorf("ResetAppsRunning() errors mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := s.updates.Load(); got != 2 {
+		t.Errorf("ResetAppsRunning() store updates = %d, want 2", got)
 	}
 }

@@ -222,3 +222,47 @@ func flagDefault(key string, f *pflag.Flag) string {
 func envVar(key string) string {
 	return "PHENIX_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(key))
 }
+
+// The docs helpers read the first code span of a cell, the long flag a cell
+// names, the first table under a heading, and the variable viper reads.
+func TestSettingsDocsHelpers(t *testing.T) {
+	t.Parallel()
+
+	spans := map[string]string{
+		"`a` and `b`": "a", "—": "", "`\"\"`": "", "plain": "", "": "", "`ui.users` (secret)": "ui.users",
+	}
+	for cell, want := range spans {
+		if got := firstSpan(cell); got != want {
+			t.Errorf("firstSpan(%q) = %q, want %q", cell, got, want)
+		}
+	}
+
+	flags := map[string]string{
+		"`-h, --help`": "help", "`--log.level`": "log.level", "`-x` or `--no-print-settings`": "no-print-settings",
+		"no span": "no span",
+	}
+	for cell, want := range flags {
+		if got := flagName(cell); got != want {
+			t.Errorf("flagName(%q) = %q, want %q", cell, got, want)
+		}
+	}
+
+	for _, key := range append(knownSettings(), "ui.logs.minimega-path", "base-dir.phenix") {
+		if got, want := envVar(key), settingEnvVar(key); got != want {
+			t.Errorf("envVar(%q) = %q, want %q, the variable doctor reads", key, got, want)
+		}
+	}
+
+	doc := "# Title\n\n## Other\n\n| a | b |\n|---|---|\n| x | y |\n\n## Wanted\n\nSome text.\n\n" +
+		"| Key | Rest |\n|---|---|\n| `k1` | one | two |\n|  `k2`  |  three  |\n\n| `after` | gap |\n\n## Next\n"
+	path := writeTestFile(t, t.TempDir(), "doc.md", doc)
+
+	want := [][]string{{"`k1`", "one | two"}, {"`k2`", "three"}}
+	if diff := cmp.Diff(want, docTable(t, path, "Wanted", 2)); diff != "" {
+		t.Errorf("docTable(Wanted) mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff([][]string{{"x", "y"}}, docTable(t, path, "Other", 2)); diff != "" {
+		t.Errorf("docTable(Other) mismatch (-want +got):\n%s", diff)
+	}
+}

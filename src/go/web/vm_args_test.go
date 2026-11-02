@@ -8,13 +8,31 @@ import (
 	"phenix/api/experiment"
 )
 
+// A tag minimega would not take as one quoted argument is refused, in its key or its value; a newline or tab,
+// which it takes, is not.
 func TestUpdateVMRejectsUnsafeTags(t *testing.T) {
-	useAnnotatedVMExperiment(t)
+	for name, tc := range map[string]struct {
+		tags string
+		want int
+	}{
+		"a quote in the value":        {`{"zone": "a\" \"b"}`, http.StatusBadRequest},
+		"a quote in the key":          {`{"zo\"ne": "a"}`, http.StatusBadRequest},
+		"a backslash":                 {`{"zone": "a\\b"}`, http.StatusBadRequest},
+		"a dollar sign":               {`{"zone": "$HOME"}`, http.StatusBadRequest},
+		"a control character":         {`{"zone": "a\u0007b"}`, http.StatusBadRequest},
+		"a scheme minimega fetches":   {`{"zone": "https://example.com/a"}`, http.StatusBadRequest},
+		"a newline and a tab":         {`{"zone": "a\nb\tc"}`, http.StatusOK},
+		"spaces in the key and value": {`{"my zone": "a b"}`, http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			useAnnotatedVMExperiment(t)
 
-	resp := patchVM(t, vmRole("get", "patch"), `{"tags": {"zone": "a\" \"b"}, "tag_update_mode": "SET"}`)
+			resp := patchVM(t, vmRole("get", "patch"), `{"tags": `+tc.tags+`, "tag_update_mode": "SET"}`)
 
-	if body := readBody(t, resp); resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("PATCH vms/test-vm with a quote in a tag = %d, want %d: %s", resp.StatusCode, http.StatusBadRequest, body)
+			if body := readBody(t, resp); resp.StatusCode != tc.want {
+				t.Errorf("PATCH vms/test-vm with tags %s = %d, want %d: %s", tc.tags, resp.StatusCode, tc.want, body)
+			}
+		})
 	}
 }
 

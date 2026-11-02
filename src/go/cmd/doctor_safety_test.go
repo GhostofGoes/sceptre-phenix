@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,202 @@ func TestAppRuntimesCheck(t *testing.T) {
 		"no phenix-app-* or phenix-scorch-component-* programs on PATH") {
 		t.Errorf("appRuntimesCheck() with no apps = %v, want a pass", got)
 	}
+
+	good := t.TempDir()
+	writeProgram(t, good, "phenix-app-good", "#!/bin/sh\necho\n", 0o755)
+	writeProgram(t, good, "phenix-scorch-component-binary", "\x7fELF\x02\x01", 0o755)
+
+	if err := os.Mkdir(filepath.Join(good, "phenix-app-dir"), 0o750); err != nil {
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+
+	in.env.lookup = fakeDoctorEnv(map[string]string{"PATH": good + "::" + filepath.Join(good, "missing")}, false).lookup
+	in.env.lookPath = lookPathDirs(good)
+
+	if diff := cmp.Diff(row("", doctorPass, "this user can run each of the 2 programs, and each interpreter of a #! line exists"),
+		appRuntimesCheck(in)); diff != "" {
+		t.Errorf("appRuntimesCheck() with good apps mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// doctorSafetyEnv is an env whose files are the contents in files, and whose existing paths are those in infos;
+// access refuses execution of the paths in noExec, and lookPath finds the programs in found.
+func doctorSafetyEnv(files map[string]string, infos map[string]os.FileInfo, noExec, found []string) doctorEnv {
+	env := fakeDoctorEnv(nil, false)
+	env.readAt = func(path string, _ int64, n int) ([]byte, error) {
+		data, ok := files[path]
+		if !ok {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		}
+
+		return []byte(data[:min(n, len(data))]), nil
+	}
+	env.stat = func(path string) (os.FileInfo, error) {
+		if info, ok := infos[path]; ok {
+			if info == nil {
+				return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrPermission}
+			}
+
+			return info, nil
+		}
+
+		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+	}
+	env.access = func(path string, _ uint32) error {
+		if slices.Contains(noExec, path) {
+			return fs.ErrPermission
+		}
+
+		return nil
+	}
+	paths := make(map[string]string, len(found))
+	for _, name := range found {
+		paths[name] = "/usr/bin/" + name
+	}
+
+	env.lookPath = lookPathIn(paths)
+
+	return env
+}
+
+// shebangProblem names a #! line without an interpreter, an interpreter it cannot stat or that is a directory,
+// and a program that env runs by path; a file it cannot read, or env without a program, has no problem.
+func TestShebangProblemCases(t *testing.T) {
+	t.Parallel()
+
+	dirInfo, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	fileInfo, err := os.Stat(writeProgram(t, t.TempDir(), "f", "", 0o755))
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	infos := map[string]os.FileInfo{
+		"/bin/sh": fileInfo, "/usr/bin/env": fileInfo, "/opt/py": fileInfo, "/bin": dirInfo, "/secret/sh": nil,
+	}
+
+	tests := map[string]struct {
+		head string // none when "-"
+		want string
+	}{
+		"no interpreter": {head: "#!\n", want: "the #! line of /app names no interpreter"},
+		"only spaces":    {head: "#!  \t\n", want: "the #! line of /app names no interpreter"},
+		"interpreter not read": {
+			head: "#!/secret/sh\n", want: "the #! line of /app names /secret/sh, which cannot be read (permission denied)",
+		},
+		"interpreter directory": {head: "#!/bin -e\n", want: "the #! line of /app names /bin, which is a directory"},
+		"interpreter not run": {
+			head: "#!/opt/py\n", want: "the #! line of /app names /opt/py, which this user cannot run",
+		},
+		"interpreter":          {head: "#! /bin/sh -e\n"},
+		"env, program by path": {head: "#!/usr/bin/env /bin/sh\n"},
+		"env, no program":      {head: "#!/usr/bin/env -S -u X\n"},
+		"env, program on PATH": {head: "#!/usr/bin/env -S python3 -u\n"},
+		"file not read":        {head: "-"},
+		"no line end":          {head: "#!/bin/sh"},
+		"empty file":           {head: ""},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			files := map[string]string{"/app": tc.head}
+			if tc.head == "-" {
+				files = nil
+			}
+
+			env := doctorSafetyEnv(files, infos, []string{"/opt/py"}, []string{"python3"})
+			if got := env.shebangProblem("/app"); got != tc.want {
+				t.Errorf("shebangProblem() of %q = %q, want %q", tc.head, got, tc.want)
+			}
+		})
+	}
+}
+
+// A program that env runs by a path that it cannot run is named as a problem in a sentence that reads.
+func TestShebangProblemEnvPath(t *testing.T) {
+	t.Parallel()
+
+	dirInfo, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	fileInfo, err := os.Stat(writeProgram(t, t.TempDir(), "f", "", 0o755))
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	infos := map[string]os.FileInfo{
+		"/usr/bin/env": fileInfo, "/opt/dir": dirInfo, "/opt/noexec": fileInfo, "/secret/py": nil,
+	}
+
+	tests := map[string]struct {
+		program string
+		want    string
+	}{
+		"missing":    {program: "/nowhere/py", want: "which does not exist"},
+		"not read":   {program: "/secret/py", want: "which cannot be read (permission denied)"},
+		"directory":  {program: "/opt/dir", want: "which is a directory"},
+		"not run":    {program: "/opt/noexec", want: "which this user cannot run"},
+		"can be run": {program: "/usr/bin/env"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := doctorSafetyEnv(map[string]string{"/app": "#!/usr/bin/env " + tc.program + " -u\n"}, infos,
+				[]string{"/opt/noexec"}, nil)
+
+			want := ""
+			if tc.want != "" {
+				want = "the #! line of /app runs " + tc.program + " through env, " + tc.want
+			}
+
+			if diff := cmp.Diff(want, env.shebangProblem("/app")); diff != "" {
+				t.Errorf("shebangProblem() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// runnableProblem says why this user cannot run a path: it does not exist, cannot be read, is a directory, or has
+// no execute permission for this user.
+func TestRunnableProblem(t *testing.T) {
+	t.Parallel()
+
+	dirInfo, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	fileInfo, err := os.Stat(writeProgram(t, t.TempDir(), "f", "", 0o755))
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	env := doctorSafetyEnv(nil,
+		map[string]os.FileInfo{"/ok": fileInfo, "/dir": dirInfo, "/noexec": fileInfo, "/secret/x": nil},
+		[]string{"/noexec"}, nil)
+
+	tests := map[string]string{
+		"/ok":       "",
+		"/missing":  "which does not exist",
+		"/secret/x": "which cannot be read (permission denied)",
+		"/dir":      "which is a directory",
+		"/noexec":   "which this user cannot run",
+	}
+
+	for path, want := range tests {
+		if got := env.runnableProblem(path); got != want {
+			t.Errorf("runnableProblem(%s) = %q, want %q", path, got, want)
+		}
+	}
 }
 
 // envProgram skips the options of env, the arguments of -u and -C, and the variables, and gives the program.
@@ -212,14 +409,19 @@ func TestStoreFSCheck(t *testing.T) {
 	const big = 200 << 20
 
 	tests := map[string]struct {
-		fsType  string
-		fsErr   error
-		size    int64
-		data    []byte
-		want    doctorCheck
-		wantHnt string
+		endpoint string // the store.endpoint, when not the store of the test directory
+		fsType   string
+		fsErr    error
+		size     int64
+		data     []byte
+		want     doctorCheck
+		wantHnt  string
 	}{
 		"local": {fsType: "ext4", want: row("", doctorPass, "DIR is on ext4")},
+		"not a bolt endpoint": {
+			endpoint: "etcd://localhost:2379", fsType: "ext4",
+			want: row("", doctorSkip, "not checked, because store.endpoint is not valid (the store.endpoint row checks it)"),
+		},
 		"nfs": {
 			fsType: "nfs",
 			want: row("", doctorWarn, "DIR is on nfs, a network filesystem, where the file locks and fsync that "+
@@ -283,6 +485,10 @@ func TestStoreFSCheck(t *testing.T) {
 			dir := newDoctorTestDir(t)
 			in := fakeDoctorInput(dir, nil)
 			path := filepath.Join(dir, "store.bdb")
+
+			if tc.endpoint != "" {
+				in.settings["store.endpoint"] = resolvedSetting{value: tc.endpoint, text: tc.endpoint, source: sourceFlag}
+			}
 
 			if tc.data != nil {
 				writeSized(t, path, len(tc.data))
@@ -543,5 +749,124 @@ func TestLinuxFilesystemName(t *testing.T) {
 		if got := linuxFilesystemName(magic); got != want {
 			t.Errorf("linuxFilesystemName(%#x) = %q, want %q", magic, got, want)
 		}
+	}
+}
+
+// doctorSafetyReadAt reads from data as doctorFilesReadAt does, and fails at the offset failAt.
+func doctorSafetyReadAt(data []byte, failAt int64) func(string, int64, int) ([]byte, error) {
+	read := doctorFilesReadAt(data)
+
+	return func(path string, off int64, n int) ([]byte, error) {
+		if off == failAt {
+			return nil, errors.New("read error")
+		}
+
+		return read(path, off, n)
+	}
+}
+
+// doctorSafetyMeta sets the free page list and the page count of both meta pages of data, and their checksums.
+func doctorSafetyMeta(data []byte, freelist, pages uint64) []byte {
+	for i := range 2 {
+		meta := data[i*doctorFilesPageSize+boltPageHeader:]
+		binary.NativeEndian.PutUint64(meta[32:], freelist)
+		binary.NativeEndian.PutUint64(meta[40:], pages)
+		doctorFilesResum(data[i*doctorFilesPageSize:])
+	}
+
+	return data
+}
+
+// boltFreePages says why it gives no count for a file it cannot read, two corrupt meta pages, a page size below
+// 512, or a free page list outside the file, cut short or not marked as one; it reads the other meta page when one
+// is corrupt.
+func TestBoltFreePagesEdges(t *testing.T) {
+	t.Parallel()
+
+	const page = doctorFilesPageSize
+
+	corrupt := func(data []byte, i int) []byte {
+		data[i*page+boltPageHeader+20] ^= 0xff
+
+		return data
+	}
+
+	zeroPageSize := func(data []byte) []byte {
+		binary.NativeEndian.PutUint32(data[boltPageHeader+8:], 0)
+		doctorFilesResum(data)
+
+		return data
+	}
+
+	tests := map[string]struct {
+		data        []byte
+		failAt      int64 // the offset of a read that fails, or -1
+		size        int64 // the file size, or len(data) when 0
+		free, pages uint64
+		why         string
+	}{
+		"free pages":           {data: doctorFreeBolt(1), failAt: -1, free: 1, pages: 4},
+		"first read fails":     {data: doctorFreeBolt(1), failAt: 0, why: "read error"},
+		"second read fails":    {data: doctorFreeBolt(1), failAt: page, why: "read error"},
+		"free list read fails": {data: doctorFreeBolt(1), failAt: 2 * page, why: "read error"},
+		"both corrupt": {
+			data: make([]byte, 4*page), failAt: -1, why: "both meta pages are corrupt (the store-file row checks them)",
+		},
+		"first corrupt":           {data: corrupt(doctorFreeBolt(2), 0), failAt: -1, free: 2, pages: 4},
+		"second corrupt":          {data: corrupt(doctorFreeBolt(2), 1), failAt: -1, free: 2, pages: 4},
+		"list past the pages":     {data: doctorSafetyMeta(doctorFreeBolt(1), 4, 4), failAt: -1, why: outsidePhrase},
+		"list past the file size": {data: doctorFreeBolt(1), failAt: -1, size: page, why: outsidePhrase},
+		"list cut short":          {data: doctorFreeBolt(1)[:2*page+8], failAt: -1, size: 4 * page, why: outsidePhrase},
+		"count cut short": {
+			data: doctorFreeBolt(boltCountOverflow + 1)[:2*page+20], failAt: -1, size: 4 * page, why: outsidePhrase,
+		},
+		"not the free list": {
+			data: doctorFilesBolt(page), failAt: -1,
+			why: "page 2 is not the free page list, such as after a write that moved it",
+		},
+		"negative size": {data: doctorFreeBolt(1), failAt: -1, size: -1, why: outsidePhrase},
+		"zero page size": {
+			data: zeroPageSize(doctorFreeBolt(1)), failAt: -1,
+			why: "the page size 0 is not a BoltDB page size (the store-file row checks it)",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.pageSize = page
+			env.readAt = doctorSafetyReadAt(tc.data, tc.failAt)
+
+			size := tc.size
+			if size == 0 {
+				size = int64(len(tc.data))
+			}
+
+			free, pages, why := env.boltFreePages("/store.bdb", size)
+			if free != tc.free || pages != tc.pages || why != tc.why {
+				t.Errorf("boltFreePages() = %d, %d, %q, want %d, %d, %q", free, pages, why, tc.free, tc.pages, tc.why)
+			}
+		})
+	}
+}
+
+// A secret file may belong to root, to this user, or to the user phenix resolved under sudo.
+func TestSecretOwnerOK(t *testing.T) {
+	t.Parallel()
+
+	in := fakeDoctorInput(newDoctorTestDir(t), nil)
+	in.uid, in.phenixUID = 1000, "1001"
+
+	for owner, want := range map[int]bool{0: true, 1000: true, 1001: true, 1002: false, -1: false} {
+		if got := in.secretOwnerOK(owner); got != want {
+			t.Errorf("secretOwnerOK(%d) = %t, want %t", owner, got, want)
+		}
+	}
+
+	in.phenixUID = ""
+	if in.secretOwnerOK(1001) {
+		t.Error("secretOwnerOK(1001) without sudo = true, want false")
 	}
 }

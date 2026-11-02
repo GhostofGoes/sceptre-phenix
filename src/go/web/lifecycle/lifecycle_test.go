@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,5 +189,205 @@ func TestRefuseWhileStopping(t *testing.T) {
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("RefuseWhileStopping() after Stop() status, Retry-After, Content-Type, message, code mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// lifecycleCloser is a Conn that cannot send a close frame.
+type lifecycleCloser struct {
+	deadline atomic.Pointer[time.Time]
+	closed   chan struct{}
+}
+
+func (c *lifecycleCloser) SetDeadline(t time.Time) error {
+	c.deadline.Store(&t)
+
+	return nil
+}
+
+func (c *lifecycleCloser) Close() error {
+	close(c.closed)
+
+	return nil
+}
+
+//nolint:paralleltest // replaces the package's registry
+func TestTrackConnWithoutCloseFrame(t *testing.T) {
+	useLifecycle(t)
+
+	conn := &lifecycleCloser{closed: make(chan struct{})}
+	release := TrackConn("console", conn)
+
+	defer release()
+
+	Stop()
+
+	select {
+	case <-conn.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("TrackConn() of a connection without close frames not closed 5s after Stop()")
+	}
+
+	if d := conn.deadline.Load(); d == nil || time.Until(*d) > CloseWait {
+		t.Errorf("TrackConn() at Stop() set deadline %v, want within %s", d, CloseWait)
+	}
+}
+
+// Wait returns nil when its context ends with nothing open, stopped or not.
+//
+//nolint:paralleltest // replaces the package's registry
+func TestWaitWithNothingOpen(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		t.Run("stopped "+strconv.FormatBool(stop), func(t *testing.T) {
+			useLifecycle(t)
+
+			if stop {
+				Stop()
+			}
+
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			if got := Wait(ended); got != nil {
+				t.Errorf("Wait(ended context) with nothing open = %v, want nil", got)
+			}
+
+			if got := IsStopping(); got != stop {
+				t.Errorf("IsStopping() = %t, want %t", got, stop)
+			}
+		})
+	}
+}
+
+// A WithStop context released before shutdown ends without ErrStopping.
+//
+//nolint:paralleltest // replaces the package's registry
+func TestWithStopReleasedBeforeStop(t *testing.T) {
+	useLifecycle(t)
+
+	ctx, release := WithStop(context.Background(), "stream")
+	release()
+
+	<-ctx.Done()
+
+	if Stopped(ctx) {
+		t.Errorf("Stopped(released WithStop context) = true, want false (cause %v)", context.Cause(ctx))
+	}
+
+	if Stopped(context.Background()) {
+		t.Error("Stopped(context.Background()) = true, want false")
+	}
+
+	Stop()
+
+	if got := Wait(context.Background()); got != nil {
+		t.Errorf("Wait() after the only handler was released = %v, want nil", got)
+	}
+}
+
+// Each handler tracked while Stop runs is stopped exactly once, whether
+// Stop or Track stops it, and Wait returns once all are released.
+//
+//nolint:paralleltest // replaces the package's registry
+func TestTrackRacingStop(t *testing.T) {
+	useLifecycle(t)
+
+	const handlers = 50
+
+	var (
+		stops    [handlers]atomic.Int32
+		stopped  sync.WaitGroup
+		tracked  sync.WaitGroup
+		releases = make(chan func(), handlers)
+	)
+
+	stopped.Add(handlers)
+	tracked.Add(handlers)
+
+	for i := range handlers {
+		go func() {
+			defer tracked.Done()
+
+			releases <- Track("racer", func() {
+				stops[i].Add(1)
+				stopped.Done()
+			})
+		}()
+	}
+
+	Stop()
+	tracked.Wait()
+	stopped.Wait()
+	close(releases)
+
+	for i := range handlers {
+		if got := stops[i].Load(); got != 1 {
+			t.Errorf("handler %d stopped %d times, want 1", i, got)
+		}
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	if diff := cmp.Diff(map[string]int{"racer": handlers}, Wait(short)); diff != "" {
+		t.Errorf("Wait() with every racer open mismatch (-want +got):\n%s", diff)
+	}
+
+	for release := range releases {
+		go release()
+	}
+
+	if got := Wait(context.Background()); got != nil {
+		t.Errorf("Wait() after every racer was released = %v, want nil", got)
+	}
+}
+
+// Wait counts, and waits for, a handler tracked after Stop ran with nothing
+// open.
+//
+//nolint:paralleltest // replaces the package's registry
+func TestWaitCountsHandlerTrackedAfterStop(t *testing.T) {
+	tests := []struct {
+		name    string
+		release bool
+		want    map[string]int
+	}{
+		{name: "still open", release: false, want: map[string]int{"late": 1}},
+		{name: "released later", release: true, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useLifecycle(t)
+
+			Stop()
+
+			release := Track("late", nil)
+			defer release()
+
+			var released atomic.Bool
+
+			ctx := context.Background()
+
+			if tt.release {
+				go func() {
+					time.Sleep(20 * time.Millisecond)
+					released.Store(true)
+					release()
+				}()
+			} else {
+				short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+				defer cancel()
+
+				ctx = short
+			}
+
+			if diff := cmp.Diff(tt.want, Wait(ctx)); diff != "" {
+				t.Errorf("Wait() with a handler tracked after Stop() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got := released.Load(); got != tt.release {
+				t.Errorf("Wait() returned with the late handler released = %t, want %t", got, tt.release)
+			}
+		})
 	}
 }

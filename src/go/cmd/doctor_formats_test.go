@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,27 +201,31 @@ func TestDiskFormatsChecks(t *testing.T) {
 func TestDiskChecksShareOneScan(t *testing.T) {
 	t.Parallel()
 
-	for _, chains := range []bool{true, false} {
-		dir := newDoctorTestDir(t)
-		in := fakeDoctorInput(dir, nil)
-		in.found = &doctorFound{minimegaUp: true, minimegaArgs: doctorMinimegaArgs(dir), images: nil}
+	for name, chains := range map[string]bool{"after disk-chains": true, "without disk-chains": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		scans := 0
-		in.images = func(context.Context, string) (disk.ChainScan, error) {
-			scans++
+			dir := newDoctorTestDir(t)
+			in := fakeDoctorInput(dir, nil)
+			in.found = &doctorFound{minimegaUp: true, minimegaArgs: doctorMinimegaArgs(dir), images: nil}
 
-			return disk.ChainScan{Images: 1, Checked: 1}, nil
-		}
+			scans := 0
+			in.images = func(context.Context, string) (disk.ChainScan, error) {
+				scans++
 
-		if chains {
-			_ = diskChainsCheck(t.Context(), in)
-		}
+				return disk.ChainScan{Images: 1, Checked: 1}, nil
+			}
 
-		_ = diskFormatsChecks(t.Context(), in)
+			if chains {
+				_ = diskChainsCheck(t.Context(), in)
+			}
 
-		if scans != 1 {
-			t.Errorf("with disk-chains %t: %d scans, want 1", chains, scans)
-		}
+			_ = diskFormatsChecks(t.Context(), in)
+
+			if scans != 1 {
+				t.Errorf("%d scans, want 1", scans)
+			}
+		})
 	}
 }
 
@@ -245,4 +252,183 @@ func TestParseQemuVersionProperty(t *testing.T) {
 			t.Fatalf("olderQemu(%v, %v) = %t, want %t", got, other, !want, want)
 		}
 	})
+}
+
+// formatLabel names the old and unsupported formats, and any other kind is an unknown format.
+func TestFormatLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := map[diskchain.NoteKind]string{
+		diskchain.QcowV1: qcowV1Label, diskchain.Qcow2V2: qcow2V2Label, diskchain.QED: "qed", diskchain.VMDK: "vmdk",
+		diskchain.Dirty: "unknown format", diskchain.Corrupt: "unknown format", diskchain.Zstd: "unknown format",
+		diskchain.ExtendedL2: "unknown format", 0: "unknown format",
+	}
+
+	for kind, want := range tests {
+		t.Run(want+strconv.Itoa(int(kind)), func(t *testing.T) {
+			t.Parallel()
+
+			if got := formatLabel(kind); got != want {
+				t.Errorf("formatLabel(%d) = %q, want %q", kind, got, want)
+			}
+		})
+	}
+}
+
+// qemuNeedsCheck warns about each image with a feature that needs a later qemu than the local qemu-img, and gives no
+// row when no image needs one, or when it cannot find, run or read the version of qemu-img.
+func TestQemuNeedsCheck(t *testing.T) {
+	t.Parallel()
+
+	newer := []disk.FormatImage{
+		{Path: "a.qc2", Needs: []disk.QemuNeed{{Feature: "zstd compression", Version: "5.1"}}},
+		{Path: "b.qc2"},
+		{Path: "c.qc2", Needs: []disk.QemuNeed{
+			{Feature: "an external data file", Version: "4.0"}, {Feature: "extended L2 entries", Version: "5.2"},
+		}},
+	}
+
+	tests := map[string]struct {
+		images  []disk.FormatImage
+		noQemu  bool
+		version string
+		err     error
+		want    *doctorCheck
+	}{
+		"no image needs a feature": {images: []disk.FormatImage{{Path: "a.qc2"}}, version: "qemu-img version 2.0.0"},
+		"no images":                {version: "qemu-img version 2.0.0"},
+		"no qemu-img":              {images: newer, noQemu: true},
+		"qemu-img fails":           {images: newer, err: errors.New("exit status 1")},
+		"unknown version":          {images: newer, version: "qemu-img"},
+		"recent qemu-img":          {images: newer, version: "qemu-img version 9.0.0"},
+		"same version":             {images: newer, version: "qemu-img version 5.2.0"},
+		"unreadable need": {
+			images:  []disk.FormatImage{{Path: "a", Needs: []disk.QemuNeed{{Version: "soon"}}}},
+			version: "qemu-img version 1.0",
+		},
+		"older qemu-img": {
+			images: newer, version: "qemu-img version 5.1.3",
+			want: &doctorCheck{Status: doctorWarn, Detail: "qemu-img is version 5.1, and 1 of the images in /img needs a " +
+				"later qemu: c.qc2 (qemu 5.2 or later for extended L2 entries)"},
+		},
+		"much older qemu-img": {
+			images: newer, version: "qemu-img version 3.1.0",
+			want: &doctorCheck{Status: doctorWarn, Detail: "qemu-img is version 3.1, and 2 of the images in /img need a " +
+				"later qemu: a.qc2 (qemu 5.1 or later for zstd compression), c.qc2 (qemu 4.0 or later for an external data " +
+				"file), c.qc2 (qemu 5.2 or later for extended L2 entries)"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), nil)
+			if tc.noQemu {
+				in.env.lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+			}
+
+			in.qemuImg = func(_ context.Context, path string) (string, error) {
+				if path != "/usr/bin/qemu-img" {
+					t.Errorf("qemuImg(%q), want the qemu-img on PATH", path)
+				}
+
+				return tc.version, tc.err
+			}
+
+			got, ok := qemuNeedsCheck(t.Context(), in, "/img", tc.images)
+
+			switch {
+			case tc.want == nil && ok:
+				t.Errorf("qemuNeedsCheck() = %+v, want no row", got)
+			case tc.want != nil && !ok:
+				t.Errorf("qemuNeedsCheck() gave no row, want %+v", *tc.want)
+			case tc.want != nil:
+				if diff := cmp.Diff(*tc.want, got); diff != "" {
+					t.Errorf("qemuNeedsCheck() mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+// parseQemuVersion reads the first major.minor after "version", and refuses text without one or with a number too
+// large for an int.
+func TestParseQemuVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		text   string
+		want   [2]int
+		wantOK bool
+	}{
+		"debian":          {text: "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)", want: [2]int{8, 2}, wantOK: true},
+		"two parts":       {text: "qemu-img version 10.1", want: [2]int{10, 1}, wantOK: true},
+		"first version":   {text: "version 4.0 and version 9.9", want: [2]int{4, 0}, wantOK: true},
+		"empty":           {text: ""},
+		"no minor":        {text: "qemu-img version 8"},
+		"no version word": {text: "qemu-img 8.2.2"},
+		"too large":       {text: "version 99999999999999999999.1"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := parseQemuVersion(tc.text)
+			if ok != tc.wantOK || (ok && got != tc.want) {
+				t.Errorf("parseQemuVersion(%q) = %v, %t, want %v, %t", tc.text, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// The disk-formats hint fits the row: none for a skip, an update of qemu, a longer timeout, another user, or the
+// fix of each format the row names.
+func TestDiskFormatsHint(t *testing.T) {
+	t.Parallel()
+
+	const (
+		amend   = "upgrade each version 2 image with qemu-img amend -f qcow2 -o compat=1.1 <image>"
+		convert = "convert each qcow version 1 image with qemu-img convert -f qcow -O qcow2 <image> <new image>"
+	)
+
+	tests := map[string]struct {
+		check doctorCheck
+		want  string
+	}{
+		"skip": {check: doctorCheck{Status: doctorSkip, Detail: "not checked, because minimega gave no version"}},
+		"qemu needs": {
+			check: warnCheck(qemuNeedsPrefix + "5.1, and 1 of the images in /img needs a later qemu: a"),
+			want: "update qemu on each node, or convert each image with a qemu-img that knows its features: " +
+				"qemu-img convert -O qcow2 -o compat=1.1 <image> <new image>",
+		},
+		"out of time": {check: warnCheck("checked 1 of 3 images in /img within 1s"), want: "increase --timeout to check every image"},
+		"cannot list": {
+			check: warnCheck("cannot list /img: permission denied"),
+			want:  "run phenix doctor as a user that can read the images folder",
+		},
+		"version 2": {
+			check: warnCheck("1 of 1 image in /img uses an old or unsupported format: a (" + qcow2V2Label + ")"),
+			want:  amend + ". See " + formatsDocs + " for the other fixes",
+		},
+		"version 1": {
+			check: warnCheck("1 of 1 image in /img uses an old or unsupported format: a (" + qcowV1Label + ")"),
+			want:  convert + ". See " + formatsDocs + " for the other fixes",
+		},
+		"other formats": {
+			check: warnCheck("1 of 1 image in /img uses an old or unsupported format: a (vmdk)"),
+			want:  "see " + formatsDocs + " for the fix of each format",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := diskFormatsHint(tc.check); got != tc.want {
+				t.Errorf("diskFormatsHint(%q) = %q, want %q", tc.check.Detail, got, tc.want)
+			}
+		})
+	}
 }

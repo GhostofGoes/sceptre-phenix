@@ -73,6 +73,27 @@ func TestCreateExperimentAnnotations(t *testing.T) {
 				"vrouter/enable-ssh":        "IF0",
 			},
 		},
+		"node annotations of other JSON types": {
+			body: `{
+				"name": "test-experiment",
+				"topology": "test-topology",
+				"node_annotations": {"x/count": 3, "x/settings": {"a": [1, null]}}
+			}`,
+			status:  http.StatusNoContent,
+			wantExp: store.Annotations{"topology": "test-topology"},
+			wantNode: map[string]any{
+				"x/count": float64(3), "x/settings": map[string]any{"a": []any{float64(1), nil}},
+			},
+		},
+		"a node annotation with no value": {
+			body: `{
+				"name": "test-experiment",
+				"topology": "test-topology",
+				"node_annotations": {"x/count": 3, "x/none": null}
+			}`,
+			status:  http.StatusBadRequest,
+			message: `node annotation "x/none" has no value`,
+		},
 		"none": {
 			body:    `{"name": "test-experiment", "topology": "test-topology"}`,
 			status:  http.StatusNoContent,

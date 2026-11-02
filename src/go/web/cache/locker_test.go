@@ -165,3 +165,74 @@ func TestLocksAreExclusive(t *testing.T) {
 		})
 	})
 }
+
+// A LockedError names what is locked, its name and the status it is locked with, and is always temporary.
+func TestLockedError(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		err  *LockedError
+		want string
+	}{
+		"an experiment": {
+			err:  &LockedError{What: "experiment", Name: "exp1", Status: StatusDeleting},
+			want: "experiment exp1 is locked with status deleting",
+		},
+		"a VM": {
+			err:  &LockedError{What: "vm", Name: "host", Status: StatusCommitting},
+			want: "vm host is locked with status committing",
+		},
+		"no name": {err: &LockedError{What: "vm"}, want: "vm  is locked with status "},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tt.err.Error(); got != tt.want {
+				t.Errorf("Error() = %q, want %q", got, tt.want)
+			}
+
+			if !tt.err.Temporary() {
+				t.Errorf("Temporary() = false, want true")
+			}
+		})
+	}
+}
+
+// IsExperimentLocked gives the status an experiment is locked with, or "" once it is unlocked, and no VM lock of the
+// same name counts.
+//
+//nolint:paralleltest // replaces the default cache
+func TestIsExperimentLocked(t *testing.T) {
+	original := DefaultWebCache
+	DefaultWebCache = NewGoWebCache()
+
+	t.Cleanup(func() { DefaultWebCache = original })
+
+	if err := LockVMForStarting("exp1", "exp1"); err != nil {
+		t.Fatalf("LockVMForStarting(exp1, exp1) error = %v", err)
+	}
+
+	if got := IsExperimentLocked("exp1"); got != "" {
+		t.Errorf("IsExperimentLocked(exp1) with only a VM locked = %q, want none", got)
+	}
+
+	if err := LockExperimentForUpdate("exp1"); err != nil {
+		t.Fatalf("LockExperimentForUpdate(exp1) error = %v", err)
+	}
+
+	if got := IsExperimentLocked("exp1"); got != StatusUpdating {
+		t.Errorf("IsExperimentLocked(exp1) = %q, want %q", got, StatusUpdating)
+	}
+
+	UnlockExperiment("exp1")
+
+	if got := IsExperimentLocked("exp1"); got != "" {
+		t.Errorf("IsExperimentLocked(exp1) after UnlockExperiment = %q, want none", got)
+	}
+
+	if got := DefaultWebCache.Locked("vm|exp1/exp1"); got != StatusStarting {
+		t.Errorf("VM lock after UnlockExperiment(exp1) = %q, want %q kept", got, StatusStarting)
+	}
+}

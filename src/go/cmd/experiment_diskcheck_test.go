@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/spf13/cobra"
 
+	"phenix/api/experiment"
 	"phenix/store"
 	"phenix/types"
 	v1 "phenix/types/version/v1"
@@ -101,12 +103,41 @@ func TestExperimentRestartChecksDisksBeforeStopping(t *testing.T) { //nolint:par
 	}
 }
 
-// Any other start error stays humanized, pointing to the error logs.
+// A start error for broken disks keeps the error, so its list prints, and any other start error stays humanized,
+// pointing to the error logs.
 func TestStartErrorHumanizesOtherErrors(t *testing.T) {
 	t.Parallel()
 
-	err := startError(errors.New("minimega is down"), "foo")
-	if err == nil || !strings.HasPrefix(err.Error(), "Unable to start the foo experiment (search error logs for ") {
-		t.Errorf("startError = %v, want a humanized error", err)
+	broken := fmt.Errorf("qemu cannot open 1 disk on 1 VM: %w", experiment.ErrBrokenDisks)
+
+	tests := map[string]struct {
+		err        error
+		wantPrefix string
+		wantBroken bool
+	}{
+		"broken disks": {
+			err: broken, wantPrefix: "unable to start the foo experiment: qemu cannot open 1 disk on 1 VM", wantBroken: true,
+		},
+		"wrapped broken disks": {
+			err: fmt.Errorf("starting: %w", broken), wantPrefix: "unable to start the foo experiment: starting: qemu", wantBroken: true,
+		},
+		"other error": {
+			err: errors.New("minimega is down"), wantPrefix: "Unable to start the foo experiment (search error logs for ",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := startError(tc.err, "foo")
+			if err == nil || !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+				t.Fatalf("startError() = %v, want an error that starts with %q", err, tc.wantPrefix)
+			}
+
+			if got := errors.Is(err, experiment.ErrBrokenDisks); got != tc.wantBroken {
+				t.Errorf("errors.Is(startError(), ErrBrokenDisks) = %t, want %t", got, tc.wantBroken)
+			}
+		})
 	}
 }

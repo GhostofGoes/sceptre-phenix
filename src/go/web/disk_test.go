@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
 	"pgregory.net/rapid"
 
 	"phenix/api/disk"
@@ -32,6 +34,7 @@ import (
 	"phenix/web/cache"
 	"phenix/web/rbac"
 	"phenix/web/util"
+	"phenix/web/weberror"
 )
 
 // diskFiles is a minimega files directory for a test.
@@ -782,6 +785,9 @@ func TestDiskActionsRefuse(t *testing.T) {
 		{"delete a folder", http.MethodDelete, "?disk=win", all, http.StatusBadRequest},
 		{"delete missing", http.MethodDelete, "?disk=missing.qc2", all, http.StatusNotFound},
 		{"delete not allowed", http.MethodDelete, "?disk=a.qc2", disksRole(nil, "update"), http.StatusForbidden},
+		{"delete not allowed with force", http.MethodDelete, "?disk=a.qc2&force=true", disksRole(nil, "update"), http.StatusForbidden},
+		{"delete with a force not a boolean", http.MethodDelete, "?disk=a.qc2&force=maybe", all, http.StatusBadRequest},
+		{"delete in use", http.MethodDelete, "?disk=a.qc2", all, http.StatusConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before, runs := tree(t, filepath.Dir(dir)), files.runs()
@@ -905,6 +911,115 @@ func TestDiskActionsOnNestedImages(t *testing.T) {
 
 	if diff := cmp.Diff(want, tree(t, dir)); diff != "" {
 		t.Errorf("files after the disk actions mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// diskInUseBody is a disk_in_use Error body as a client reads it.
+type diskInUseBody struct {
+	Message  string            `json:"message"`
+	Code     weberror.Code     `json:"code"`
+	Metadata map[string]string `json:"metadata"`
+	Details  struct {
+		Images      []string             `json:"images"`
+		Experiments []disk.ExperimentUse `json:"experiments"`
+		Hidden      int                  `json:"hidden"`
+	} `json:"details"`
+}
+
+// A delete keeps an image that another image is backed by, or that an experiment uses directly or through a backing
+// chain. It answers 409 with the code disk_in_use, retry=force, and the images and experiments the role may see, and
+// audits a failure with the reason. With force=true it deletes the image and audits phenix.disk.force.
+func TestDeleteDiskInUse(t *testing.T) {
+	files := useDiskExperiments(t)
+	dir := files.dir
+	events := captureAudit(t)
+
+	var (
+		all  = disksRole([]string{"*"}, "delete", "list")
+		expA = disk.ExperimentUse{Name: "exp-a", Running: true}
+		expB = disk.ExperimentUse{Name: "exp-b", Running: false}
+	)
+
+	for _, tc := range []struct {
+		name, disk  string
+		role        rbac.Role
+		images      []string
+		experiments []disk.ExperimentUse
+		hidden      int
+		message     string
+	}{
+		{
+			name: "a backing image", disk: "a.qc2", role: all,
+			images: []string{dir + "/win/win10.qcow2"}, experiments: []disk.ExperimentUse{expA, expB},
+			message: "image " + dir + "/win/win10.qcow2, experiment exp-a (running), experiment exp-b",
+		},
+		{
+			name: "an image an experiment uses", disk: "linux/win10.qcow2", role: all,
+			images: []string{}, experiments: []disk.ExperimentUse{expB}, message: "experiment exp-b",
+		},
+		{
+			name: "what the role cannot see", disk: "a.qc2", role: disksRole([]string{"exp-a"}, "delete"),
+			images: []string{}, experiments: []disk.ExperimentUse{expA}, hidden: 2,
+			message: "experiment exp-a (running) and 2 more",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, http.MethodDelete, serveAs(t, "alice", tc.role).URL+"/api/v1/disks?disk="+tc.disk, "")
+			raw := readBody(t, resp)
+
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("DELETE /api/v1/disks?disk=%s = %d, want %d: %s", tc.disk, resp.StatusCode, http.StatusConflict, raw)
+			}
+
+			var body diskInUseBody
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				t.Fatalf("DELETE /api/v1/disks?disk=%s body %s: %v", tc.disk, raw, err)
+			}
+
+			want := diskInUseBody{
+				Message:  "disk image " + dir + "/" + tc.disk + " is in use by " + tc.message,
+				Code:     weberror.CodeDiskInUse,
+				Metadata: map[string]string{"retry": "force"},
+			}
+			want.Details.Images, want.Details.Experiments, want.Details.Hidden = tc.images, tc.experiments, tc.hidden
+
+			if diff := cmp.Diff(want, body); diff != "" {
+				t.Errorf("DELETE /api/v1/disks?disk=%s body mismatch (-want +got):\n%s", tc.disk, diff)
+			}
+
+			if _, err := os.Stat(dir + "/" + tc.disk); err != nil {
+				t.Errorf("os.Stat(%s) after a refused delete error = %v, want the file kept", tc.disk, err)
+			}
+		})
+	}
+
+	wantAudit(t, events(), "disk-delete", "failure", map[string]any{
+		"user.name": "alice", "file.path": dir + "/a.qc2", "event.reason": "in use",
+	})
+
+	resp := do(t, http.MethodDelete, serveAs(t, "alice", all).URL+"/api/v1/disks?disk=a.qc2&force=true", "")
+	if body := readBody(t, resp); resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE /api/v1/disks?disk=a.qc2&force=true = %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
+	}
+
+	if _, err := os.Stat(dir + "/a.qc2"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("os.Stat(a.qc2) after a forced delete error = %v, want %v", err, fs.ErrNotExist)
+	}
+
+	wantAudit(t, events(), "disk-delete", "success", map[string]any{
+		"user.name": "alice", "file.path": dir + "/a.qc2", "phenix.disk.force": true,
+	})
+
+	// an image nothing uses is deleted without force, and audited without it
+	resp = do(t, http.MethodDelete, serveAs(t, "alice", all).URL+"/api/v1/disks?disk=over.qc2", "")
+	if body := readBody(t, resp); resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE /api/v1/disks?disk=over.qc2 = %d, want %d: %s", resp.StatusCode, http.StatusOK, body)
+	}
+
+	if e := wantAudit(t, events(), "disk-delete", "success", map[string]any{"file.path": dir + "/over.qc2"}); e != nil {
+		if _, ok := e["phenix.disk.force"]; ok {
+			t.Errorf("DELETE /api/v1/disks?disk=over.qc2 audit = %v, want no phenix.disk.force", e)
+		}
 	}
 }
 
@@ -1101,6 +1216,8 @@ func TestDownloadDiskResumes(t *testing.T) {
 
 	const path = "/api/v1/disks/download?disk=win/a.qc2"
 
+	events := captureAudit(t)
+
 	head := do(t, http.MethodHead, server+"win/a.qc2", "")
 	if head.StatusCode != http.StatusOK {
 		t.Fatalf("HEAD %s = %d, want %d", path, head.StatusCode, http.StatusOK)
@@ -1130,6 +1247,23 @@ func TestDownloadDiskResumes(t *testing.T) {
 
 	if resp := do(t, http.MethodGet, server+"win", ""); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("GET /api/v1/disks/download?disk=win = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	// the HEAD and the resumed range begin no download
+	if n := countAudit(events(), "disk-download", "success", nil); n != 0 {
+		t.Errorf("HEAD and resumed GET %s audited %d downloads, want none", path, n)
+	}
+
+	if resp := do(t, http.MethodGet, server+"win/a.qc2", "", "Range", "bytes=0-3"); readBody(t, resp) != contents[:4] {
+		t.Errorf("GET %s of bytes 0-3 = %d, want %q", path, resp.StatusCode, contents[:4])
+	}
+
+	wantAudit(t, events(), "disk-download", "success", map[string]any{
+		"user.name": "alice", "file.path": dir + "/win/a.qc2", "http.request.range": "bytes=0-3",
+	})
+
+	if n := countAudit(events(), "disk-download", "success", nil); n != 1 {
+		t.Errorf("GET %s audited %d downloads, want 1", path, n)
 	}
 }
 
@@ -1367,4 +1501,394 @@ func TestVMDiskActionsRefuse(t *testing.T) {
 			})
 		})
 	}
+}
+
+// diskFakeFiles is the disk files the routes use, listing images with images and reading one with image instead
+// when they are set.
+type diskFakeFiles struct {
+	disk.DiskFiles
+
+	images func(expName string) ([]disk.Details, error)
+	image  func(path string) (disk.Details, error)
+}
+
+func (f diskFakeFiles) GetImages(expName string) ([]disk.Details, error) {
+	if f.images != nil {
+		return f.images(expName)
+	}
+
+	return f.DiskFiles.GetImages(expName) //nolint:wrapcheck // the fake passes the real one's errors on
+}
+
+func (f diskFakeFiles) GetImage(path string) (disk.Details, error) {
+	if f.image != nil {
+		return f.image(path)
+	}
+
+	return f.DiskFiles.GetImage(path) //nolint:wrapcheck // the fake passes the real one's errors on
+}
+
+// useDiskFakeFiles has the disk routes use fake, over the disk files they use now, until the test ends.
+func useDiskFakeFiles(t *testing.T, fake diskFakeFiles) {
+	t.Helper()
+
+	original := disk.DefaultDiskFiles
+	fake.DiskFiles = original
+	disk.DefaultDiskFiles = fake //nolint:reassign // the routes' disk files
+
+	t.Cleanup(func() { disk.DefaultDiskFiles = original }) //nolint:reassign // restore
+}
+
+// useDiskMinimegaFailing has fake minimega fail every disk command, as when qemu-img cannot change an image.
+func useDiskMinimegaFailing(t *testing.T) {
+	t.Helper()
+
+	mmtest.Use(t, func(cmd mmtest.Command) []*minicli.Response {
+		if strings.HasPrefix(cmd.Base, "disk ") {
+			return []*minicli.Response{mmtest.Error("head", "qemu-img: write failed")}
+		}
+
+		return nil
+	})
+}
+
+// WatchDisks deletes, at once, the stale partial clones a restart leaves, keeping those still being written. It
+// inspects the images in the background, and tells clients allowed to list disks when the images change.
+//
+//nolint:paralleltest // replaces the files directory and minimega, and runs the broker
+func TestWatchDisks(t *testing.T) {
+	files := useDiskFilesDir(t)
+	dir := files.dir
+
+	var (
+		stale = dir + "/win/.a.qc2.partial-0123456789abcdef"
+		fresh = dir + "/.b.qc2.partial-fedcba9876543210"
+	)
+
+	writeDisks(t, dir+"/a.qc2", stale, fresh)
+	useTestStore(t)
+
+	for path, at := range map[string]time.Time{stale: time.Now().Add(-time.Hour), fresh: time.Now().Add(time.Hour)} {
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatalf("os.Chtimes(%s) error = %v", path, err)
+		}
+	}
+
+	messages := jobsBrokerClient(t, disksRole(nil, "list"))
+	records := captureRecords(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	WatchDisks(ctx)
+
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("os.Stat(stale partial clone) after WatchDisks() error = %v, want it removed", err)
+	}
+
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("os.Stat(partial clone still written) after WatchDisks() error = %v, want it kept", err)
+	}
+
+	removed := slices.ContainsFunc(records(), func(r string) bool {
+		return strings.Contains(r, `"msg":"removed partial disk clones"`) && strings.Contains(r, `"count":1`)
+	})
+	if !removed {
+		t.Error("WatchDisks() logged no removal of 1 partial disk clone")
+	}
+
+	polltest.Until(t, "the images are inspected", func() bool { return files.runs() > 0 })
+
+	writeDisks(t, dir+"/new.qc2")
+
+	polltest.Until(t, "clients are told the disks changed", func() bool {
+		return slices.Contains(messages("disks"), "update ")
+	})
+}
+
+// A files directory that cannot be watched is logged as a warning.
+//
+//nolint:paralleltest // replaces the files directory and the logs
+func TestWatchFilesDirectoryCannotWatch(t *testing.T) {
+	files := useDiskFilesDir(t)
+
+	if err := os.Remove(files.dir); err != nil {
+		t.Fatalf("removing the files directory: %v", err)
+	}
+
+	records := captureRecords(t)
+
+	watchFilesDirectory(t.Context(), make(chan struct{}), 10*time.Millisecond, func() {})
+
+	logged := slices.ContainsFunc(records(), func(r string) bool {
+		return strings.Contains(r, `"msg":"disk list will not update automatically"`) && strings.Contains(r, files.dir)
+	})
+	if !logged {
+		t.Errorf("watchFilesDirectory(%s, missing) logged no warning that the disk list will not update", files.dir)
+	}
+}
+
+// GET /disks keeps the kinds diskType names, and inspects every image again for refresh=true.
+//
+//nolint:paralleltest // replaces the files directory and minimega
+func TestGetDisksKindsAndRefresh(t *testing.T) {
+	files := useDiskFilesDir(t)
+	dir := files.dir
+
+	writeDisks(t, dir+"/a.qc2", dir+"/boot.iso")
+	useTestStore(t)
+
+	role := disksRole(nil, "list")
+
+	tests := map[string]struct {
+		query string
+		want  []string
+	}{
+		"every kind":  {"", []string{dir + "/a.qc2", dir + "/boot.iso"}},
+		"VM images":   {"?diskType=VM", []string{dir + "/a.qc2"}},
+		"ISO images":  {"?diskType=iso", []string{dir + "/boot.iso"}},
+		"both":        {"?diskType=vm,ISO", []string{dir + "/a.qc2", dir + "/boot.iso"}},
+		"containers":  {"?diskType=container", []string{}},
+		"other kinds": {"?diskType=floppy", []string{}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, fullPaths(getDisks(t, role, tc.query, http.StatusOK))); diff != "" {
+				t.Errorf("GET /api/v1/disks%s mismatch (-want +got):\n%s", tc.query, diff)
+			}
+		})
+	}
+
+	runs := files.runs()
+	getDisks(t, role, "", http.StatusOK)
+
+	if n := files.runs() - runs; n != 0 {
+		t.Errorf("GET /api/v1/disks of inspected images ran qemu-img %d times, want 0", n)
+	}
+
+	getDisks(t, role, "?refresh=true", http.StatusOK)
+
+	if n := files.runs() - runs; n == 0 {
+		t.Error("GET /api/v1/disks?refresh=true ran qemu-img 0 times, want every image inspected again")
+	}
+}
+
+// The disk list and a disk's details answer 500, with the error, when the images cannot be listed.
+//
+//nolint:paralleltest // replaces the disk files
+func TestDiskListFailures(t *testing.T) {
+	useDiskFilesDir(t)
+	useDiskFakeFiles(t, diskFakeFiles{images: func(string) ([]disk.Details, error) {
+		return nil, errors.New("listing images: disk full")
+	}})
+
+	server := serveAs(t, "alice", disksRole(nil, "list")).URL
+
+	for _, path := range []string{"/api/v1/disks", "/api/v1/disks/details?disk=a.qc2"} {
+		resp := do(t, http.MethodGet, server+path, "")
+		body := readBody(t, resp)
+
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("GET %s with images that cannot be listed = %d, want %d: %s",
+				path, resp.StatusCode, http.StatusInternalServerError, body)
+
+			continue
+		}
+
+		if got := errorMessage(t, resp.StatusCode, body); got != "listing images: disk full" {
+			t.Errorf("GET %s with images that cannot be listed message = %q, want the listing error", path, got)
+		}
+	}
+}
+
+// Committing, rebasing and resizing refuse what cannot be done, and audit a qemu-img failure; a refusal sends
+// minimega nothing.
+//
+//nolint:paralleltest // replaces the files directory and minimega
+func TestDiskChangesRefuseAndFail(t *testing.T) {
+	var (
+		all        = disksRole(nil, "update")
+		childOnly  = testRole("disks", "update", "child.qc2")
+		q          = url.QueryEscape
+		qemuFailed = "qemu-img: write failed"
+	)
+
+	tests := map[string]struct {
+		target      string
+		role        rbac.Role
+		failing     bool // minimega fails every disk command
+		refused     bool // qemu refuses to open the image read/write
+		wantCode    int
+		wantMessage string
+		wantAudit   string // the outcome audited, if any
+		wantFields  map[string]any
+	}{
+		"commit an image with no backing image": {
+			target: "/commit?disk=base.qc2", role: all, wantCode: http.StatusInternalServerError,
+			wantMessage: "has no backing image to commit to",
+		},
+		"commit into a backing image the role may not update": {
+			target: "/commit?disk=child.qc2", role: childOnly, wantCode: http.StatusForbidden,
+			wantMessage: "forbidden for base.qc2", wantAudit: "failure",
+			wantFields: map[string]any{"event.reason": "forbidden", "phenix.file.target_path": "{dir}/base.qc2"},
+		},
+		"commit an image qemu-img cannot read": {
+			target: "/commit?disk=refused.qc2", role: all, wantCode: http.StatusInternalServerError,
+			wantMessage: "Unsupported qcow2 version",
+		},
+		"commit an image qemu refuses to change": {
+			target: "/commit?disk=child.qc2", role: all, refused: true, wantCode: http.StatusInternalServerError,
+			wantMessage: "qemu refuses to open the image read/write",
+		},
+		"commit failing": {
+			target: "/commit?disk=child.qc2", role: all, failing: true, wantCode: http.StatusInternalServerError,
+			wantMessage: qemuFailed, wantAudit: "failure",
+			wantFields: map[string]any{"file.path": "{dir}/child.qc2", "phenix.file.target_path": "{dir}/base.qc2"},
+		},
+		"rebase an image outside": {
+			target: "/rebase?unsafe=true&backing=&disk=" + q("/tmp/x.qc2"), role: all, wantCode: http.StatusBadRequest,
+		},
+		"rebase failing": {
+			target: "/rebase?disk=child.qc2&backing=base.qc2&unsafe=false", role: all, failing: true,
+			wantCode: http.StatusInternalServerError, wantMessage: qemuFailed, wantAudit: "failure",
+			wantFields: map[string]any{"file.path": "{dir}/child.qc2", "phenix.disk.unsafe": false},
+		},
+		"resize failing": {
+			target: "/resize?disk=child.qc2&size=" + q("+1G"), role: all, failing: true,
+			wantCode: http.StatusInternalServerError, wantMessage: qemuFailed, wantAudit: "failure",
+			wantFields: map[string]any{"file.path": "{dir}/child.qc2", "phenix.disk.size": "+1G"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			files := useDiskFilesDir(t)
+			dir := files.dir
+
+			writeDisks(t, dir+"/base.qc2", dir+"/child.qc2", dir+"/refused.qc2", dir+"/refused.qc2.refuse")
+			backedBy(t, dir+"/child.qc2", "base.qc2")
+
+			received := mmtest.Use(t, nil)
+			if tc.failing {
+				useDiskMinimegaFailing(t)
+			}
+
+			if tc.refused {
+				useDiskFakeFiles(t, diskFakeFiles{image: func(path string) (disk.Details, error) {
+					issue := &disk.FormatIssue{Level: disk.IssueError, Problem: "qemu refuses to open the image read/write"}
+
+					return disk.Details{FullPath: path, FormatIssue: issue}, nil
+				}})
+			}
+
+			server := serveAs(t, "alice", tc.role).URL
+			events := captureAudit(t)
+
+			action, _, _ := strings.Cut(strings.TrimPrefix(tc.target, "/"), "?")
+			request := "POST /api/v1/disks" + tc.target
+
+			resp := do(t, http.MethodPost, server+"/api/v1/disks"+tc.target, "")
+			body := readBody(t, resp)
+
+			if resp.StatusCode != tc.wantCode {
+				t.Fatalf("%s = %d, want %d: %s", request, resp.StatusCode, tc.wantCode, body)
+			}
+
+			if got := errorMessage(t, resp.StatusCode, body); !strings.Contains(got, tc.wantMessage) {
+				t.Errorf("%s message = %q, want it to contain %q", request, got, tc.wantMessage)
+			}
+
+			sent := slices.DeleteFunc(mmtest.Bases(received()), func(base string) bool { return !strings.HasPrefix(base, "disk ") })
+			if wantSent := tc.failing; wantSent != (len(sent) == 1) || len(sent) > 1 {
+				t.Errorf("%s sent minimega %q, want one disk command %t", request, sent, wantSent)
+			}
+
+			if tc.wantAudit == "" {
+				got := events()
+				if n := countAudit(got, "disk-"+action, "success", nil) + countAudit(got, "disk-"+action, "failure", nil); n != 0 {
+					t.Errorf("%s audited %d events, want none for a request refused before acting", request, n)
+				}
+
+				return
+			}
+
+			fields := map[string]any{"user.name": "alice"}
+			for k, v := range tc.wantFields {
+				if s, ok := v.(string); ok {
+					v = strings.ReplaceAll(s, "{dir}", dir)
+				}
+
+				fields[k] = v
+			}
+
+			wantAudit(t, events(), "disk-"+action, tc.wantAudit, fields)
+		})
+	}
+}
+
+// Without qemu-img, WatchDisks inspects nothing in the background, which would only add minimega load, but still tells
+// clients when the images change.
+//
+//nolint:paralleltest // replaces the files directory, minimega and PATH, and runs the broker
+func TestWatchDisksWithoutQemuImg(t *testing.T) {
+	files := useDiskFilesDir(t)
+	useTestStore(t)
+
+	received := mmtest.Use(t, nil)
+
+	t.Setenv("PATH", t.TempDir())
+
+	messages := jobsBrokerClient(t, disksRole(nil, "list"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	WatchDisks(ctx)
+	writeDisks(t, files.dir+"/new.qc2")
+
+	// the change's inspection runs before clients are told
+	polltest.Until(t, "clients are told the disks changed", func() bool {
+		return slices.Contains(messages("disks"), "update ")
+	})
+
+	if n := files.runs(); n != 0 {
+		t.Errorf("WatchDisks() without qemu-img ran it %d times, want none", n)
+	}
+
+	if sent := slices.DeleteFunc(mmtest.Bases(received()), func(b string) bool { return b == "args" }); len(sent) != 0 {
+		t.Errorf("WatchDisks() without qemu-img sent minimega %q, want nothing", sent)
+	}
+}
+
+// A files directory phenix cannot read is logged by each of WatchDisks' steps rather than stopping it.
+//
+//nolint:paralleltest // replaces the files directory and the logs
+func TestWatchDisksWithAnUnreadableFilesDirectory(t *testing.T) {
+	useDiskFilesDir(t)
+	useTestStore(t)
+
+	base := filepath.Join(t.TempDir(), "not-a-folder")
+	writeDisks(t, base)
+
+	common.PhenixBase = base //nolint:reassign // a file, so <PhenixBase>/images cannot be read; useDiskFilesDir restores it
+
+	records := captureRecords(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	WatchDisks(ctx)
+
+	logged := func(msg string) bool {
+		return slices.ContainsFunc(records(), func(r string) bool { return strings.Contains(r, `"msg":"`+msg+`"`) })
+	}
+
+	for _, msg := range []string{"removing partial disk clones", "disk list will not update automatically"} {
+		if !logged(msg) {
+			t.Errorf("WatchDisks() with an unreadable files directory logged no %q warning", msg)
+		}
+	}
+
+	polltest.Until(t, "the failed inspection is logged", func() bool { return logged("inspecting disk images") })
 }

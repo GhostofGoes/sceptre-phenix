@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"phenix/store"
@@ -47,71 +48,83 @@ func getRaw(t *testing.T, role rbac.Role, path string) (*http.Response, []byte) 
 }
 
 // When minimega does not answer for a running experiment's VMs, the VM lists
-// say so and list the VMs as configured, rather than as none.
+// say so and list the VMs as configured, rather than as none. Either way they
+// say when minimega was last read.
 func TestVMListsReportUnknownRuntime(t *testing.T) {
-	useTestExperiment(t)
-
-	at := time.Now().Add(-time.Second)
-	useTestMM(t, &testMM{}) // restores minimega after the test
-
-	mm.DefaultMM = &observingMM{ //nolint:reassign // install test double
-		obs: freshness.Observation{At: at, Known: false, Err: errors.New("compute1: timed out")},
+	tests := map[string]freshness.Observation{
+		"unknown": {At: time.Now().Add(-time.Second), Known: false, Err: errors.New("compute1: timed out")},
+		"known":   {At: time.Now().Add(-time.Second), Known: true, Err: nil},
 	}
 
-	const vmsPath = "/api/v1/experiments/test-experiment/vms"
+	for name, obs := range tests {
+		t.Run(name, func(t *testing.T) {
+			useTestExperiment(t)
+			useTestMM(t, &testMM{}) // restores minimega after the test
 
-	resp, body := getRaw(t, experimentViewerRole(), vmsPath)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET %s = %d, want %d: %s", vmsPath, resp.StatusCode, http.StatusOK, body)
-	}
+			mm.DefaultMM = &observingMM{obs: obs} //nolint:reassign // install test double
 
-	var list proto.VMList
-	if err := protojson.Unmarshal(body, &list); err != nil {
-		t.Fatalf("GET %s = %s, not a VM list: %v", vmsPath, body, err)
-	}
+			const vmsPath = "/api/v1/experiments/test-experiment/vms"
 
-	if !list.GetRuntimeUnknown() {
-		t.Errorf("GET %s runtime_unknown = false, want true", vmsPath)
-	}
+			resp, body := getRaw(t, experimentViewerRole(), vmsPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s = %d, want %d: %s", vmsPath, resp.StatusCode, http.StatusOK, body)
+			}
 
-	if diff := cmp.Diff([]string{"test-vm"}, vmNames(list.GetVms())); diff != "" {
-		t.Errorf("GET %s VM names mismatch (-want +got):\n%s", vmsPath, diff)
-	}
+			var list proto.VMList
+			if err := protojson.Unmarshal(body, &list); err != nil {
+				t.Fatalf("GET %s = %s, not a VM list: %v", vmsPath, body, err)
+			}
 
-	want := freshness.FormatTime(at)
+			if got := list.GetRuntimeUnknown(); got != !obs.Known {
+				t.Errorf("GET %s runtime_unknown = %t, want %t", vmsPath, got, !obs.Known)
+			}
 
-	if got := resp.Header.Get("X-Phenix-Observed-At"); got != want {
-		t.Errorf("GET %s X-Phenix-Observed-At = %q, want %q", vmsPath, got, want)
-	}
+			// configured VMs when unknown; none minimega runs when known
+			var wantVMs []string
+			if !obs.Known {
+				wantVMs = []string{"test-vm"}
+			}
 
-	if got := list.GetObservedAt(); got != want {
-		t.Errorf("GET %s observed_at = %q, want %q", vmsPath, got, want)
-	}
+			if diff := cmp.Diff(wantVMs, vmNames(list.GetVms()), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("GET %s VM names mismatch (-want +got):\n%s", vmsPath, diff)
+			}
 
-	const expsPath = "/api/v1/experiments"
+			want := freshness.FormatTime(obs.At)
 
-	resp, body = getRaw(t, experimentViewerRole(), expsPath)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET %s = %d, want %d: %s", expsPath, resp.StatusCode, http.StatusOK, body)
-	}
+			if got := resp.Header.Get("X-Phenix-Observed-At"); got != want {
+				t.Errorf("GET %s X-Phenix-Observed-At = %q, want %q", vmsPath, got, want)
+			}
 
-	var exps proto.ExperimentList
-	if err := protojson.Unmarshal(body, &exps); err != nil {
-		t.Fatalf("GET %s = %s, not an experiment list: %v", expsPath, body, err)
-	}
+			if got := list.GetObservedAt(); got != want {
+				t.Errorf("GET %s observed_at = %q, want %q", vmsPath, got, want)
+			}
 
-	if n := len(exps.GetExperiments()); n != 1 {
-		t.Fatalf("GET %s listed %d experiments, want 1: %v", expsPath, n, &exps)
-	}
+			const expsPath = "/api/v1/experiments"
 
-	exp := exps.GetExperiments()[0]
+			resp, body = getRaw(t, experimentViewerRole(), expsPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s = %d, want %d: %s", expsPath, resp.StatusCode, http.StatusOK, body)
+			}
 
-	if !exp.GetVmsUnknown() {
-		t.Errorf("GET %s vms_unknown = false, want true", expsPath)
-	}
+			var exps proto.ExperimentList
+			if err := protojson.Unmarshal(body, &exps); err != nil {
+				t.Fatalf("GET %s = %s, not an experiment list: %v", expsPath, body, err)
+			}
 
-	if diff := cmp.Diff([]string{"test-vm"}, vmNames(exp.GetVms())); diff != "" {
-		t.Errorf("GET %s VM names mismatch (-want +got):\n%s", expsPath, diff)
+			if n := len(exps.GetExperiments()); n != 1 {
+				t.Fatalf("GET %s listed %d experiments, want 1: %v", expsPath, n, &exps)
+			}
+
+			exp := exps.GetExperiments()[0]
+
+			if got := exp.GetVmsUnknown(); got != !obs.Known {
+				t.Errorf("GET %s vms_unknown = %t, want %t", expsPath, got, !obs.Known)
+			}
+
+			if diff := cmp.Diff(wantVMs, vmNames(exp.GetVms()), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("GET %s VM names mismatch (-want +got):\n%s", expsPath, diff)
+			}
+		})
 	}
 }
 

@@ -5,16 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
+	"github.com/sandia-minimega/minimega/v2/pkg/miniclient"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
 
 	"phenix/util/common"
@@ -251,29 +258,419 @@ func TestWritableFileCheckReadOnly(t *testing.T) {
 	}
 }
 
-// A missing or relative base directory warns, and a file where one should be fails.
+// A missing or relative base directory warns, a file where one should be fails, and so does one doctor cannot
+// stat. One that this user cannot read, or write when that is needed, warns.
 func TestBaseDirCheck(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	file := writeTestFile(t, dir, "file", "")
+	denied := &os.PathError{Op: "stat", Path: dir, Err: syscall.EACCES}
 
 	tests := map[string]struct {
-		path string
-		want doctorStatus
+		path     string
+		readOnly bool                     // needWrite is false
+		statErr  error                    // the error of every stat
+		access   func(uint32) error       // the result of access by mode
+		status   doctorStatus             // the status of the row
+		detail   func(path string) string // the detail of the row
 	}{
-		"directory": {path: dir, want: doctorPass},
-		"missing":   {path: filepath.Join(dir, "missing"), want: doctorWarn},
-		"file":      {path: file, want: doctorFail},
-		"relative":  {path: ".", want: doctorWarn},
+		"directory": {path: dir, status: doctorPass, detail: func(p string) string { return p }},
+		"missing": {
+			path: filepath.Join(dir, "missing"), status: doctorWarn,
+			detail: func(p string) string { return p + " does not exist" },
+		},
+		"file": {path: file, status: doctorFail, detail: func(p string) string { return p + " is not a directory" }},
+		"relative": {
+			path: ".", status: doctorWarn,
+			detail: func(p string) string { return p + " is relative, so it depends on the working directory" },
+		},
+		"stat denied": {
+			path: dir, statErr: denied, status: doctorFail, detail: func(string) string { return denied.Error() },
+		},
+		"not searchable": {
+			path: dir, access: func(uint32) error { return syscall.EACCES }, status: doctorWarn,
+			detail: func(p string) string { return p + " is not readable and searchable by this user" },
+		},
+		"not writable": {
+			path: dir, access: doctorTestWriteDenied, status: doctorWarn,
+			detail: func(p string) string { return p + " is not writable by this user" },
+		},
+		"not writable, read only": {
+			path: dir, readOnly: true, access: doctorTestWriteDenied, status: doctorPass,
+			detail: func(p string) string { return p },
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := osDoctorEnv().baseDirCheck("base-dir.phenix", tc.path, true); got.Status != tc.want {
-				t.Errorf("baseDirCheck(%s) = %+v, want %s", tc.path, got, tc.want)
+			env := osDoctorEnv()
+			if tc.statErr != nil {
+				env.stat = func(string) (os.FileInfo, error) { return nil, tc.statErr }
+			}
+
+			if tc.access != nil {
+				env.access = func(_ string, mode uint32) error { return tc.access(mode) }
+			}
+
+			want := row("base-dir.phenix", tc.status, tc.detail(tc.path))
+			if diff := cmp.Diff(want, env.baseDirCheck("base-dir.phenix", tc.path, !tc.readOnly)); diff != "" {
+				t.Errorf("baseDirCheck(%s) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+// doctorTestWriteDenied refuses an access check that asks for write permission.
+func doctorTestWriteDenied(mode uint32) error {
+	if mode&unix.W_OK != 0 {
+		return syscall.EACCES
+	}
+
+	return nil
+}
+
+// writableFileCheck fails, naming the reason, for a file this user cannot write, and for one it cannot create in
+// the nearest directory above it that exists. When nothing up to the root exists, it passes.
+func TestWritableFileCheckFakeEnv(t *testing.T) {
+	t.Parallel()
+
+	dirInfo, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	fileInfo, err := os.Stat(writeTestFile(t, t.TempDir(), "f", ""))
+	if err != nil {
+		t.Fatalf("os.Stat() error = %v", err)
+	}
+
+	tests := map[string]struct {
+		path     string
+		existing map[string]os.FileInfo // every other path does not exist
+		statErr  error                  // the error of every stat
+		denied   bool                   // access refuses writes
+		want     doctorCheck
+	}{
+		"existing file, not writable": {
+			path: "/a/store.bdb", existing: map[string]os.FileInfo{"/a": dirInfo, "/a/store.bdb": fileInfo}, denied: true,
+			want: row("store.endpoint", doctorFail, "/a/store.bdb is not writable: permission denied"),
+		},
+		"existing file": {
+			path: "/a/store.bdb", existing: map[string]os.FileInfo{"/a": dirInfo, "/a/store.bdb": fileInfo},
+			want: row("store.endpoint", doctorPass, "/a/store.bdb"),
+		},
+		"parent is a file": {
+			path: "/a/b/store.bdb", existing: map[string]os.FileInfo{"/a": fileInfo},
+			want: row("store.endpoint", doctorFail, "cannot create /a/b/store.bdb: /a is not a directory"),
+		},
+		"parent not writable": {
+			path: "/a/b/store.bdb", existing: map[string]os.FileInfo{"/a": dirInfo}, denied: true,
+			want: row("store.endpoint", doctorFail, "cannot create /a/b/store.bdb: /a is not writable: permission denied"),
+		},
+		"nothing exists": {
+			path: "/a/b/store.bdb",
+			want: row("store.endpoint", doctorPass, "/a/b/store.bdb (created on first use)"),
+		},
+		"stat fails": {
+			path: "/a/store.bdb", statErr: syscall.EIO,
+			want: row("store.endpoint", doctorFail, syscall.EIO.Error()),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.stat = func(path string) (os.FileInfo, error) {
+				if tc.statErr != nil {
+					return nil, tc.statErr
+				}
+
+				if info, ok := tc.existing[path]; ok {
+					return info, nil
+				}
+
+				return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+			}
+			env.access = func(string, uint32) error {
+				if tc.denied {
+					return syscall.EACCES
+				}
+
+				return nil
+			}
+
+			if diff := cmp.Diff(tc.want, env.writableFileCheck("store.endpoint", tc.path)); diff != "" {
+				t.Errorf("writableFileCheck(%s) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+// existingParent gives the directory itself when it exists, else the nearest one above it, and the root, or "."
+// for a relative path, when nothing exists.
+func TestExistingParent(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		dir      string
+		existing []string
+		want     string
+	}{
+		"exists":         {dir: "/a/b", existing: []string{"/a/b"}, want: "/a/b"},
+		"parent exists":  {dir: "/a/b/c", existing: []string{"/a"}, want: "/a"},
+		"nothing exists": {dir: "/a/b/c", want: "/"},
+		"relative":       {dir: "a/b", existing: []string{"a"}, want: "a"},
+		"relative, none": {dir: "a/b", want: "."},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := fakeDoctorEnv(nil, false)
+			env.stat = func(path string) (os.FileInfo, error) {
+				if slices.Contains(tc.existing, path) {
+					return nil, nil //nolint:nilnil // existingParent reads only the error
+				}
+
+				return nil, os.ErrNotExist
+			}
+
+			if got := env.existingParent(tc.dir); got != tc.want {
+				t.Errorf("existingParent(%s) = %q, want %q", tc.dir, got, tc.want)
+			}
+
+			// the store check needs the store's own directory, which dirMissing reports
+			if missing := env.dirMissing(tc.dir); missing != !slices.Contains(tc.existing, tc.dir) {
+				t.Errorf("dirMissing(%s) = %t", tc.dir, missing)
+			}
+		})
+	}
+}
+
+// log.system.path names the log file, or the directory phenix writes phenix.log in.
+func TestSystemLogCheck(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	file := writeTestFile(t, dir, "custom.log", "")
+
+	tests := map[string]struct {
+		path string
+		want doctorCheck
+	}{
+		"directory": {
+			path: dir, want: row("log.system.path", doctorPass, filepath.Join(dir, "phenix.log")+" (created on first use)"),
+		},
+		"file": {path: file, want: row("log.system.path", doctorPass, file)},
+		"missing": {
+			path: filepath.Join(dir, "new.log"),
+			want: row("log.system.path", doctorPass, filepath.Join(dir, "new.log")+" (created on first use)"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, osDoctorEnv().systemLogCheck("log.system.path", tc.path)); diff != "" {
+				t.Errorf("systemLogCheck(%s) mismatch (-want +got):\n%s", tc.path, diff)
+			}
+		})
+	}
+}
+
+// ui.shutdown-grace-period passes with the time phenix ui waits, and fails for a value phenix ui refuses.
+func TestGracePeriodCheck(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		value string
+		want  doctorCheck
+	}{
+		"seconds": {value: "5", want: row("ui.shutdown-grace-period", doctorPass, "5s")},
+		"zero":    {value: "0", want: row("ui.shutdown-grace-period", doctorPass, "0s")},
+		"negative": {
+			value: "-1",
+			want: row("ui.shutdown-grace-period", doctorFail,
+				`invalid ui.shutdown-grace-period "-1": it must not be negative`),
+		},
+		"duration": {
+			value: "5s",
+			want: row("ui.shutdown-grace-period", doctorFail,
+				`invalid ui.shutdown-grace-period "5s": it must be a whole number of seconds, such as 5`),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := gracePeriodCheck(viperWith("ui.shutdown-grace-period", tc.value))
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("gracePeriodCheck(%q) mismatch (-want +got):\n%s", tc.value, diff)
+			}
+		})
+	}
+}
+
+// probeMinimega gives minimega's version without spaces around it, nothing for an empty answer, and the error of
+// minimega or of the connection.
+func TestProbeMinimega(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		resp    minicli.Responses
+		want    string
+		wantErr string
+	}{
+		"version":   {resp: minicli.Responses{{Host: "mm1", Response: " minimega 2.9 \n"}}, want: "minimega 2.9"},
+		"no answer": {resp: minicli.Responses{}},
+		"error":     {resp: minicli.Responses{{Host: "mm1", Error: "unknown command"}}, wantErr: "unknown command"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			base := fakeMinimega(t, func(miniclient.Request) []miniclient.Response {
+				return []miniclient.Response{{Resp: tc.resp}}
+			})
+
+			got, err := probeMinimega(base, time.Second)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("probeMinimega() = %q, %v, want error %q", got, err, tc.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil || got != tc.want {
+				t.Errorf("probeMinimega() = %q, %v, want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+
+	if got, err := probeMinimega(filepath.Join(t.TempDir(), "none"), time.Second); err == nil {
+		t.Errorf("probeMinimega(no socket) = %q, nil, want an error", got)
+	}
+}
+
+// The settings list prints a list with commas and an empty value as "".
+func TestFormatSettingValue(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		value any
+		want  string
+	}{
+		"nil":          {value: nil, want: `""`},
+		"empty string": {value: "", want: `""`},
+		"string":       {value: "info", want: "info"},
+		"strings":      {value: []string{"a", "b"}, want: "a,b"},
+		"no strings":   {value: []string{}, want: `""`},
+		"any list":     {value: []any{"a", 1, true}, want: "a,1,true"},
+		"empty list":   {value: []any{}, want: `""`},
+		"number":       {value: 42, want: "42"},
+		"bool":         {value: false, want: "false"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := formatSettingValue(tc.value); got != tc.want {
+				t.Errorf("formatSettingValue(%#v) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// The doctor flags have their defaults, and doctorFlagOptions reads each of them.
+func TestAddDoctorFlags(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		args []string
+		want doctorOptions
+	}{
+		"defaults": {want: doctorOptions{output: "text", timeout: defaultDoctorTimeout}},
+		"every flag": {
+			args: []string{"-o", "json", "--timeout", "10s", "--skip", "minimega,ui", "--skip", "tls", "--strict", "-x",
+				"--report", "-p"},
+			want: doctorOptions{
+				output: "json", timeout: 10 * time.Second, skip: []string{"minimega", "ui", "tls"},
+				strict: true, noSettings: true, report: true, problems: true,
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			flags := pflag.NewFlagSet("doctor", pflag.ContinueOnError)
+			addDoctorFlags(flags)
+
+			if err := flags.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) error = %v", tc.args, err)
+			}
+
+			got := doctorFlagOptions(flags, io.Discard)
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(doctorOptions{}), cmpopts.EquateEmpty(),
+				cmpopts.IgnoreFields(doctorOptions{}, "palette")); diff != "" {
+				t.Errorf("doctorFlagOptions(%v) mismatch (-want +got):\n%s", tc.args, diff)
+			}
+		})
+	}
+}
+
+// phenix doctor refuses an output format and a --skip name it does not know before it runs a check, and its hooks
+// skip those of the root command.
+func TestDoctorCommandRefusesFlags(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		args    []string
+		wantErr string // a prefix
+	}{
+		"output":     {args: []string{"-o", "yaml"}, wantErr: "unsupported output format: yaml"},
+		"skip":       {args: []string{"--skip", "nosuch"}, wantErr: `--skip: unknown check "nosuch". Checks: `},
+		"args":       {args: []string{"extra"}, wantErr: `unknown command "extra" for "doctor"`},
+		"bad flag":   {args: []string{"--timeout", "soon"}, wantErr: `invalid argument "soon" for "--timeout" flag`},
+		"no -o text": {args: []string{"-o", ""}, wantErr: "unsupported output format: "},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := newDoctorCmd()
+			cmd.SilenceUsage, cmd.SilenceErrors = true, true
+
+			var out bytes.Buffer
+
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs(tc.args)
+			cmd.SetContext(t.Context())
+
+			if err := cmd.Execute(); err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
+				t.Fatalf("doctor %v error = %v, want prefix %q", tc.args, err, tc.wantErr)
+			}
+
+			if out.Len() != 0 {
+				t.Errorf("doctor %v wrote %q, want nothing", tc.args, out.String())
+			}
+
+			if cmd.PersistentPreRunE(cmd, nil) != nil || cmd.PersistentPostRunE(cmd, nil) != nil {
+				t.Error("doctor hooks give an error, want none")
 			}
 		})
 	}
@@ -463,8 +860,17 @@ func TestSameSettingValueProperty(t *testing.T) {
 func TestSettingEnvVar(t *testing.T) {
 	t.Parallel()
 
-	if got := settingEnvVar("ui.logs.minimega-path"); got != "PHENIX_UI_LOGS_MINIMEGA_PATH" {
-		t.Errorf("settingEnvVar() = %q, want PHENIX_UI_LOGS_MINIMEGA_PATH", got)
+	tests := map[string]string{
+		"ui.logs.minimega-path": "PHENIX_UI_LOGS_MINIMEGA_PATH",
+		"store.endpoint":        "PHENIX_STORE_ENDPOINT",
+		"unix-socket-gid":       "PHENIX_UNIX_SOCKET_GID",
+		"bridge-mode":           "PHENIX_BRIDGE_MODE",
+	}
+
+	for key, want := range tests {
+		if got := settingEnvVar(key); got != want {
+			t.Errorf("settingEnvVar(%q) = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -484,6 +890,8 @@ func TestRedactSetting(t *testing.T) {
 		"string users":  {key: "ui.users", value: []string{"admin:pw:global-admin"}, want: redacted},
 		"no users":      {key: "ui.users", value: []string{}, want: []string{}},
 		"nil users":     {key: "ui.users", value: nil, want: nil},
+		"no any users":  {key: "ui.users", value: []any{}, want: []any{}},
+		"number secret": {key: "ui.jwt-signing-key", value: 42, want: redacted},
 		"not a secret":  {key: "store.endpoint", value: "bolt:///etc/phenix/store.bdb", want: "bolt:///etc/phenix/store.bdb"},
 	}
 

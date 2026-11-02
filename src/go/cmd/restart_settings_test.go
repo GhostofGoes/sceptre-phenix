@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"pgregory.net/rapid"
 )
 
@@ -132,6 +133,76 @@ func TestRestartBaselinePending(t *testing.T) {
 	for i, step := range steps {
 		if diff := cmp.Diff(step.want, baseline.pending(step.current)); diff != "" {
 			t.Errorf("step %d: pending() mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+}
+
+// flatSettings gives every setting by its dotted key, as the environment sets
+// it. phenix ui records them at the start, and each later config change logs
+// the keys that wait for a restart, by name only.
+func TestRestartSettingsWatchAndWarn(t *testing.T) { //nolint:paralleltest // sets the environment and uiStartSettings
+	uiStartSettings.mu.Lock()
+	saved := uiStartSettings.start
+	uiStartSettings.mu.Unlock()
+
+	t.Cleanup(func() { uiStartSettings.record(saved) })
+
+	const msg = "config change takes effect only when phenix ui restarts"
+
+	logs := captureLogs(t)
+
+	t.Setenv("PHENIX_STORE_ENDPOINT", "bolt:///tmp/restart-a.bdb")
+	t.Setenv("PHENIX_LOG_SYSTEM_PATH", "/tmp/restart-a.log")
+
+	flat := flatSettings()
+
+	for key, want := range map[string]string{
+		"store.endpoint": "bolt:///tmp/restart-a.bdb", "log.system.path": "/tmp/restart-a.log",
+	} {
+		if got := flat[key]; got != want {
+			t.Errorf("flatSettings()[%q] = %v, want %q", key, got, want)
+		}
+	}
+
+	for key, value := range flat {
+		if _, nested := value.(map[string]any); nested {
+			t.Errorf("flatSettings()[%q] = %v, a map that is not flattened", key, value)
+		}
+	}
+
+	steps := []struct {
+		name string
+		do   func()
+		want []any // the keys of each warning logged so far
+	}{
+		{name: "before phenix ui starts", do: func() { uiStartSettings.record(nil); warnRestartSettings() }},
+		{name: "unchanged", do: func() { watchRestartSettings(); warnRestartSettings() }},
+		{name: "live setting", do: func() {
+			t.Setenv("PHENIX_LOG_SYSTEM_PATH", "/tmp/restart-b.log")
+			warnRestartSettings()
+		}},
+		{name: "store endpoint", do: func() {
+			t.Setenv("PHENIX_STORE_ENDPOINT", "bolt:///tmp/restart-b.bdb")
+			warnRestartSettings()
+		}, want: []any{"store.endpoint"}},
+		{name: "reverted", do: func() {
+			t.Setenv("PHENIX_STORE_ENDPOINT", "bolt:///tmp/restart-a.bdb")
+			warnRestartSettings()
+		}, want: []any{"store.endpoint"}},
+	}
+
+	for _, step := range steps {
+		step.do()
+
+		records := logs.all(t, msg)
+
+		got := make([]any, 0, len(records))
+		for _, record := range records {
+			got = append(got, record["keys"])
+		}
+
+		if diff := cmp.Diff(step.want, got, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("%s: warnings mismatch (-want +got):\n%s", step.name, diff)
 		}
 	}
 }

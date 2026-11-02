@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"gopkg.in/yaml.v3"
 
 	"phenix/api/workflow"
@@ -182,4 +183,73 @@ func fileExamples(t *testing.T, path string) []yamlExample {
 	}
 
 	return examples
+}
+
+// TestDocsFileExamples checks that fileExamples finds each YAML fence, of
+// three or more backticks and indented or not, and strips the fence's
+// indentation from the block.
+func TestDocsFileExamples(t *testing.T) {
+	t.Parallel()
+
+	doc := strings.Join([]string{
+		"# Title",            // 1
+		"```yaml",            // 2
+		"apiVersion: v1",     // 3
+		"```",                // 4
+		"```go",              // 5
+		"package main",       // 6
+		"```",                // 7
+		"1. A step:",         // 8
+		"",                   // 9
+		"    ```` yml",       // 10
+		"    kind: Topology", // 11
+		"      nested: ```",  // 12
+		"    ````",           // 13
+		"```yaml",            // 14
+		"never closed",       // 15
+	}, "\n")
+
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+
+	got := fileExamples(t, path)
+
+	where, bodies := make([]string, 0, len(got)), make([]string, 0, len(got))
+	for _, ex := range got {
+		where = append(where, ex.where[strings.LastIndex(ex.where, ":")+1:])
+		bodies = append(bodies, ex.body)
+	}
+
+	if diff := cmp.Diff([]string{"2", "10"}, where); diff != "" {
+		t.Errorf("fileExamples() lines mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff([]string{"apiVersion: v1", "kind: Topology\n  nested: ```"}, bodies); diff != "" {
+		t.Errorf("fileExamples() bodies mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDocsElided(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]bool{
+		"kind: Topology":                false,
+		"spec: ...":                     true,
+		"spec:\n  nodes:\n  - ...":      true,
+		"spec:\n  note: '... and more'": false,
+		"spec: [a, ...]":                true,
+	}
+
+	for body, want := range tests {
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(body), &node); err != nil {
+			t.Fatalf("yaml.Unmarshal(%q) error = %v", body, err)
+		}
+
+		if got := elided(&node); got != want {
+			t.Errorf("elided(%q) = %t, want %t", body, got, want)
+		}
+	}
 }

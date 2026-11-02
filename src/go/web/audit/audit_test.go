@@ -196,22 +196,6 @@ func TestEvents(t *testing.T) {
 	}
 }
 
-func TestEventWithoutRoleOrInterface(t *testing.T) {
-	events := capture(t)
-
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/disks", nil)
-	r.RemoteAddr = "@" // a unix socket's peer has no port
-
-	audit.Denied(r, audit.DiskDownload, "downloading disk not allowed", audit.Fields{Reason: "not owner"})
-
-	want := map[string]any{"user.name": "", "source.ip": "@", "event.reason": "not owner"}
-	absent := []string{"user.roles", "network.forwarded_ip", "phenix.vm.interface", "file.path"}
-
-	if diff := cmp.Diff(want, pick(onlyEvent(t, events), want, absent)); diff != "" {
-		t.Errorf("audit.Denied() without a role or interface: record mismatch (-want +got):\n%s", diff)
-	}
-}
-
 func TestBackgroundEvents(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -260,16 +244,137 @@ func TestBackgroundEvents(t *testing.T) {
 	}
 }
 
-func TestGrantUserOverridesContext(t *testing.T) {
-	events := capture(t)
+// auditRequest is a GET of path from addr, with headers as name, value pairs,
+// and a role named role when role is not "-".
+func auditRequest(path, addr, role string, headers ...string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = addr
 
-	r := httptest.NewRequest(http.MethodGet, "/webshark/captures/x", nil)
+	for i := 0; i+1 < len(headers); i += 2 {
+		r.Header.Set(headers[i], headers[i+1])
+	}
 
-	audit.Success(r, audit.CaptureWebSharkRead, "read capture", audit.Fields{User: "carol"})
+	if role == "-" {
+		return r
+	}
 
-	want := map[string]any{"user.name": "carol"}
+	ctx := context.WithValue(r.Context(), middleware.ContextKeyRole, rbac.Role{Spec: &v1.RoleSpec{Name: role, Policies: nil}})
 
-	if diff := cmp.Diff(want, pick(onlyEvent(t, events), want, nil)); diff != "" {
-		t.Errorf("audit.Success(Fields{User: carol}) record mismatch (-want +got):\n%s", diff)
+	return r.WithContext(ctx)
+}
+
+// Each event field comes from the request or Fields as documented, and is
+// left out when there is nothing to put in it.
+func TestEventFields(t *testing.T) {
+	iface0 := 0
+	forwarded := strings.Repeat("a", 63) + "é" + "b"
+
+	cases := []struct {
+		name   string
+		log    func()
+		want   map[string]any
+		absent []string
+	}{
+		{
+			name: "no role, interface or forwarded address",
+			log: func() {
+				r := auditRequest("/api/v1/disks", "@", "-", "X-Forwarded-For", " , 10.0.0.1")
+				audit.Denied(r, audit.DiskDownload, "downloading disk not allowed", audit.Fields{Reason: "not owner"})
+			},
+			want:   map[string]any{"user.name": "", "source.ip": "@", "event.reason": "not owner"},
+			absent: []string{"user.roles", "network.forwarded_ip", "phenix.vm.interface", "file.path"},
+		},
+		{
+			name: "a role with no name",
+			log: func() {
+				audit.Success(auditRequest("/api/v1/disks", "192.0.2.1:1", ""), audit.DiskDownload, "downloaded", audit.Fields{})
+			},
+			want:   map[string]any{"source.ip": "192.0.2.1"},
+			absent: []string{"user.roles"},
+		},
+		{
+			name: "an IPv6 client",
+			log: func() {
+				audit.Success(auditRequest("/x", "[2001:db8::1]:443", "-"), audit.SignIn, "signed in", audit.Fields{})
+			},
+			want: map[string]any{"source.ip": "2001:db8::1", "event.category": "authentication", "event.type": []any{"start"}},
+		},
+		{
+			name: "the user and path Fields give",
+			log: func() {
+				r := auditRequest("/webshark/captures/secret-token", "192.0.2.1:1", "-")
+				audit.Success(r, audit.CaptureWebSharkRead, "read capture", audit.Fields{User: "carol", URLPath: "/webshark/captures/x"})
+			},
+			want: map[string]any{"user.name": "carol", "url.path": "/webshark/captures/x"},
+		},
+		{
+			name: "a forwarded address cut on a character boundary",
+			log: func() {
+				r := auditRequest("/x", "192.0.2.1:1", "-", "X-Forwarded-For", forwarded+", 10.0.0.1")
+				audit.Success(r, audit.SignIn, "signed in", audit.Fields{})
+			},
+			want: map[string]any{"network.forwarded_ip": strings.Repeat("a", 63)},
+		},
+		{
+			name: "every subject field",
+			log: func() {
+				audit.Success(auditRequest("/x", "192.0.2.1:1", "-"), audit.VMFileCopy, "copied file", audit.Fields{
+					TargetUser: "dave", Config: "Topology/topo", Experiment: "exp", VM: "vm", Interface: &iface0,
+					File: "/a/b.txt", Target: "/c/d.txt", PID: 7, Extra: []any{"phenix.extra", "x"},
+				})
+			},
+			want: map[string]any{
+				"user.target.name": "dave", "phenix.config.name": "Topology/topo", "phenix.experiment.name": "exp",
+				"phenix.vm.name": "vm", "phenix.vm.interface": float64(0), "file.path": "/a/b.txt", "file.name": "b.txt",
+				"phenix.file.target_path": "/c/d.txt", "process.pid": float64(7), "phenix.extra": "x",
+			},
+		},
+		{
+			name: "no subject fields",
+			log: func() {
+				audit.Success(auditRequest("/x", "192.0.2.1:1", "-"), audit.SignOut, "signed out", audit.Fields{})
+			},
+			want: map[string]any{"event.type": []any{"end"}},
+			absent: []string{
+				"user.target.name", "phenix.config.name", "phenix.experiment.name", "phenix.vm.name",
+				"phenix.vm.interface", "file.path", "file.name", "phenix.file.target_path", "process.pid",
+				"phenix.dry_run", "event.reason", "error.message",
+			},
+		},
+		{
+			name: "an action with no ECS kind",
+			log: func() {
+				audit.Success(auditRequest("/x", "192.0.2.1:1", "-"), audit.Action("unknown"), "did something", audit.Fields{})
+			},
+			want: map[string]any{"event.action": "unknown", "event.category": "", "event.type": []any{"info"}},
+		},
+		{
+			name: "a refused dry run",
+			log: func() {
+				r := auditRequest("/x", "192.0.2.1:1", "-")
+				audit.Denied(r, audit.ConfigDelete, "deleting config not allowed", audit.Fields{DryRun: true})
+			},
+			want: map[string]any{"event.type": []any{"info", "denied"}, "phenix.dry_run": true, "event.reason": "forbidden"},
+		},
+		{
+			name: "a background success with no user",
+			log: func() {
+				audit.Background("", audit.ConsoleEnd, "console ended", audit.OutcomeSuccess, audit.Fields{})
+			},
+			want:   map[string]any{"level": "INFO", "user.name": "", "event.outcome": "success"},
+			absent: []string{"error.message", "source.ip"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			events := capture(t)
+
+			c.log()
+
+			if diff := cmp.Diff(c.want, pick(onlyEvent(t, events), c.want, c.absent)); diff != "" {
+				t.Errorf("%s: record mismatch (-want +got):\n%s", c.name, diff)
+			}
+		})
 	}
 }

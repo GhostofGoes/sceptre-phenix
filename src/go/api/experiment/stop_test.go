@@ -2,6 +2,7 @@ package experiment
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -120,5 +121,68 @@ func TestStopCanBeRetriedAfterTheVMsSurvived(t *testing.T) { //nolint:parallelte
 
 	if experimentNamed(t, "exp").Running() {
 		t.Error("experiment still running after the second Stop(), want it stopped")
+	}
+}
+
+// Stop refuses an experiment it cannot find or that is not running, telling minimega nothing; a dry run stops
+// without minimega; a store that cannot record the stop is reported after the VMs are killed.
+func TestStopRefusesAndReports(t *testing.T) { //nolint:paralleltest // replaces package globals
+	tests := []struct {
+		name        string
+		exp         string
+		start       string
+		updateErr   error
+		wantErr     string // part of the error, "" for none
+		wantCleared []string
+		wantHooks   int
+		wantRunning bool
+	}{
+		{
+			name: "an experiment not in the store", exp: "missing", start: stopTestStart,
+			wantErr: "getting experiment missing from store", wantRunning: true,
+		},
+		{name: "a stopped experiment", exp: "exp", wantErr: "experiment isn't running"},
+		{name: "a dry run", exp: "exp", start: stopTestStart + "-DRYRUN", wantHooks: 1},
+		{
+			name: "a store that cannot record the stop", exp: "exp", start: stopTestStart,
+			updateErr: errors.New("store is read-only"), wantErr: "updating experiment config: store is read-only",
+			wantCleared: []string{"exp"}, wantHooks: 1, wantRunning: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := useRecoverStore(t)
+			storeExperiment(t, "exp", map[string]any{"startTime": tc.start})
+
+			s.updateErr = tc.updateErr
+			fake := useStartMM(t, &startMM{})
+			hooksRun := countStopHooks(t)
+
+			err := Stop(tc.exp, StopWithKeepInjectionSnapshots(true))
+
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("Stop(%s) error = %v, want nil", tc.exp, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("Stop(%s) error = %v, want one containing %q", tc.exp, err, tc.wantErr)
+			}
+
+			if errors.Is(err, ErrTeardownFailed) {
+				t.Errorf("Stop(%s) error = %v, want it not to wrap ErrTeardownFailed", tc.exp, err)
+			}
+
+			if diff := cmp.Diff(tc.wantCleared, fake.cleared, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Stop(%s) cleared namespaces mismatch (-want +got):\n%s", tc.exp, diff)
+			}
+
+			if *hooksRun != tc.wantHooks {
+				t.Errorf("Stop(%s) ran %d stop hooks, want %d", tc.exp, *hooksRun, tc.wantHooks)
+			}
+
+			if got := experimentNamed(t, "exp").Running(); got != (tc.wantRunning && tc.start != "") {
+				t.Errorf("stored experiment running after Stop(%s) = %t, want %t", tc.exp, got, tc.wantRunning && tc.start != "")
+			}
+		})
 	}
 }

@@ -1,6 +1,10 @@
 package web
 
 import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net"
@@ -11,10 +15,17 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/gorilla/mux"
 	"golang.org/x/net/websocket"
 	"pgregory.net/rapid"
 
+	"phenix/util/mm"
+	"phenix/util/plog/plogtest"
+	"phenix/web/lifecycle"
+	"phenix/web/middleware"
+	"phenix/web/rbac"
 	"phenix/web/util"
+	"phenix/web/weberror"
 )
 
 // getVNCPage stores test-experiment with test-vm, whose vncBanner is banner (none if nil),
@@ -400,4 +411,310 @@ func TestVNCBannerIsTextProperties(t *testing.T) {
 			t.Fatalf("VNC page banner colors for vncBanner %q mismatch (-want +got):\n%s", annotation, diff)
 		}
 	})
+}
+
+// vncServe serves a request for test-vm of test-experiment to h directly, as
+// alice with role, in ctx.
+func vncServe(ctx context.Context, h func(http.ResponseWriter, *http.Request) error, role rbac.Role) *httptest.ResponseRecorder {
+	ctx = context.WithValue(ctx, middleware.ContextKeyRole, role)
+	ctx = context.WithValue(ctx, middleware.ContextKeyUser, "alice")
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/experiments/test-experiment/vms/test-vm/vnc", nil)
+	req = mux.SetURLVars(req, map[string]string{"exp": "test-experiment", "name": "test-vm"})
+
+	rec := httptest.NewRecorder()
+	weberror.ErrorHandler(h).ServeHTTP(rec, req)
+
+	return rec
+}
+
+// vncNode is a topology node of the named VM.
+func vncNode(name string) map[string]any {
+	return map[string]any{
+		"type":     "VirtualMachine",
+		"general":  map[string]any{"hostname": name},
+		"hardware": map[string]any{"vcpus": 1, "memory": 256, "os_type": "linux"},
+	}
+}
+
+func TestFindTopologyNode(t *testing.T) {
+	useTestStore(t, testExperiment(t, "", vncNode("other-vm"), vncNode("test-vm")))
+
+	if node := findTopologyNode("test-experiment", "test-vm"); node == nil || node.General().Hostname() != "test-vm" {
+		t.Errorf("findTopologyNode(test-experiment, test-vm) = %v, want test-vm's node", node)
+	}
+
+	for _, tc := range []struct{ exp, vm string }{
+		{"test-experiment", "missing-vm"},
+		{"missing-experiment", "test-vm"},
+		{"test-experiment", ""},
+	} {
+		if node := findTopologyNode(tc.exp, tc.vm); node != nil {
+			t.Errorf("findTopologyNode(%q, %q) = %v, want nil", tc.exp, tc.vm, node)
+		}
+	}
+}
+
+// The VNC page is refused, audited, without vms/vnc get, and is not found
+// for a VM the experiment does not have.
+func TestGetVNCRefuses(t *testing.T) {
+	useTestStore(t, testExperiment(t, "", vncNode("other-vm")))
+
+	events := captureAudit(t)
+
+	rec := vncServe(t.Context(), GetVNC, testRole("vms/vnc", "get", "test-experiment/other-vm"))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("GET vms/test-vm/vnc without vms/vnc get = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	wantDenied(t, events(), "vnc-attach")
+
+	rec = vncServe(t.Context(), GetVNC, testRole("vms/vnc", "get", "test-experiment/*"))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET vms/test-vm/vnc of a missing VM = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	if got := errorMessage(t, rec.Code, rec.Body.String()); got != "VM not found" {
+		t.Errorf("GET vms/test-vm/vnc of a missing VM = %q, want VM not found", got)
+	}
+}
+
+// Unbundled, the VNC page is the template on disk, with the same banners,
+// token and policy as the embedded one.
+func TestGetVNCUnbundled(t *testing.T) {
+	useTestStore(t, testExperiment(t, "", vncNode("test-vm")))
+
+	// the server reads web/public from the folder it starts in
+	t.Chdir("..")
+
+	original := o
+	t.Cleanup(func() { o = original })
+
+	o.unbundled = true
+
+	ctx := context.WithValue(t.Context(), middleware.ContextKeyJWT, "session-token")
+
+	rec := vncServe(ctx, GetVNC, testRole("vms/vnc", "get", "test-experiment/test-vm"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET vms/test-vm/vnc unbundled = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+
+	top, bottom := banners(body)
+	if want := "EXP: test-experiment - VM: test-vm"; top != want || bottom != want {
+		t.Errorf("GET vms/test-vm/vnc unbundled banners = %q, %q, want %q", top, bottom, want)
+	}
+
+	if !strings.Contains(body, "session-token") {
+		t.Error("GET vms/test-vm/vnc unbundled has no session token, want noVNC given it")
+	}
+
+	m := regexp.MustCompile(`<script nonce="([^"]+)">`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("GET vms/test-vm/vnc unbundled inline script has no nonce, want one")
+	}
+
+	want := map[string]string{
+		"Content-Security-Policy": vncContentSecurityPolicy(m[1]),
+		"Cache-Control":           "no-cache, no-store, must-revalidate",
+		"Pragma":                  "no-cache",
+		"Expires":                 "0",
+	}
+
+	got := map[string]string{}
+	for k := range want {
+		got[k] = rec.Header().Get(k)
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GET vms/test-vm/vnc unbundled headers mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// vncMM is the test minimega, failing to find VNC endpoints with err.
+type vncMM struct {
+	*testMM
+
+	err error
+}
+
+func (m *vncMM) GetVNCEndpoint(...mm.Option) (string, error) { return "", m.err }
+
+// A VNC websocket whose endpoint minimega cannot find is refused and audited
+// as failed, answering nothing to a client that has left; while the server
+// stops, it is refused before it is upgraded.
+func TestGetVNCWebSocketFails(t *testing.T) {
+	role := testRole("vms/vnc", "get", "test-experiment/test-vm")
+
+	original := mm.DefaultMM
+	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore test double
+
+	mm.DefaultMM = &vncMM{testMM: new(testMM), err: errors.New("vm not found")} //nolint:reassign // test double
+
+	events := captureAudit(t)
+
+	rec := vncServe(t.Context(), GetVNCWebSocket, role)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("GET vms/test-vm/vnc/ws without an endpoint = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	if got := errorMessage(t, rec.Code, rec.Body.String()); got != "unable to get VNC endpoint" {
+		t.Errorf("GET vms/test-vm/vnc/ws without an endpoint = %q, want unable to get VNC endpoint", got)
+	}
+
+	wantAudit(t, events(), "vnc-attach", "failure", map[string]any{"user.name": "alice", "phenix.vm.name": "test-vm"})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	mm.DefaultMM = &vncMM{testMM: new(testMM), err: fmt.Errorf("vnc: %w", context.Canceled)} //nolint:reassign // test double
+
+	if rec := vncServe(ctx, GetVNCWebSocket, role); rec.Body.Len() != 0 {
+		t.Errorf("GET vms/test-vm/vnc/ws whose client left wrote %q, want nothing", rec.Body.String())
+	}
+
+	mm.DefaultMM = &testMM{vnc: "127.0.0.1:5900"} //nolint:reassign // test double
+
+	lifecycle.Stop()
+	t.Cleanup(lifecycle.Start)
+
+	rec = vncServe(t.Context(), GetVNCWebSocket, role)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET vms/test-vm/vnc/ws while stopping = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	if got := rec.Header().Get("Retry-After"); got != lifecycle.RetryAfter {
+		t.Errorf("GET vms/test-vm/vnc/ws while stopping Retry-After = %q, want %q", got, lifecycle.RetryAfter)
+	}
+}
+
+// A vncBanner annotation of another type leaves the banners empty, and one
+// with unknown keys is used, warning of the keys.
+func TestVNCConfigSetBanners(t *testing.T) {
+	logs := plogtest.Capture(t)
+
+	defaults := bannerConfig{BackgroundColor: defaultBannerBackground, TextColor: defaultBannerText}
+
+	tests := map[string]struct {
+		annotation  any
+		top, bottom bannerConfig
+		warning     string
+	}{
+		"number": {annotation: 42, top: defaults, bottom: defaults},
+		"list":   {annotation: []any{"top"}, top: defaults, bottom: defaults},
+		"unknown keys": {
+			annotation: map[string]any{
+				"topBanner":  map[string]any{"banner": []any{"top"}, "textColor": "red"},
+				"sideBanner": "left",
+			},
+			top:     bannerConfig{Lines: []string{"top"}, BackgroundColor: defaultBannerBackground, TextColor: "red"},
+			bottom:  defaults,
+			warning: "ignoring unknown vncBanner annotation keys for VM",
+		},
+		"empty string": {
+			annotation: "",
+			top:        bannerConfig{Lines: []string{""}, BackgroundColor: defaultBannerBackground, TextColor: defaultBannerText},
+			bottom:     bannerConfig{Lines: []string{""}, BackgroundColor: defaultBannerBackground, TextColor: defaultBannerText},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			logs.Take(t, nil)
+
+			config := newVNCConfig("token", "exp", "vm", "nonce")
+			config.setBanners("vm", tc.annotation)
+
+			if diff := cmp.Diff(tc.top, config.TopBanner); diff != "" {
+				t.Errorf("setBanners(%v) top banner mismatch (-want +got):\n%s", tc.annotation, diff)
+			}
+
+			if diff := cmp.Diff(tc.bottom, config.BottomBanner); diff != "" {
+				t.Errorf("setBanners(%v) bottom banner mismatch (-want +got):\n%s", tc.annotation, diff)
+			}
+
+			if tc.warning != "" && len(logs.Take(t, plogtest.Message(tc.warning))) != 1 {
+				t.Errorf("setBanners(%v) logged no %q, want it", tc.annotation, tc.warning)
+			}
+		})
+	}
+}
+
+func TestNewVNCConfig(t *testing.T) {
+	original := o
+	t.Cleanup(func() { o = original })
+
+	o.basePath = "/phenix/"
+
+	defaults := bannerConfig{BackgroundColor: defaultBannerBackground, TextColor: defaultBannerText}
+	want := &vncConfig{
+		BasePath: "/phenix/", Token: "token", ExpName: "exp", VMName: "vm", Nonce: "nonce",
+		TopBanner: defaults, BottomBanner: defaults,
+	}
+
+	if diff := cmp.Diff(want, newVNCConfig("token", "exp", "vm", "nonce")); diff != "" {
+		t.Errorf("newVNCConfig() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBannerColor(t *testing.T) {
+	t.Parallel()
+
+	for color, want := range map[string]string{
+		"":                      "fallback",
+		"red":                   "red",
+		"RebeccaPurple":         "RebeccaPurple",
+		"#abc":                  "#abc",
+		"#ABCD":                 "#ABCD",
+		"#a91f3d":               "#a91f3d",
+		"#a91f3dff":             "#a91f3dff",
+		"#ab":                   "fallback",
+		"#abcde":                "fallback",
+		"#abcdefg":              "fallback",
+		"rgb(1,2,3)":            "fallback",
+		"red;":                  "fallback",
+		"red blue":              "fallback",
+		strings.Repeat("a", 32): strings.Repeat("a", 32),
+		strings.Repeat("a", 33): "fallback",
+	} {
+		if got := bannerColor("vm", color, "fallback"); got != want {
+			t.Errorf("bannerColor(%q) = %q, want %q", color, got, want)
+		}
+	}
+}
+
+// A nonce is 128 random bits, URL-safe base64 without padding, new each call.
+func TestNewCSPNonce(t *testing.T) {
+	t.Parallel()
+
+	seen := map[string]bool{}
+
+	for range 8 {
+		nonce, err := newCSPNonce()
+		if err != nil {
+			t.Fatalf("newCSPNonce() error = %v", err)
+		}
+
+		if b, err := base64.RawURLEncoding.DecodeString(nonce); err != nil || len(b) != 16 {
+			t.Errorf("newCSPNonce() = %q, decoding to %d bytes (%v), want 16", nonce, len(b), err)
+		}
+
+		if seen[nonce] {
+			t.Errorf("newCSPNonce() = %q twice, want a new nonce each call", nonce)
+		}
+
+		seen[nonce] = true
+	}
+}
+
+func TestVNCContentSecurityPolicy(t *testing.T) {
+	t.Parallel()
+
+	want := "default-src 'self'; script-src 'self' 'nonce-abc'; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'"
+
+	if got := vncContentSecurityPolicy("abc"); got != want {
+		t.Errorf("vncContentSecurityPolicy(abc) = %q, want %q", got, want)
+	}
 }

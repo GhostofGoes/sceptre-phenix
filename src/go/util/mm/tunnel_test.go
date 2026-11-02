@@ -109,42 +109,51 @@ func TestCreateTunnelReportsOwnerError(t *testing.T) { //nolint:paralleltest // 
 	}
 }
 
-func TestMeshSendPutsNamespaceInside(t *testing.T) { //nolint:paralleltest // shares the fake minimega
-	received := useFakeMinimega(t, vm1OnHeadnode)
-
-	for _, tc := range []struct{ ns, host, want string }{
-		{"exp", "compute1", `.record false mesh send compute1 namespace "exp" tap delete t1`},
-		{"", "compute1", `.record false mesh send compute1 tap delete t1`},
-		{"exp", "head", `.record false namespace "exp" tap delete t1`},
+func TestMeshSend(t *testing.T) { //nolint:paralleltest // shares the fake minimega
+	for name, tc := range map[string]struct {
+		ns, host string
+		remote   *minicli.Response // the answer to a mesh send, nil for success
+		want     string            // the command sent
+		wantErr  string            // substring of the error, "" for none
+	}{
+		"namespace goes inside the mesh send": {
+			ns: "exp", host: "compute1", want: `.record false mesh send compute1 namespace "exp" tap delete t1`,
+		},
+		"no namespace":               {ns: "", host: "compute1", want: `.record false mesh send compute1 tap delete t1`},
+		"headnode runs it itself":    {ns: "exp", host: "head", want: `.record false namespace "exp" tap delete t1`},
+		"no host means the headnode": {ns: "exp", host: "", want: `.record false namespace "exp" tap delete t1`},
+		"reports the remote node's error": {
+			ns: "exp", host: "compute1", remote: mmtest.Error("compute1", "tap not found"),
+			want:    `.record false mesh send compute1 namespace "exp" tap delete t1`,
+			wantErr: "tap not found",
+		},
 	} {
-		if err := (Minimega{}).MeshSend(tc.ns, tc.host, "tap delete t1"); err != nil {
-			t.Errorf("MeshSend(%q, %q) error = %v", tc.ns, tc.host, err)
+		t.Run(name, func(t *testing.T) {
+			received := useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+				if strings.HasPrefix(cmd.Base, "mesh send ") && tc.remote != nil {
+					return []*minicli.Response{tc.remote}
+				}
 
-			continue
-		}
+				return vm1OnHeadnode(cmd)
+			})
 
-		cmds := received()
-		if len(cmds) == 0 {
-			t.Fatalf("MeshSend(%q, %q) sent nothing", tc.ns, tc.host)
-		}
+			err := (Minimega{}).MeshSend(tc.ns, tc.host, "tap delete t1")
 
-		if got := cmds[len(cmds)-1].Raw; got != tc.want {
-			t.Errorf("MeshSend(%q, %q) sent %q, want %q", tc.ns, tc.host, got, tc.want)
-		}
-	}
-}
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("MeshSend(%q, %q) error = %v, want nil", tc.ns, tc.host, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("MeshSend(%q, %q) error = %v, want one containing %q", tc.ns, tc.host, err, tc.wantErr)
+			}
 
-func TestMeshSendReportsError(t *testing.T) { //nolint:paralleltest // shares the fake minimega
-	useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
-		if strings.HasPrefix(cmd.Base, "mesh send ") {
-			return []*minicli.Response{{Host: "compute1", Error: "tap not found"}}
-		}
+			cmds := received()
+			if len(cmds) == 0 {
+				t.Fatalf("MeshSend(%q, %q) sent nothing", tc.ns, tc.host)
+			}
 
-		return vm1OnHeadnode(cmd)
-	})
-
-	err := (Minimega{}).MeshSend("exp", "compute1", "tap delete t1")
-	if err == nil || !strings.Contains(err.Error(), "tap not found") {
-		t.Errorf("MeshSend(exp, compute1) error = %v, want the remote node's error", err)
+			if got := cmds[len(cmds)-1].Raw; got != tc.want {
+				t.Errorf("MeshSend(%q, %q) sent %q, want %q", tc.ns, tc.host, got, tc.want)
+			}
+		})
 	}
 }

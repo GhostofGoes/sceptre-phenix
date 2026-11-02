@@ -72,6 +72,98 @@ func TestKeyedMutex(t *testing.T) {
 	}
 }
 
+// Many goroutines on a few keys: one holder per key at a time, and no key is
+// tracked once all are done.
+func TestKeyedMutexConcurrent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		goroutines = 32
+		rounds     = 50
+	)
+
+	var (
+		k       keyedMutex
+		wg      sync.WaitGroup
+		keys    = []string{"a", "b", "c"}
+		holders = make(map[string]*atomic.Int32, len(keys))
+		counts  = make(map[string]*int, len(keys)) // each changed only while holding its key
+		overlap atomic.Bool
+	)
+
+	for _, key := range keys {
+		holders[key] = new(atomic.Int32)
+		counts[key] = new(int)
+	}
+
+	for g := range goroutines {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for r := range rounds {
+				key := keys[(g+r)%len(keys)]
+				unlock := k.lock(key)
+
+				if holders[key].Add(1) != 1 {
+					overlap.Store(true)
+				}
+
+				*counts[key]++
+
+				holders[key].Add(-1)
+				unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if overlap.Load() {
+		t.Error("keyedMutex let two goroutines hold the same key at once")
+	}
+
+	total := 0
+	for _, n := range counts {
+		total += *n
+	}
+
+	if total != goroutines*rounds {
+		t.Errorf("keyedMutex holders counted %d locks, want %d", total, goroutines*rounds)
+	}
+
+	if len(k.locks) != 0 {
+		t.Errorf("keyedMutex tracks %d keys after every lock was released, want 0", len(k.locks))
+	}
+}
+
+func TestLockVMConfig(t *testing.T) { //nolint:paralleltest // uses the shared vmConfigLocks
+	const ns = "nslock-test-ns"
+
+	unlock := LockVMConfig(ns)
+
+	if got := vmConfigLocks.refs(ns); got != 1 {
+		t.Errorf("vmConfigLocks.refs(%s) while LockVMConfig holds it = %d, want 1", ns, got)
+	}
+
+	// Another namespace's VM config is free meanwhile.
+	LockVMConfig(ns + "-other")()
+
+	if got := ccLocks.refs(ns); got != 0 {
+		t.Errorf("ccLocks.refs(%s) after LockVMConfig(%s) = %d, want 0", ns, ns, got)
+	}
+
+	unlock()
+
+	if got := vmConfigLocks.refs(ns); got != 0 {
+		t.Errorf("vmConfigLocks.refs(%s) after unlock = %d, want 0", ns, got)
+	}
+
+	// It can be locked again once released.
+	LockVMConfig(ns)()
+}
+
 // From one goroutine, with unlocks called again later: a key is tracked only while held,
 // and a stale unlock never releases the key's next holder.
 func TestKeyedMutexProperties(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -43,79 +44,180 @@ outer:
 	return names
 }
 
-// A finished clone leaves the copy and no temporary file, having reported
-// every byte.
+// A finished clone leaves the copy, with the source's permissions, and no temporary file, having reported every byte.
 func TestCloneFile(t *testing.T) {
 	t.Parallel()
 
-	var (
-		dir      = t.TempDir()
-		src, dst = filepath.Join(dir, "a.qc2"), filepath.Join(dir, "b.qc2")
-		content  = make([]byte, cloneChunk+12345)
-		copied   atomic.Int64
-	)
-
-	for i := range content {
-		content[i] = byte(i)
+	tests := map[string]struct {
+		size     int
+		progress bool
+	}{
+		"more than a chunk":    {size: cloneChunk + 12345, progress: true},
+		"an empty image":       {size: 0, progress: true},
+		"no progress reported": {size: 100, progress: false},
 	}
 
-	if err := os.WriteFile(src, content, 0o600); err != nil {
-		t.Fatalf("os.WriteFile(%s) error = %v", src, err)
-	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	if err := cloneFile(t.Context(), src, dst, func(n int64) { copied.Add(n) }); err != nil {
-		t.Fatalf("cloneFile(a.qc2, b.qc2) error = %v", err)
-	}
+			var (
+				dir      = t.TempDir()
+				src, dst = filepath.Join(dir, "a.qc2"), filepath.Join(dir, "b.qc2")
+				content  = make([]byte, tt.size)
+				copied   atomic.Int64
+				progress func(int64)
+			)
 
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("os.ReadFile(%s) error = %v", dst, err)
-	}
+			for i := range content {
+				content[i] = byte(i)
+			}
 
-	if !bytes.Equal(got, content) {
-		t.Errorf("cloneFile(a.qc2, b.qc2) wrote %d bytes that differ from the %d of the source", len(got), len(content))
-	}
+			if err := os.WriteFile(src, content, 0o640); err != nil {
+				t.Fatalf("os.WriteFile(%s) error = %v", src, err)
+			}
 
-	if copied.Load() != int64(len(content)) {
-		t.Errorf("cloneFile(a.qc2, b.qc2) reported %d bytes copied, want %d", copied.Load(), len(content))
-	}
+			if tt.progress {
+				progress = func(n int64) { copied.Add(n) }
+			}
 
-	if left := leftovers(t, dir, "a.qc2", "b.qc2"); len(left) != 0 {
-		t.Errorf("cloneFile(a.qc2, b.qc2) left %v behind, want nothing", left)
+			if err := cloneFile(t.Context(), src, dst, progress); err != nil {
+				t.Fatalf("cloneFile(a.qc2, b.qc2) error = %v", err)
+			}
+
+			got, err := os.ReadFile(dst)
+			if err != nil {
+				t.Fatalf("os.ReadFile(%s) error = %v", dst, err)
+			}
+
+			if !bytes.Equal(got, content) {
+				t.Errorf("cloneFile(a.qc2, b.qc2) wrote %d bytes that differ from the %d of the source", len(got), len(content))
+			}
+
+			if want := int64(len(content)); tt.progress && copied.Load() != want {
+				t.Errorf("cloneFile(a.qc2, b.qc2) reported %d bytes copied, want %d", copied.Load(), want)
+			}
+
+			if info, err := os.Stat(dst); err != nil || info.Mode().Perm() != 0o640 {
+				t.Errorf("os.Stat(b.qc2) = %v, %v; want mode 0640", info, err)
+			}
+
+			if left := leftovers(t, dir, "a.qc2", "b.qc2"); len(left) != 0 {
+				t.Errorf("cloneFile(a.qc2, b.qc2) left %v behind, want nothing", left)
+			}
+		})
 	}
 }
 
-// A clone canceled part way leaves neither the copy nor its temporary file.
-func TestCloneFileCanceled(t *testing.T) {
+// A clone that cannot start fails before it writes anything, and leaves an existing destination as it was.
+func TestCloneFileRefuses(t *testing.T) {
 	t.Parallel()
 
-	var (
-		dir      = t.TempDir()
-		src, dst = filepath.Join(dir, "a.qc2"), filepath.Join(dir, "b.qc2")
-	)
-
-	// sparse, so the test writes little to the disk
-	f, err := os.Create(src)
-	if err != nil {
-		t.Fatalf("os.Create(%s) error = %v", src, err)
+	tests := map[string]struct {
+		src, dst string
+		want     error
+	}{
+		"a missing source":             {src: "gone.qc2", dst: "b.qc2", want: fs.ErrNotExist},
+		"a folder as the source":       {src: "sub", dst: "b.qc2", want: ErrNotManaged},
+		"an existing destination":      {src: "a.qc2", dst: "taken.qc2", want: ErrExists},
+		"a destination with no folder": {src: "a.qc2", dst: "gone/b.qc2", want: fs.ErrNotExist},
 	}
 
-	if err := f.Truncate(8 * cloneChunk); err != nil {
-		t.Fatalf("Truncate(%d) error = %v", 8*cloneChunk, err)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "a.qc2"), "source")
+			writeFile(t, filepath.Join(dir, "taken.qc2"), "taken")
+
+			if err := os.Mkdir(filepath.Join(dir, "sub"), 0o750); err != nil {
+				t.Fatalf("os.Mkdir(sub) error = %v", err)
+			}
+
+			err := cloneFile(t.Context(), filepath.Join(dir, tt.src), filepath.Join(dir, tt.dst), nil)
+			if !errors.Is(err, tt.want) {
+				t.Errorf("cloneFile(%s, %s) error = %v, want %v", tt.src, tt.dst, err, tt.want)
+			}
+
+			if left := leftovers(t, dir, "a.qc2", "taken.qc2", "sub"); len(left) != 0 {
+				t.Errorf("cloneFile(%s, %s) left %v behind, want nothing", tt.src, tt.dst, left)
+			}
+
+			if got, err := os.ReadFile(filepath.Join(dir, "taken.qc2")); string(got) != "taken" {
+				t.Errorf("os.ReadFile(taken.qc2) after cloneFile(%s, %s) = %q, %v; want %q", tt.src, tt.dst, got, err, "taken")
+			}
+		})
+	}
+}
+
+// A clone whose context ends part way leaves neither the copy nor its temporary file. A cancellation is returned as
+// it is, so the caller tells it apart; a deadline names the clone.
+func TestCloneFileContextEnds(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		ctx     func(t *testing.T) (context.Context, func(int64))
+		want    error
+		wrapped bool
+	}{
+		"canceled after the first chunk": {
+			ctx: func(t *testing.T) (context.Context, func(int64)) {
+				t.Helper()
+
+				ctx, cancel := context.WithCancel(t.Context())
+				t.Cleanup(cancel)
+
+				return ctx, func(int64) { cancel() }
+			},
+			want: context.Canceled,
+		},
+		"past its deadline": {
+			ctx: func(t *testing.T) (context.Context, func(int64)) {
+				t.Helper()
+
+				ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+
+				return ctx, nil
+			},
+			want:    context.DeadlineExceeded,
+			wrapped: true,
+		},
 	}
 
-	_ = f.Close()
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+			var (
+				dir      = t.TempDir()
+				src, dst = filepath.Join(dir, "a.qc2"), filepath.Join(dir, "b.qc2")
+			)
 
-	err = cloneFile(ctx, src, dst, func(int64) { cancel() })
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("cloneFile(a.qc2, b.qc2) canceled after its first chunk: error = %v, want %v", err, context.Canceled)
-	}
+			// sparse, so the test writes little to the disk
+			f, err := os.Create(src)
+			if err != nil {
+				t.Fatalf("os.Create(%s) error = %v", src, err)
+			}
 
-	if left := leftovers(t, dir, "a.qc2"); len(left) != 0 {
-		t.Errorf("canceled cloneFile(a.qc2, b.qc2) left %v behind, want nothing", left)
+			if err := f.Truncate(8 * cloneChunk); err != nil {
+				t.Fatalf("Truncate(%d) error = %v", 8*cloneChunk, err)
+			}
+
+			_ = f.Close()
+
+			ctx, progress := tt.ctx(t)
+
+			err = cloneFile(ctx, src, dst, progress)
+			if !errors.Is(err, tt.want) || (err != tt.want) != tt.wrapped { //nolint:errorlint // checks the error is not wrapped
+				t.Errorf("cloneFile(a.qc2, b.qc2) error = %v, want %v, wrapped: %t", err, tt.want, tt.wrapped)
+			}
+
+			if left := leftovers(t, dir, "a.qc2"); len(left) != 0 {
+				t.Errorf("cloneFile(a.qc2, b.qc2) %s left %v behind, want nothing", name, left)
+			}
+		})
 	}
 }
 
@@ -333,4 +435,115 @@ func TestCopyChunksProperties(t *testing.T) {
 			t.Fatalf("copyChunks(%d bytes) progress mismatch (-want +got):\n%s", size, diff)
 		}
 	})
+}
+
+// cloneFailingWriter fails every write with err.
+type cloneFailingWriter struct{ err error }
+
+func (w cloneFailingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// copyChunks stops at the first failed read or write, naming which failed, and at once when ctx is done.
+func TestCopyChunksErrors(t *testing.T) {
+	t.Parallel()
+
+	errDisk := errors.New("disk failed")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := map[string]struct {
+		ctx     context.Context //nolint:containedctx // the context of the copy
+		out     io.Writer
+		in      io.Reader
+		want    error
+		message string
+	}{
+		"a failed write": {
+			ctx: context.Background(), out: cloneFailingWriter{err: errDisk}, in: bytes.NewReader([]byte("abc")),
+			want: errDisk, message: "writing: disk failed",
+		},
+		"a failed read": {
+			ctx: context.Background(), out: io.Discard, in: iotest.ErrReader(errDisk),
+			want: errDisk, message: "reading: disk failed",
+		},
+		"a done context": {
+			ctx: canceled, out: cloneFailingWriter{err: errDisk}, in: bytes.NewReader([]byte("abc")),
+			want: context.Canceled, message: context.Canceled.Error(),
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var reported int64
+
+			err := copyChunks(tt.ctx, tt.out, tt.in, func(n int64) { reported += n })
+			if !errors.Is(err, tt.want) || err.Error() != tt.message {
+				t.Errorf("copyChunks() error = %v, want %q wrapping %v", err, tt.message, tt.want)
+			}
+
+			if reported != 0 {
+				t.Errorf("copyChunks() reported %d bytes copied, want 0", reported)
+			}
+		})
+	}
+}
+
+// RemoveStalePartials fails for a files directory it cannot read, and stops at a partial file it cannot remove,
+// counting those it removed; a folder under it that it cannot read holds nothing it removes.
+func TestRemoveStalePartialsErrors(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root reads and writes folders whatever their permissions")
+	}
+
+	const partial = ".a.qc2.partial-0123456789abcdef"
+
+	tests := map[string]struct {
+		// locked is the folder, relative to the files directory, made unreadable (0) or read-only (0o500)
+		locked  string
+		mode    os.FileMode
+		want    int
+		wantErr error
+	}{
+		"an unreadable files directory": {locked: ".", mode: 0, want: 0, wantErr: fs.ErrPermission},
+		"an unreadable folder":          {locked: "lab", mode: 0, want: 1},
+		"a read-only folder":            {locked: "lab", mode: 0o500, want: 1, wantErr: fs.ErrPermission},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			writeImages(t, filepath.Join(dir, partial), filepath.Join(dir, "lab", partial))
+
+			locked := filepath.Join(dir, tt.locked)
+			if err := os.Chmod(locked, tt.mode); err != nil {
+				t.Fatalf("os.Chmod(%s, %o) error = %v", tt.locked, tt.mode, err)
+			}
+
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
+
+			removed, err := RemoveStalePartials(dir, time.Now().Add(time.Minute))
+			if removed != tt.want || !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
+				t.Errorf("RemoveStalePartials(%s) = %d, %v; want %d, %v", name, removed, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A files directory path that runs through a file fails, rather than count as a missing folder.
+func TestRemoveStalePartialsThroughAFile(t *testing.T) {
+	t.Parallel()
+
+	file := filepath.Join(t.TempDir(), "file")
+	writeFile(t, file, "x")
+
+	removed, err := RemoveStalePartials(filepath.Join(file, "images"), time.Now())
+	if removed != 0 || !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("RemoveStalePartials(file/images) = %d, %v; want 0, %v", removed, err, syscall.ENOTDIR)
+	}
 }

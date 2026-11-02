@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -599,5 +601,378 @@ func TestInjectPartitionsRealQemu(t *testing.T) {
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("injectPartitionsCheck() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// doctorPartitionsPart is a partition of number, size bytes and file system fs:
+// "" for none read, "extended" for an extended partition.
+func doctorPartitionsPart(number int, typ, fs string, size int64) disk.Partition {
+	p := disk.Partition{Number: number, Type: typ, Size: size}
+
+	switch fs {
+	case "":
+	case "extended":
+		p.Extended = true
+	default:
+		p.Filesystem = &disk.Filesystem{Type: fs}
+	}
+
+	return p
+}
+
+// injectProblem names why minimega cannot inject files into a partition from
+// the partition table alone, and gives a note when doctor cannot tell.
+func TestDoctorPartitionsInjectProblem(t *testing.T) {
+	t.Parallel()
+
+	const mib, gib = 1 << 20, 1 << 30
+
+	boot := []disk.Partition{
+		doctorPartitionsPart(1, "EFI System", "vfat", 512*mib), doctorPartitionsPart(2, "Linux", "ext4", 2*gib),
+	}
+	small := []disk.Partition{
+		doctorPartitionsPart(1, "EFI System", "vfat", 100*mib), doctorPartitionsPart(2, "Linux", "ext4", 500*mib),
+	}
+
+	tests := map[string]struct {
+		found                 disk.Inspection
+		number                int
+		wantProblem, wantNote string
+	}{
+		"ext4": {
+			found:  disk.Inspection{PartitionTable: "mbr", Partitions: boot},
+			number: 2,
+		},
+		"table not read": {
+			found:  disk.Inspection{PartitionTable: "", Partitions: boot},
+			number: 2,
+		},
+		"no table": {
+			found:       disk.Inspection{PartitionTable: "none"},
+			number:      1,
+			wantProblem: "the disk has no partition table, so minimega finds no partition (no partitions found on image)",
+		},
+		"unknown table": {
+			found:    disk.Inspection{PartitionTable: "unknown", PartitionNotes: []string{"bad CRC", "overlap"}},
+			number:   1,
+			wantNote: "doctor cannot read its partition table: bad CRC, overlap",
+		},
+		"no partition 1": {
+			found:  disk.Inspection{PartitionTable: "gpt", Partitions: boot[1:]},
+			number: 2,
+			wantProblem: "the disk has no partition 1, and minimega waits for partition 1 before it opens any " +
+				"partition, so it finds no partition (no partitions found on image)",
+		},
+		"missing partition": {
+			found:       disk.Inspection{PartitionTable: "gpt", Partitions: boot},
+			number:      3,
+			wantProblem: "inject_partition 3 names no partition (desired partition 3 not found)",
+		},
+		"extended": {
+			found: disk.Inspection{PartitionTable: "mbr", Partitions: append(slices.Clone(boot),
+				doctorPartitionsPart(3, "Extended", "extended", mib))},
+			number: 3,
+			wantProblem: "partition 3 is an extended partition, which holds no file system, so it is not a file " +
+				"system that minimega can write files to",
+		},
+		"file system not read": {
+			found: disk.Inspection{PartitionTable: "mbr", Partitions: append(slices.Clone(boot),
+				doctorPartitionsPart(3, "Linux", "", mib))},
+			number:   3,
+			wantNote: "doctor read only part of the disk, and not its file system",
+		},
+		"LUKS": {
+			found: disk.Inspection{PartitionTable: "gpt", Partitions: append(slices.Clone(boot),
+				doctorPartitionsPart(3, "Linux", "crypto_LUKS", gib))},
+			number:      3,
+			wantProblem: "partition 3 holds a LUKS volume, not a file system that minimega can write files to",
+		},
+		"boot partition": {
+			found:  disk.Inspection{PartitionTable: "gpt", Partitions: boot},
+			number: 1,
+			wantProblem: "partition 1 is a small boot partition (512.0 MiB), so the files go to the wrong file " +
+				"system or the copy fails",
+		},
+		// no partition is large enough to tell a boot partition from a data partition
+		"small disk": {
+			found:  disk.Inspection{PartitionTable: "gpt", Partitions: small},
+			number: 1,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			problem, note := injectProblem(tc.found, tc.number)
+			if problem != tc.wantProblem || note != tc.wantNote {
+				t.Errorf("injectProblem(%d) = %q, %q; want %q, %q", tc.number, problem, note, tc.wantProblem, tc.wantNote)
+			}
+		})
+	}
+}
+
+// The summary lists each partition with its type, file system and size, at
+// most eight of them, and suggests the largest Linux or NTFS partition.
+func TestDoctorPartitionsSummary(t *testing.T) {
+	t.Parallel()
+
+	const mib = 1 << 20
+
+	many := make([]disk.Partition, 0, 10)
+	for i := 1; i <= 10; i++ {
+		many = append(many, doctorPartitionsPart(i, "Linux", "ext4", mib))
+	}
+
+	tests := map[string]struct {
+		partitions []disk.Partition
+		want       string
+	}{
+		"none": {want: "the disk has no partitions; set inject_partition: 0 to turn off injects"},
+		"kinds": {
+			partitions: []disk.Partition{
+				doctorPartitionsPart(1, "", "vfat", mib), doctorPartitionsPart(2, "Extended", "extended", 2*mib),
+				doctorPartitionsPart(5, "Linux", "", mib), doctorPartitionsPart(6, "Linux", "xfs", 3*mib),
+			},
+			want: "partitions 1 (unknown type, vfat, 1.0 MiB), 2 (Extended, 2.0 MiB), 5 (Linux, file system not read, " +
+				"1.0 MiB), 6 (Linux, xfs, 3.0 MiB); try inject_partition: 6",
+		},
+		"nothing to suggest": {
+			partitions: []disk.Partition{doctorPartitionsPart(1, "Linux swap", "swap", mib)},
+			want: "partitions 1 (Linux swap, swap, 1.0 MiB); no Linux or NTFS partition to suggest, so set " +
+				"inject_partition: 0 to turn off injects",
+		},
+		"no partition 1": {
+			partitions: []disk.Partition{doctorPartitionsPart(2, "Linux", "ext4", mib)},
+			want: "partitions 2 (Linux, ext4, 1.0 MiB); minimega injects into no partition of this disk, so set " +
+				"inject_partition: 0 to turn off injects",
+		},
+		"more than eight": {
+			partitions: many,
+			want: "partitions 1 (Linux, ext4, 1.0 MiB), 2 (Linux, ext4, 1.0 MiB), 3 (Linux, ext4, 1.0 MiB), 4 (Linux, " +
+				"ext4, 1.0 MiB), 5 (Linux, ext4, 1.0 MiB), 6 (Linux, ext4, 1.0 MiB), 7 (Linux, ext4, 1.0 MiB), 8 (Linux, " +
+				"ext4, 1.0 MiB), and 2 more; try inject_partition: 1",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, partitionSummary(disk.Inspection{Partitions: tc.partitions})); diff != "" {
+				t.Errorf("partitionSummary() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// suggestedPartition is the largest Linux or NTFS data partition, the first of
+// equal ones, or none.
+func TestDoctorPartitionsSuggested(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		partitions []disk.Partition
+		want       int // the number; 0 for none
+	}{
+		"none":    {},
+		"no data": {partitions: []disk.Partition{doctorPartitionsPart(1, "", "vfat", 9), doctorPartitionsPart(2, "", "swap", 9)}},
+		"largest": {
+			partitions: []disk.Partition{
+				doctorPartitionsPart(1, "", "ext4", 5), doctorPartitionsPart(2, "", "ntfs", 7),
+				doctorPartitionsPart(3, "", "xfs", 6), doctorPartitionsPart(4, "", "vfat", 100),
+			},
+			want: 2,
+		},
+		"first of equal": {
+			partitions: []disk.Partition{doctorPartitionsPart(1, "", "btrfs", 5), doctorPartitionsPart(2, "", "ext3", 5)},
+			want:       1,
+		},
+		"not extended or unread": {
+			partitions: []disk.Partition{
+				doctorPartitionsPart(1, "", "extended", 50), doctorPartitionsPart(2, "", "", 40),
+				doctorPartitionsPart(3, "", "ext2", 1),
+			},
+			want: 3,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := 0
+			if p := suggestedPartition(tc.partitions); p != nil {
+				got = p.Number
+			}
+
+			if got != tc.want {
+				t.Errorf("suggestedPartition() = partition %d, want %d", got, tc.want)
+			}
+
+			if has := hasPartition(tc.partitions, 1); has != (len(tc.partitions) > 0) {
+				t.Errorf("hasPartition(1) = %t with %d partitions numbered from 1", has, len(tc.partitions))
+			}
+		})
+	}
+}
+
+// capList keeps at most n items and counts the rest, without changing items.
+func TestDoctorPartitionsCapList(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		items []string
+		n     int
+		want  []string
+	}{
+		"empty":     {n: 2},
+		"fewer":     {items: []string{"a"}, n: 2, want: []string{"a"}},
+		"exactly n": {items: []string{"a", "b"}, n: 2, want: []string{"a", "b"}},
+		"one more":  {items: []string{"a", "b", "c"}, n: 2, want: []string{"a", "b", "and 1 more"}},
+		"many more": {items: []string{"a", "b", "c", "d", "e"}, n: 1, want: []string{"a", "and 4 more"}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			items := slices.Clone(tc.items)
+
+			if diff := cmp.Diff(tc.want, capList(items, tc.n)); diff != "" {
+				t.Errorf("capList(%q, %d) mismatch (-want +got):\n%s", tc.items, tc.n, diff)
+			}
+
+			if diff := cmp.Diff(tc.items, items); diff != "" {
+				t.Errorf("capList(%q, %d) changed its items (-want +got):\n%s", tc.items, tc.n, diff)
+			}
+		})
+	}
+}
+
+// The row warns with at most five problems, skips when doctor checked
+// nothing, and passes with the images it did not check.
+func TestDoctorPartitionsRow(t *testing.T) {
+	t.Parallel()
+
+	letters := func(n int) []string {
+		items := make([]string, n)
+		for i := range items {
+			items[i] = string(rune('a' + i))
+		}
+
+		return items
+	}
+
+	tests := map[string]struct {
+		problems, notChecked []string
+		checked, targets     int
+		want                 doctorCheck
+	}{
+		"pass": {checked: 2, targets: 2, want: passCheck(
+			"each of the 2 inject partitions holds a file system that minimega can write files to")},
+		"pass with notes": {notChecked: []string{"x (it does not exist)"}, checked: 1, targets: 2, want: passCheck(
+			okInjects + ". Not checked: x (it does not exist)")},
+		"skip": {notChecked: letters(7), targets: 7, want: hostSkip(
+			"doctor checked no inject partition: a; b; c; d; e; and 2 more")},
+		"problems": {problems: letters(6), notChecked: []string{"y"}, checked: 6, targets: 7, want: warnCheck(
+			"minimega cannot inject files into 6 inject partitions of 7 at a start: a. b. c. d. e. and 1 more. " +
+				"Not checked: y")},
+		"one problem": {problems: []string{"a"}, checked: 1, targets: 1, want: warnCheck(
+			"minimega cannot inject files into 1 inject partition of 1 at a start: a")},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := injectPartitionsRow(tc.problems, tc.notChecked, tc.checked, tc.targets)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("injectPartitionsRow() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// readInjectImage says why it did not read an image: it does not exist,
+// doctor cannot stat it, the time ran out, a qcow2 image without qemu-img, or
+// what keeps phenix from reading its partitions.
+func TestDoctorPartitionsReadInjectImage(t *testing.T) {
+	t.Parallel()
+
+	read := disk.Inspection{PartitionTable: "mbr", Partitions: []disk.Partition{doctorPartitionsPart(1, "Linux", "ext4", 1)}}
+
+	tests := map[string]struct {
+		statErr  error
+		canceled string // "before" or "during" the read; "" for neither
+		qemuImg  string
+		found    disk.Inspection
+		wantWhy  string
+		wantRead bool // inspectDisk ran
+	}{
+		"read":    {found: read, wantRead: true},
+		"missing": {statErr: &fs.PathError{Op: "stat", Path: "/i.img", Err: fs.ErrNotExist}, wantWhy: "it does not exist"},
+		"no access": {
+			statErr: &fs.PathError{Op: "stat", Path: "/i.img", Err: fs.ErrPermission},
+			wantWhy: "doctor cannot read it: permission denied",
+		},
+		"time ran out before": {canceled: "before", wantWhy: "doctor stopped reading images after 1s"},
+		"time ran out during": {canceled: "during", found: read, wantWhy: "doctor stopped reading images after 1s", wantRead: true},
+		"qcow2 without qemu-img": {
+			found: disk.Inspection{Qcow: &disk.QcowHeader{}}, wantWhy: noQemuImgPhrase, wantRead: true,
+		},
+		"qcow2 with qemu-img": {
+			qemuImg: "/usr/bin/qemu-img", found: disk.Inspection{Qcow: &disk.QcowHeader{}, PartitionTable: "mbr"}, wantRead: true,
+		},
+		"partitions unavailable": {
+			found:   disk.Inspection{PartitionsUnavailable: "phenix cannot read the partitions: qemu-img failed"},
+			wantWhy: "qemu-img failed", wantRead: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in := fakeDoctorInput(newDoctorTestDir(t), nil)
+			in.env.stat = func(string) (os.FileInfo, error) { return nil, tc.statErr }
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			if tc.canceled == "before" {
+				cancel()
+			}
+
+			var gotQemu string
+
+			ran := false
+			in.inspectDisk = func(_ context.Context, path, qemuImg string) disk.Inspection {
+				ran, gotQemu = true, qemuImg
+
+				if path != "/i.img" {
+					t.Errorf("inspectDisk(%q), want /i.img", path)
+				}
+
+				if tc.canceled == "during" {
+					cancel()
+				}
+
+				return tc.found
+			}
+
+			got := in.readInjectImage(ctx, "/i.img", tc.qemuImg)
+
+			if got.why != tc.wantWhy || ran != tc.wantRead || gotQemu != tc.qemuImg {
+				t.Errorf("readInjectImage() why %q, read %t with qemu-img %q; want %q, %t, %q",
+					got.why, ran, gotQemu, tc.wantWhy, tc.wantRead, tc.qemuImg)
+			}
+
+			if tc.wantRead && tc.wantWhy == "" {
+				if diff := cmp.Diff(tc.found, got.found); diff != "" {
+					t.Errorf("readInjectImage() found mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
 	}
 }

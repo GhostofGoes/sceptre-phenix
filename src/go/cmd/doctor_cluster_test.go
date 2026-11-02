@@ -124,6 +124,21 @@ func TestMinimegaOpenFilesCheck(t *testing.T) {
 			want: row("", doctorSkip, "not checked, because the process 77 (from <base>/minimega.pid) is not minimega "+
 				"here, such as when minimega runs in another container"),
 		},
+		"limits unreadable": {
+			host: func() doctorHostFS { h := limitsHost(limits1024, 0); delete(h, "/proc/77/limits"); return h }(),
+			pid:  "77",
+			want: row("", doctorSkip, "not checked, because this user cannot read /proc/77/limits: file does not exist"),
+		},
+		"hard limit unlimited": {
+			host: limitsHost("Max open files            1024                 unlimited            files     \n", 1),
+			pid:  "77",
+			want: row("", doctorPass, "minimega (pid 77) can open 1024 files (soft limit, hard limit unlimited). Its 0 VMs "+
+				"on this node need about 64 (64, and 5 for each VM: QMP, VNC, cc and two qemu output pipes). 1 file is open now"),
+		},
+		"limit not a number": {
+			host: limitsHost("Max open files            many                 4096                 files     \n", 0), pid: "77",
+			want: row("", doctorSkip, "not checked, because /proc/77/limits gives no limit of open files"),
+		},
 		"no pid file": {
 			host: limitsHost(limits1024, 0),
 			want: row("", doctorSkip, "not checked, because <base>/minimega.pid cannot be read, so the minimega process "+
@@ -372,12 +387,60 @@ func TestVLANsChecks(t *testing.T) {
 	}
 	inv := clusterInventory(doctorMMVM{namespace: "minimega"}, doctorMMVM{namespace: "live", name: "a", state: "RUNNING"})
 
+	without := func(command string) map[string][]*minicli.Response {
+		answers := vlansAnswers()
+		delete(answers, command)
+
+		return answers
+	}
+	with := func(command string, resps []*minicli.Response) map[string][]*minicli.Response {
+		answers := vlansAnswers()
+		answers[command] = resps
+
+		return answers
+	}
+	running := []doctorExperiment{{name: "live", running: true, vlans: vlans(200, 210, 3, map[string]int{"X": 200, "Y": 200})}}
+	pinnedPass := row(vlansPinnedRow, doctorPass, "no two stored experiments pin the same VLAN ID")
+	freeSkip := func(why string) []doctorCheck {
+		return []doctorCheck{pinnedPass, row(vlansFreeRow, doctorSkip, "not checked, because "+why)}
+	}
+
 	tests := map[string]struct {
 		stored  []doctorExperiment
 		why     string
+		inv     *doctorInventory // nil for inv
 		answers map[string][]*minicli.Response
 		want    []doctorCheck
 	}{
+		"range fails": {
+			stored: running, answers: without("namespace live vlans range"),
+			want: freeSkip("minimega did not answer namespace live vlans range: invalid command"),
+		},
+		"blacklist fails": {
+			stored: running, answers: without("namespace minimega vlans blacklist"),
+			want: freeSkip("minimega did not answer namespace minimega vlans blacklist: invalid command"),
+		},
+		"no inventory": {
+			stored: running, inv: &doctorInventory{why: "minimega gave no version"}, answers: vlansAnswers(),
+			want: freeSkip("minimega gave no version"),
+		},
+		// the range of live reserves 103 and 104 of the default range; 105 is on the blacklist
+		"another namespace's range in the default range": {
+			stored: running,
+			answers: with("namespace live vlans range", []*minicli.Response{{
+				Host: "mm1", Header: []string{"min", "max", "next"}, Tabular: [][]string{{"103", "106", "103"}},
+			}}),
+			want: []doctorCheck{pinnedPass, row(vlansFreeRow, doctorPass, "no stopped experiment in the store. 4 of "+
+				"minimega's VLAN range 101-110 are free")},
+		},
+		"range that is not a number": {
+			stored: running,
+			answers: with("namespace minimega vlans range", []*minicli.Response{{
+				Host: "mm1", Header: []string{"min", "max", "next"}, Tabular: [][]string{{"x", "110", "101"}},
+			}}),
+			want: []doctorCheck{pinnedPass, row(vlansFreeRow, doctorPass, "no stopped experiment in the store. 3982 of "+
+				"minimega's VLAN range 101-4096 are free")},
+		},
 		"fits": {
 			stored: []doctorExperiment{
 				{name: "live", running: true, vlans: vlans(200, 210, 3, map[string]int{"X": 200})},
@@ -428,7 +491,12 @@ func TestVLANsChecks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			in, _ := leftoverInput(t, doctorGoodHost(), tc.stored, inv)
+			mm := inv
+			if tc.inv != nil {
+				mm = tc.inv
+			}
+
+			in, _ := leftoverInput(t, doctorGoodHost(), tc.stored, mm)
 			in.found.experiments.why = tc.why
 			in.minimega = (&doctorMinimega{answers: tc.answers}).run
 
@@ -477,6 +545,8 @@ func TestBridgeTrunkCheck(t *testing.T) {
         Port enp1
             Interface enp1
                 type: system
+        Port bond1
+            Interface bond1
         Port mega_tap3
             Interface mega_tap3
         Port patch-x
@@ -489,9 +559,18 @@ func TestBridgeTrunkCheck(t *testing.T) {
 		meshWhy  string
 		show     string
 		showErr  error
+		noOVS    bool
 		settings map[string]string
 		want     doctorCheck
 	}{
+		"no ovs-vsctl": {
+			nodes: []string{"mm1", "node2"}, show: doctorTrunkShow, noOVS: true,
+			want: row("", doctorSkip, "not checked, because ovs-vsctl is not on PATH"),
+		},
+		"not Linux": {
+			nodes: []string{"mm1", "node2"}, show: doctorTrunkShow, settings: map[string]string{"os": "darwin"},
+			want: row("", doctorSkip, "not checked, because minimega runs only on Linux"),
+		},
 		"tunnel": {
 			nodes: []string{"mm1", "node2"}, show: doctorTrunkShow,
 			want: row("", doctorPass, "The mesh has 2 nodes. The bridge phenix connects to mega_tap9 (gre tunnel)"),
@@ -504,7 +583,7 @@ func TestBridgeTrunkCheck(t *testing.T) {
 		"kinds": {
 			nodes: []string{"mm1", "node2"}, show: trunked,
 			want: row("", doctorPass, "The mesh has 2 nodes. The bridge phenix connects to bond0 (Open vSwitch bond of "+
-				"eth2, eth3), eth1 (physical NIC), vlan10 (VLAN device), enp1 (interface)"),
+				"eth2, eth3), eth1 (physical NIC), vlan10 (VLAN device), enp1 (interface), bond1 (bond)"),
 		},
 		"no experiment bridge": {
 			nodes: []string{"mm1", "node2"}, show: "    Bridge other\n        Port eth1\n            Interface eth1\n",
@@ -533,6 +612,7 @@ func TestBridgeTrunkCheck(t *testing.T) {
 			host := doctorGoodHost()
 			maps.Copy(host, doctorHostFS{
 				"/sys/class/net/eth1/device/": "", "/sys/class/net/bond0/bonding/": "", "/proc/net/vlan/vlan10": "",
+				"/sys/class/net/bond1/bonding/": "",
 			})
 
 			in, _ := leftoverInput(t, host, nil, clusterInventory())
@@ -540,7 +620,17 @@ func TestBridgeTrunkCheck(t *testing.T) {
 			in.command = doctorCommands(map[string]doctorCommand{"ovs-vsctl --timeout=1 show": {out: tc.show, err: tc.showErr}})
 
 			for key, value := range tc.settings {
+				if key == "os" {
+					in.system.os = value
+
+					continue
+				}
+
 				in.settings[key] = resolvedSetting{value: value, text: value, source: sourceFlag}
+			}
+
+			if tc.noOVS {
+				in.env.lookPath = lookPathIn(nil)
 			}
 
 			if diff := cmp.Diff(tc.want, bridgeTrunkCheck(t.Context(), in)); diff != "" {
@@ -612,6 +702,7 @@ func TestCCClientsCheck(t *testing.T) {
 		{name: "c", cc: "the soh app checks it through miniccc"},
 		{name: "d", cc: "the soh app checks it through miniccc"},
 		{name: "e"},
+		{name: "f", cc: "the soh app checks it through miniccc"}, // minimega does not show it
 	}}, {name: "off", vms: []doctorVM{{name: "z", cc: "x"}}}}
 	inv := clusterInventory(
 		doctorMMVM{namespace: "e1", name: "a", state: "RUNNING", uuid: "U-A", uptime: up},
@@ -644,12 +735,13 @@ func TestCCClientsCheck(t *testing.T) {
 			want: row("", doctorWarn, "VMs that have no miniccc client in minimega, but phenix needs one: e1 VM b (the "+
 				"soh app checks it through miniccc)"),
 		},
-		"version line with no time": {
-			answers: clients,
-			log:     "WARN server.go:746: mismatched miniccc version on a: v2.8\n",
-			want: row("", doctorWarn, "VMs that have no miniccc client in minimega, but phenix needs one: e1 VM b (the "+
-				"soh app checks it through miniccc). minimega logged a miniccc version that differs from its own for "+
-				"these clients: a (miniccc v2.8)"),
+		"client of a VM that minimega does not show": {
+			answers: map[string][]*minicli.Response{"namespace e1 cc clients": {{
+				Host: "mm1", Header: []string{"uuid", "hostname"}, Tabular: [][]string{{"u-a", "a"}, {"u-b", "b"}, {"u-zz", "ghost"}},
+			}}},
+			log: "2026/10/01 08:00:00 WARN server.go:746: mismatched miniccc version on ghost: v1\n",
+			want: row("", doctorWarn, "minimega logged a miniccc version that differs from its own for these clients: "+
+				"ghost (miniccc v1, logged 2026/10/01 08:00:00)"),
 		},
 		"no log": {
 			answers: map[string][]*minicli.Response{"namespace e1 cc clients": {{
@@ -681,21 +773,6 @@ func TestCCClientsCheck(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("relative log", func(t *testing.T) {
-		t.Parallel()
-
-		in, _ := leftoverInput(t, doctorGoodHost(), stored, inv)
-		in.minimega = (&doctorMinimega{answers: clients}).run
-		in.found.minimegaArgs["logfile"] = "minimega.log"
-
-		want := row("", doctorWarn, "VMs that have no miniccc client in minimega, but phenix needs one: e1 VM b (the "+
-			"soh app checks it through miniccc). The miniccc versions are not checked, because minimega's -logfile "+
-			"minimega.log is relative to the directory of minimega, which doctor does not know")
-		if diff := cmp.Diff(want, ccClientsCheck(t.Context(), in)); diff != "" {
-			t.Errorf("ccClientsCheck() mismatch (-want +got):\n%s", diff)
-		}
-	})
 
 	t.Run("no answer stops", func(t *testing.T) {
 		t.Parallel()
@@ -909,5 +986,260 @@ func TestDoctorReportRedactsWhatChecksFound(t *testing.T) {
 	want := "<host-4>-minimega <host-2> <host-3> <host-4> e1 VM b on <host-1>"
 	if got := report.Checks[0].Detail; got != want {
 		t.Errorf("runDoctor() detail = %q, want %q", got, want)
+	}
+}
+
+// parseOpenFilesLimit reads the soft and hard limits from the first "Max open
+// files" line, with -1 for unlimited, and refuses a line it cannot read.
+func TestDoctorClusterParseOpenFilesLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		limits     string
+		soft, hard int
+		ok         bool
+	}{
+		"numbers":         {limits: limits1024, soft: 1024, hard: 4096, ok: true},
+		"unlimited":       {limits: limitsNone, soft: unlimitedOpenFiles, hard: unlimitedOpenFiles, ok: true},
+		"hard unlimited":  {limits: "Max open files 10 unlimited files\n", soft: 10, hard: unlimitedOpenFiles, ok: true},
+		"zero":            {limits: "Max open files 0 0 files", soft: 0, hard: 0, ok: true},
+		"first line wins": {limits: "Max open files 1 2 files\nMax open files 3 4 files\n", soft: 1, hard: 2, ok: true},
+		"negative":        {limits: "Max open files -5 4096 files\n"},
+		"not a number":    {limits: "Max open files 1024 lots files\n"},
+		"no units":        {limits: "Max open files 1024\n"},
+		"other limit":     {limits: "Max processes 1024 4096 processes\n"},
+		"empty":           {},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			soft, hard, ok := parseOpenFilesLimit(tc.limits)
+			if soft != tc.soft || hard != tc.hard || ok != tc.ok {
+				t.Errorf("parseOpenFilesLimit(%q) = %d, %d, %t, want %d, %d, %t",
+					tc.limits, soft, hard, ok, tc.soft, tc.hard, tc.ok)
+			}
+		})
+	}
+}
+
+// parseMeminfo gives each value in bytes by its trimmed name, multiplies a kB
+// value by 1024, and skips a line with no colon, no value, or a value that is
+// not a number, is negative, or is too large to fit an int64 in bytes.
+func TestDoctorClusterParseMeminfo(t *testing.T) {
+	t.Parallel()
+
+	maxValue := strconv.FormatInt(maxMeminfoValue, 10)
+	overMax := strconv.FormatInt(maxMeminfoValue+1, 10)
+
+	tests := map[string]struct {
+		meminfo string
+		want    map[string]int64
+	}{
+		"kB":           {meminfo: "MemTotal:       16384 kB\n", want: map[string]int64{"MemTotal": 16384 * kib}},
+		"no unit":      {meminfo: "HugePages_Total:      12\n", want: map[string]int64{"HugePages_Total": 12}},
+		"other unit":   {meminfo: "MemFree: 5 MB\n", want: map[string]int64{"MemFree": 5}},
+		"zero":         {meminfo: "SwapFree: 0 kB", want: map[string]int64{"SwapFree": 0}},
+		"largest":      {meminfo: "Big: " + maxValue + " kB\n", want: map[string]int64{"Big": maxMeminfoValue * kib}},
+		"over largest": {meminfo: "Big: " + overMax + " kB\n", want: map[string]int64{}},
+		"not a number": {meminfo: "MemTotal: lots kB\n", want: map[string]int64{}},
+		"negative":     {meminfo: "MemTotal: -5 kB\n", want: map[string]int64{}},
+		"no colon":     {meminfo: "MemTotal 16384 kB\n", want: map[string]int64{}},
+		"no value":     {meminfo: "MemTotal:\n", want: map[string]int64{}},
+		"empty":        {want: map[string]int64{}},
+		"mixed": {
+			meminfo: "MemTotal: 2 kB\nbad line\nSwapTotal: x kB\n MemAvailable :1 kB\nMemTotal: 3 kB\n",
+			want:    map[string]int64{"MemTotal": 3 * kib, "MemAvailable": kib},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tc.want, parseMeminfo(tc.meminfo)); diff != "" {
+				t.Errorf("parseMeminfo(%q) mismatch (-want +got):\n%s", tc.meminfo, diff)
+			}
+		})
+	}
+}
+
+// parseOVSBridges keeps each bridge with its ports, their tags and their
+// interfaces with types, and ignores the lines that belong to none.
+func TestDoctorClusterParseOVSBridges(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		out  string
+		want []ovsBridge
+	}{
+		"empty":            {out: ""},
+		"no bridge":        {out: "0b9d3ad4\n    Port stray\n        Interface stray\n    ovs_version: \"3.3.0\"\n"},
+		"bridge, no ports": {out: "    Bridge \"br-0\"\n        fail_mode: secure\n", want: []ovsBridge{{name: "br-0"}}},
+		"show": {
+			out: doctorTrunkShow,
+			want: []ovsBridge{
+				{name: "phenix", ports: []ovsBridgePort{
+					{name: "mega_tap0", tag: "101", interfaces: []ovsInterface{{name: "mega_tap0"}}},
+					{name: "phenix", interfaces: []ovsInterface{{name: "phenix", kind: "internal"}}},
+					{name: "mega_tap9", interfaces: []ovsInterface{{name: "mega_tap9", kind: "gre"}}},
+				}},
+				{name: "other", ports: []ovsBridgePort{{name: "eth1", interfaces: []ovsInterface{{name: "eth1"}}}}},
+			},
+		},
+		"type before an interface": {
+			out:  "    Bridge b\n        Controller \"tcp:1.2.3.4\"\n        Port p\n            type: gre\n            tag: 9\n",
+			want: []ovsBridge{{name: "b", ports: []ovsBridgePort{{name: "p", tag: "9"}}}},
+		},
+		"bond": {
+			out: "    Bridge b\n        Port bond0\n            Interface eth2\n            Interface eth3\n" +
+				"                type: system\n",
+			want: []ovsBridge{{name: "b", ports: []ovsBridgePort{{name: "bond0", interfaces: []ovsInterface{
+				{name: "eth2"}, {name: "eth3", kind: "system"},
+			}}}}},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := parseOVSBridges(tc.out)
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(ovsBridge{}, ovsBridgePort{}, ovsInterface{})); diff != "" {
+				t.Errorf("parseOVSBridges() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// vm finds a VM by namespace and name, and vmByUUID by namespace and the
+// lowercase UUID, whatever the case minimega gives.
+func TestDoctorClusterInventoryLookups(t *testing.T) {
+	t.Parallel()
+
+	a1 := doctorMMVM{namespace: "e1", name: "a", state: "RUNNING", uuid: "U-A"}
+	a2 := doctorMMVM{namespace: "e2", name: "a", state: "QUIT", uuid: "u-b"}
+	inv := clusterInventory(a1, a2)
+
+	tests := map[string]struct {
+		lookup func() (doctorMMVM, bool)
+		want   doctorMMVM
+		ok     bool
+	}{
+		"vm":                        {lookup: func() (doctorMMVM, bool) { return inv.vm("e1", "a") }, want: a1, ok: true},
+		"vm in another namespace":   {lookup: func() (doctorMMVM, bool) { return inv.vm("e2", "a") }, want: a2, ok: true},
+		"no namespace":              {lookup: func() (doctorMMVM, bool) { return inv.vm("e3", "a") }},
+		"no vm":                     {lookup: func() (doctorMMVM, bool) { return inv.vm("e1", "b") }},
+		"uuid":                      {lookup: func() (doctorMMVM, bool) { return inv.vmByUUID("e1", "u-a") }, want: a1, ok: true},
+		"uuid not lowercase":        {lookup: func() (doctorMMVM, bool) { return inv.vmByUUID("e1", "U-A") }},
+		"uuid of another namespace": {lookup: func() (doctorMMVM, bool) { return inv.vmByUUID("e2", "u-a") }},
+		"no uuid":                   {lookup: func() (doctorMMVM, bool) { return inv.vmByUUID("e1", "") }},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := tc.lookup()
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(doctorMMVM{})); diff != "" || ok != tc.ok {
+				t.Errorf("lookup = %t, want %t; VM mismatch (-want +got):\n%s", ok, tc.ok, diff)
+			}
+		})
+	}
+}
+
+// addLaunch keeps the earliest launch of each client host, and a VM that
+// minimega does not show counts from the zero time.
+func TestDoctorClusterAddLaunch(t *testing.T) {
+	t.Parallel()
+
+	in := fakeDoctorInput(newDoctorTestDir(t), nil)
+	now := in.now()
+	launches := map[string]time.Time{}
+
+	in.addLaunch(launches, "a", doctorMMVM{uptime: 10 * time.Minute}, true)
+	in.addLaunch(launches, "a", doctorMMVM{uptime: 5 * time.Minute}, true)
+	in.addLaunch(launches, "b", doctorMMVM{uptime: time.Minute}, true)
+	in.addLaunch(launches, "b", doctorMMVM{}, false)
+
+	want := map[string]time.Time{"a": now.Add(-10*time.Minute - logTimeSlack), "b": {}}
+	if diff := cmp.Diff(want, launches); diff != "" {
+		t.Errorf("addLaunch() launches mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// minicccMismatches reads the end of minimega's -logfile for the client hosts
+// that logged another miniccc version after their VMs launched, with the last
+// version each logged, and says why it read nothing.
+func TestDoctorClusterMinicccMismatches(t *testing.T) {
+	t.Parallel()
+
+	launch := time.Date(2026, 10, 30, 11, 50, 0, 0, time.UTC)
+	launches := map[string]time.Time{"a": launch, "b": {}}
+	line := func(at, host, version string) string {
+		return strings.TrimSpace(at+" WARN server.go:746: mismatched miniccc version on "+host+": "+version) + "\n"
+	}
+
+	tests := map[string]struct {
+		log     string // the content of the log; "" for no log file
+		logfile string // the -logfile flag, when log is ""
+		noFound bool
+		readErr bool
+		want    []string
+		wantWhy string
+	}{
+		"latest after launch": {
+			log: line("2026/10/30 11:45:00", "a", "v0") + line("2026/10/30 11:52:00", "a", "v1") +
+				"2026/10/30 11:52:30 INFO something else\n" + line("2026/10/30 11:53:00", "a", "v2") +
+				line("", "b", "v3") + line("2026/10/30 11:54:00", "c", "v4"),
+			want: []string{"a (miniccc v2, logged 2026/10/30 11:53:00)", "b (miniccc v3)"},
+		},
+		"only before launch": {log: line("2026/10/30 11:49:59", "a", "v1"), want: []string{}},
+		"only the tail": {
+			log:  line("2026/10/30 11:55:00", "a", "v1") + strings.Repeat("x", minimegaLogTail),
+			want: []string{},
+		},
+		"no doctor findings": {noFound: true, wantWhy: "minimega gives no -logfile"},
+		"no logfile":         {wantWhy: "minimega gives no -logfile"},
+		"relative logfile": {
+			logfile: "mm.log",
+			wantWhy: "minimega's -logfile mm.log is relative to the directory of minimega, which doctor does not know",
+		},
+		"missing logfile": {logfile: "/nonexistent/mm.log", wantWhy: "this user cannot read /nonexistent/mm.log"},
+		"read fails":      {log: line("", "a", "v1"), readErr: true, wantWhy: "this user cannot read <log>"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			in, dir := leftoverInput(t, doctorGoodHost(), nil, clusterInventory())
+			logfile := tc.logfile
+
+			if tc.log != "" {
+				logfile = writeTestFile(t, dir, "minimega.log", tc.log)
+			}
+
+			if logfile != "" {
+				in.found.minimegaArgs["logfile"] = logfile
+			}
+
+			if tc.noFound {
+				in.found = nil
+			}
+
+			if tc.readErr {
+				in.env.readAt = func(string, int64, int) ([]byte, error) { return nil, os.ErrPermission }
+			}
+
+			got, why := in.minicccMismatches(launches)
+			wantWhy := strings.ReplaceAll(tc.wantWhy, "<log>", logfile)
+
+			if diff := cmp.Diff(tc.want, got); diff != "" || why != wantWhy {
+				t.Errorf("minicccMismatches() = %q, why %q; want why %q, items mismatch (-want +got):\n%s",
+					got, why, wantWhy, diff)
+			}
+		})
 	}
 }

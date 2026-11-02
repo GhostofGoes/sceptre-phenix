@@ -29,6 +29,8 @@ func mbrPart(number int, first, sectors int64, typeID, name string) partition.Pa
 }
 
 func TestRead(t *testing.T) {
+	t.Parallel()
+
 	extended := func() *testDisk {
 		// an extended partition at sector 4096 with logical partitions at 4096+2048 and 8192+2048
 		return newDisk(gib).
@@ -169,6 +171,13 @@ func TestRead(t *testing.T) {
 				Notes:  []string{"the disk has a GPT protective MBR but no valid GPT"},
 			},
 		},
+		"a GPT protective MBR on a disk smaller than one 4096-byte sector has no GPT": {
+			disk: newDisk(2048).write(0, mbr(0, mbrEntry{typ: 0xEE, first: 1, sectors: 3})),
+			want: partition.Table{
+				Scheme: partition.SchemeUnknown,
+				Notes:  []string{"the disk has a GPT protective MBR but no valid GPT"},
+			},
+		},
 		"a GPT entry that ends before it starts is left out": {
 			disk: gptDisk(gib, 512, gptEntry{typ: guidBytes(linuxType), first: 4096, last: 2048}),
 			want: partition.Table{
@@ -180,6 +189,8 @@ func TestRead(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := partition.Read(tt.disk, tt.disk.size)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
@@ -197,9 +208,13 @@ func TestRead(t *testing.T) {
 }
 
 func TestProbe(t *testing.T) {
+	t.Parallel()
+
+	// zero start, size and disk mean a 128 MiB partition 3 MiB into a 1 GiB disk
 	tests := map[string]struct {
-		data []byte
-		want partition.Filesystem
+		data              []byte
+		start, size, disk int64
+		want              partition.Filesystem
 	}{
 		"zeros":          {data: nil, want: partition.Filesystem{Type: "unknown"}},
 		"ext2":           {data: extSuperblock(0, 0x2, 0x3, "boot"), want: partition.Filesystem{Type: "ext2", Label: "boot"}},
@@ -239,15 +254,44 @@ func TestProbe(t *testing.T) {
 			want: partition.Filesystem{Type: "vfat", Version: "FAT12", Label: "FLOPPY"},
 		},
 		"not fat": {data: append([]byte{0xEB, 0x63, 0x90}, make([]byte, 600)...), want: partition.Filesystem{Type: "unknown"}},
+		// Probe reads no further than the partition, even when that cuts a magic off
+		"a btrfs magic past the end of the partition": {
+			data: at(0x10040, "_BHRfS_M"), start: mib, size: 0x10000, want: partition.Filesystem{Type: partition.FSUnknown},
+		},
+		"a file system less than ProbeSize bytes before math.MaxInt64": {
+			data: extSuperblock(0x4, 0x2|0x40, 0x3, "last"), start: math.MaxInt64 - 4096, size: partition.ProbeSize,
+			disk: math.MaxInt64, want: partition.Filesystem{Type: partition.FSExt4, Label: "last"},
+		},
+		// a file that ends inside a magic or the field after it is not that file system
+		"a file of the luks magic only": {
+			data: []byte("LUKS\xba\xbe"), start: -1, want: partition.Filesystem{Type: partition.FSUnknown},
+		},
+		"a file of the luks magic and one byte": {
+			data: []byte("LUKS\xba\xbe\x00"), start: -1, want: partition.Filesystem{Type: partition.FSUnknown},
+		},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			const start = 3 * mib
+			t.Parallel()
 
-			disk := newDisk(gib).write(start, tt.data)
+			or := func(v, def int64) int64 {
+				if v == 0 {
+					return def
+				}
 
-			got, err := partition.Probe(disk, start, 128*mib)
+				return v
+			}
+
+			start, size, diskSize := or(tt.start, 3*mib), or(tt.size, 128*mib), or(tt.disk, gib)
+			if tt.start == -1 {
+				// a file the size of the data, probed whole
+				start, size, diskSize = 0, int64(len(tt.data)), int64(len(tt.data))
+			}
+
+			disk := newDisk(diskSize).write(start, tt.data)
+
+			got, err := partition.Probe(disk, start, size)
 			if err != nil {
 				t.Fatalf("Probe() error = %v", err)
 			}
@@ -259,79 +303,12 @@ func TestProbe(t *testing.T) {
 	}
 }
 
-// Probe reads no further than the partition, even when that cuts a magic off.
-func TestProbeStaysInThePartition(t *testing.T) {
-	disk := newDisk(gib).write(mib, at(0x10040, "_BHRfS_M"))
-
-	got, err := partition.Probe(disk, mib, 0x10000)
-	if err != nil {
-		t.Fatalf("Probe() error = %v", err)
-	}
-
-	if got.Type != partition.FSUnknown {
-		t.Errorf("Probe() of a partition that ends before the btrfs magic = %q, want %q", got.Type, partition.FSUnknown)
-	}
-}
-
-// Probe finds a file system that starts less than ProbeSize bytes before [math.MaxInt64].
-func TestProbeNearMaxOffset(t *testing.T) {
-	start := int64(math.MaxInt64 - 4096)
-	disk := newDisk(math.MaxInt64).write(start, extSuperblock(0x4, 0x2|0x40, 0x3, "last"))
-
-	got, err := partition.Probe(disk, start, partition.ProbeSize)
-	if err != nil {
-		t.Fatalf("Probe() error = %v", err)
-	}
-
-	want := partition.Filesystem{Type: partition.FSExt4, Version: "", Label: "last"}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Probe() near math.MaxInt64 mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// A GPT protective MBR on a disk smaller than one 4096-byte sector has no GPT.
-func TestReadGPTSmallerThanLargeSector(t *testing.T) {
-	disk := newDisk(2048).write(0, mbr(0, mbrEntry{typ: 0xEE, first: 1, sectors: 3}))
-
-	got, err := partition.Read(disk, disk.size)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-
-	if got.Scheme != partition.SchemeUnknown || len(got.Partitions) != 0 {
-		t.Errorf("Read() of a 2048-byte disk with a protective MBR = %+v, want no partitions", got)
-	}
-
-	if len(disk.outside) != 0 {
-		t.Errorf("Read() of a 2048-byte disk read outside the disk: %v", disk.outside)
-	}
-}
-
-// A file that ends inside a magic or the field after it is not that file system.
-func TestProbeShortFile(t *testing.T) {
-	tests := map[string][]byte{
-		"luks magic only":         []byte("LUKS\xba\xbe"),
-		"luks magic and one byte": []byte("LUKS\xba\xbe\x00"),
-	}
-
-	for name, data := range tests {
-		t.Run(name, func(t *testing.T) {
-			disk := newDisk(int64(len(data))).write(0, data)
-
-			got, err := partition.Probe(disk, 0, disk.size)
-			if err != nil {
-				t.Fatalf("Probe() error = %v", err)
-			}
-
-			if got.Type != partition.FSUnknown {
-				t.Errorf("Probe() of a %d-byte file = %q, want %q", len(data), got.Type, partition.FSUnknown)
-			}
-		})
-	}
-}
-
 func TestInspect(t *testing.T) {
+	t.Parallel()
+
 	t.Run("partitions", func(t *testing.T) {
+		t.Parallel()
+
 		disk := newDisk(gib).
 			write(0, mbr(0, mbrEntry{typ: 0x0c, first: 2048, sectors: 2048}, mbrEntry{typ: 0x05, first: 4096, sectors: 8192}, mbrEntry{typ: 0x83, first: 16384, sectors: 8192})).
 			write(2048*512, fatBootSector(true, 2048, "EFI")).
@@ -367,6 +344,8 @@ func TestInspect(t *testing.T) {
 	})
 
 	t.Run("whole disk", func(t *testing.T) {
+		t.Parallel()
+
 		disk := newDisk(gib).write(0x8001, []byte("CD001"))
 
 		got, err := partition.Inspect(disk, disk.size)
@@ -398,27 +377,125 @@ func (d failingDisk) ReadAt(p []byte, off int64) (int, error) {
 	return d.testDisk.ReadAt(p, off)
 }
 
+// partitionEOFDisk returns [io.EOF] with every read, as an [io.ReaderAt] may at the end of its data.
+type partitionEOFDisk struct {
+	*testDisk
+}
+
+func (d partitionEOFDisk) ReadAt(p []byte, off int64) (int, error) {
+	n, _ := d.testDisk.ReadAt(p, off)
+
+	return n, io.EOF
+}
+
 // A read error is returned, with what was read before it; [io.EOF] is not an error.
 func TestReadErrors(t *testing.T) {
-	disk := newDisk(gib).
-		write(0, mbr(0, mbrEntry{typ: 0x83, first: 2048, sectors: 2048}, mbrEntry{typ: 0x83, first: 1 << 20, sectors: 2048})).
-		write(2048*512, extSuperblock(0, 0, 0, "first"))
+	t.Parallel()
 
-	if _, err := partition.Read(failingDisk{disk, 0}, disk.size); !errors.Is(err, errDevice) {
-		t.Errorf("Read() of a disk that fails error = %v, want %v", err, errDevice)
+	partitioned := func() *testDisk {
+		return newDisk(gib).
+			write(0, mbr(0, mbrEntry{typ: 0x83, first: 2048, sectors: 2048}, mbrEntry{typ: 0x83, first: 1 << 20, sectors: 2048})).
+			write(2048*512, extSuperblock(0, 0, 0, "first"))
 	}
 
-	got, err := partition.Inspect(failingDisk{disk, 1 << 29}, disk.size)
-	if !errors.Is(err, errDevice) {
-		t.Fatalf("Inspect() of a disk that fails past 512 MiB error = %v, want %v", err, errDevice)
+	tests := map[string]struct {
+		call    func(io.ReaderAt, int64) (partition.Table, error)
+		disk    io.ReaderAt
+		size    int64
+		wantErr error
+		// the file system labels of the partitions, "-" for none read; or of the whole disk
+		wantLabels []string
+	}{
+		"Read fails on the first sector": {
+			call: partition.Read, disk: failingDisk{partitioned(), 0}, size: gib, wantErr: errDevice,
+		},
+		"Inspect fails on the first sector": {
+			call: partition.Inspect, disk: failingDisk{partitioned(), 0}, size: gib, wantErr: errDevice,
+		},
+		"Inspect fails reading a file system on the whole disk": {
+			call: partition.Inspect, disk: failingDisk{newDisk(gib), 600}, size: gib, wantErr: errDevice,
+		},
+		"Inspect fails past 512 MiB": {
+			call: partition.Inspect, disk: failingDisk{partitioned(), 1 << 29}, size: gib, wantErr: errDevice,
+			wantLabels: []string{"first", "-"},
+		},
+		"Inspect of a disk whose reads end with io.EOF": {
+			call: partition.Inspect, disk: partitionEOFDisk{partitioned()}, size: gib, wantLabels: []string{"first", "-"},
+		},
+		"Inspect of a 600-byte disk with a partition past its end": {
+			call: partition.Inspect, disk: newDisk(600).write(0, mbr(0, mbrEntry{typ: 0x83, first: 1, sectors: 1})),
+			size: 600,
+		},
 	}
 
-	if got.Partitions[0].Filesystem == nil || got.Partitions[0].Filesystem.Label != "first" || got.Partitions[1].Filesystem != nil {
-		t.Errorf("Inspect() of a disk that fails past 512 MiB = %+v, want the first file system only", got.Partitions)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tt.call(tt.disk, tt.size)
+			if !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
+				t.Fatalf("error = %v, want %v", err, tt.wantErr)
+			}
+
+			if got.Filesystem != nil {
+				t.Errorf("whole-disk file system = %+v, want none after an error", got.Filesystem)
+			}
+
+			labels := make([]string, 0, len(got.Partitions))
+
+			for _, p := range got.Partitions {
+				label := "-"
+				if p.Filesystem != nil && p.Filesystem.Type != partition.FSUnknown {
+					label = p.Filesystem.Label
+				}
+
+				labels = append(labels, label)
+			}
+
+			if diff := cmp.Diff(tt.wantLabels, labels, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("file systems read mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Inspect reads the file systems of the first MaxProbes partitions only, and
+// says so.
+func TestInspectStopsAtMaxProbes(t *testing.T) {
+	t.Parallel()
+
+	entries := make([]gptEntry, partition.MaxProbes+2)
+	for i := range entries {
+		first := uint64(64 + 2*i)
+		entries[i] = gptEntry{typ: guidBytes(linuxType), first: first, last: first + 1}
 	}
 
-	short := newDisk(600).write(0, mbr(0, mbrEntry{typ: 0x83, first: 1, sectors: 1}))
-	if _, err := partition.Inspect(short, 600); errors.Is(err, io.EOF) || err != nil {
-		t.Errorf("Inspect() of a short disk error = %v, want nil", err)
+	disk := gptDisk(4*mib, 512, entries...)
+
+	got, err := partition.Inspect(disk, disk.size)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+
+	if len(got.Partitions) != len(entries) {
+		t.Fatalf("Inspect() found %d partitions, want %d", len(got.Partitions), len(entries))
+	}
+
+	probed := 0
+
+	for _, p := range got.Partitions {
+		if p.Filesystem != nil {
+			probed++
+		}
+	}
+
+	if probed != partition.MaxProbes || got.Partitions[partition.MaxProbes].Filesystem != nil {
+		t.Errorf("Inspect() read %d file systems, partition %d's = %v; want %d, none",
+			probed, partition.MaxProbes+1, got.Partitions[partition.MaxProbes].Filesystem, partition.MaxProbes)
+	}
+
+	want := []string{"phenix read the file systems of the first 64 partitions only"}
+	if diff := cmp.Diff(want, got.Notes); diff != "" {
+		t.Errorf("Inspect() notes mismatch (-want +got):\n%s", diff)
 	}
 }

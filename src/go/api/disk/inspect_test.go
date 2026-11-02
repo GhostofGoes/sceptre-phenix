@@ -3,10 +3,14 @@ package disk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,7 +18,11 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"phenix/api/disk/disktest"
+	"phenix/store"
+	"phenix/store/storetest"
+	"phenix/util/diskchain"
 	dct "phenix/util/diskchain/diskchaintest"
+	"phenix/util/partition"
 )
 
 // fakeQemuImg writes an executable script named qemu-img in a new folder and returns its path.
@@ -63,13 +71,28 @@ func TestInspectReasons(t *testing.T) {
 	tgz := filepath.Join(dir, "kali_rootfs.tgz")
 	writeFile(t, tgz, "archive")
 
+	bad := filepath.Join(dir, "bad.qc2")
+	dct.WriteFile(t, bad, badClusterBits())
+
 	fails := fakeQemuImg(t, "echo \"qemu-img: Could not open 'kali.qc2'\" >&2\nexit 1\n")
 
 	tests := map[string]struct {
 		image   Details
 		qemuImg string
-		want    func(found Inspection) string
+		// setup, if not nil, prepares the test's environment
+		setup func(t *testing.T)
+		want  func(found Inspection) string
 	}{
+		"a qcow2 header phenix cannot read": {
+			image: Details{FullPath: bad, Format: "qcow2", Kind: VMImage},
+			want:  func(found Inspection) string { return found.PartitionsUnavailable },
+		},
+		"no folder for the qemu-img output": {
+			image:   Details{FullPath: qcow2, Format: "qcow2", Kind: VMImage},
+			qemuImg: fakeQemuImg(t, "exit 1\n"),
+			setup:   func(t *testing.T) { t.Helper(); t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "gone")) },
+			want:    func(found Inspection) string { return found.PartitionsUnavailable },
+		},
 		"a file phenix cannot open": {
 			image: Details{FullPath: filepath.Join(dir, "gone.qc2"), Format: "qcow2", Kind: VMImage},
 			want: func(found Inspection) string {
@@ -110,6 +133,9 @@ func TestInspectReasons(t *testing.T) {
 	}
 
 	want := map[string]string{
+		"a qcow2 header phenix cannot read": "phenix cannot read the partitions: cannot read " + bad +
+			" (invalid qcow2 header: cluster bits 30), so phenix does not check past it",
+		"no folder for the qemu-img output": "phenix cannot read the partitions: no such file or directory",
 		"a file phenix cannot open": "phenix cannot open the image (no such file or directory). If minimega runs on a different " +
 			"host, only minimega can read it | phenix cannot open the image (no such file or directory). If minimega " +
 			"runs on a different host, only minimega can read it",
@@ -125,6 +151,10 @@ func TestInspectReasons(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup(t)
+			}
+
 			found, _ := inspect(t.Context(), tt.image, tt.qemuImg)
 
 			if diff := cmp.Diff(want[name], tt.want(found)); diff != "" {
@@ -307,7 +337,10 @@ func TestVMUses(t *testing.T) {
 	second := testExperiment(t, "exp2", "", "other.qc2", "kali.qc2")
 	none := 0
 	second.Spec.Topology().Nodes()[0].Hardware().Drives()[0].SetInjectPartition(&none)
-	storeExperiments(t, first, second)
+	// a drive with no image, and a node without hardware, name no image
+	third := testExperiment(t, "exp3", "", "", "kali.qc2.bak")
+	third.Spec.Topology().AddNode("VirtualMachine", "bare")
+	storeExperiments(t, first, second, third)
 
 	got, err := VMUses(dir + "/kali.qc2")
 	if err != nil {
@@ -321,6 +354,188 @@ func TestVMUses(t *testing.T) {
 
 	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b VMUse) bool { return a.Experiment < b.Experiment })); diff != "" {
 		t.Errorf("VMUses() mismatch (-want +got):\n%s", diff)
+	}
+
+	if got, err := VMUses(dir + "/unused.qc2"); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("VMUses(unused.qc2) = %#v, %v; want an empty list", got, err)
+	}
+}
+
+// inspectFailingStore is a store whose listing fails.
+type inspectFailingStore struct {
+	store.Store
+}
+
+func (inspectFailingStore) List(...string) (store.Configs, error) {
+	return nil, errors.New("store is down")
+}
+
+// VMUses fails when it cannot list the experiments.
+func TestVMUsesStoreFails(t *testing.T) {
+	storetest.Use(t, inspectFailingStore{})
+
+	got, err := VMUses("/f/kali.qc2")
+	if err == nil || !strings.Contains(err.Error(), "listing experiments") || !strings.Contains(err.Error(), "store is down") {
+		t.Errorf("VMUses() error = %v, want it to say listing experiments failed", err)
+	}
+
+	if got != nil {
+		t.Errorf("VMUses() = %v, want nil", got)
+	}
+}
+
+// qcowHeader shows the compatibility level of each qcow2 version, the encryption and compression, and the flags.
+func TestQcowHeader(t *testing.T) {
+	t.Parallel()
+
+	const v3 = "1.1" // the compatibility level of qcow2 version 3
+
+	g := diskchain.Geometry{VirtualSize: 1 << 30, ClusterSize: 1 << 16, RefcountBits: 16, Snapshots: 2}
+	plain := QcowHeader{ClusterSize: 1 << 16, RefcountBits: 16, Encryption: "none", Compression: "zlib", Snapshots: 2}
+
+	with := func(f func(q *QcowHeader)) *QcowHeader {
+		q := plain
+		f(&q)
+
+		return &q
+	}
+
+	tests := map[string]struct {
+		h    diskchain.Header
+		g    diskchain.Geometry
+		want *QcowHeader
+	}{
+		"qcow version 1": {
+			h: diskchain.Header{Format: diskchain.FormatQcow, Version: 1}, g: g, want: with(func(*QcowHeader) {}),
+		},
+		"qcow2 version 2": {
+			h: diskchain.Header{Format: diskchain.FormatQcow2, Version: 2}, g: g,
+			want: with(func(q *QcowHeader) { q.Compat = "0.10" }),
+		},
+		"qcow2 version 3 with every flag": {
+			h: diskchain.Header{
+				Format: diskchain.FormatQcow2, Version: 3, Backing: "base.qc2", BackingFormat: "qcow2", DataFile: true,
+				Encryption: diskchain.EncryptionAES, Zstd: true,
+				Incompatible: diskchain.FeatureDirty | diskchain.FeatureCorrupt | diskchain.FeatureExtendedL2,
+			},
+			g: diskchain.Geometry{
+				VirtualSize: 1 << 30, ClusterSize: 1 << 16, RefcountBits: 16, Snapshots: 2,
+				Compatible: diskchain.FeatureLazyRefcounts,
+			},
+			want: with(func(q *QcowHeader) {
+				q.Compat, q.Encryption, q.Compression = v3, "aes", "zstd"
+				q.Dirty, q.Corrupt, q.ExternalDataFile, q.ExtendedL2, q.LazyRefcounts = true, true, true, true, true
+				q.BackingFile, q.BackingFormat = "base.qc2", "qcow2"
+			}),
+		},
+		"LUKS encryption": {
+			h: diskchain.Header{Format: diskchain.FormatQcow2, Version: 3, Encryption: diskchain.EncryptionLUKS}, g: g,
+			want: with(func(q *QcowHeader) { q.Compat, q.Encryption = v3, "luks" }),
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if diff := cmp.Diff(tt.want, qcowHeader(tt.h, tt.g)); diff != "" {
+				t.Errorf("qcowHeader(%s) mismatch (-want +got):\n%s", name, diff)
+			}
+		})
+	}
+}
+
+// cause gives the reason of a path error without its path, through any wrapping, and any other error as it is.
+func TestCause(t *testing.T) {
+	t.Parallel()
+
+	pathErr := &os.PathError{Op: "open", Path: "/f/a.qc2", Err: syscall.ENOENT}
+
+	tests := map[string]struct {
+		err  error
+		want string
+	}{
+		"a path error":         {err: pathErr, want: "no such file or directory"},
+		"a wrapped path error": {err: fmt.Errorf("opening: %w", pathErr), want: "no such file or directory"},
+		"another error":        {err: errors.New("disk full"), want: "disk full"},
+	}
+
+	for name, tt := range tests {
+		if got := cause(tt.err); got != tt.want {
+			t.Errorf("cause(%s) = %q, want %q", name, got, tt.want)
+		}
+	}
+}
+
+// filesystem copies a partition's file system, and keeps a missing one missing.
+func TestFilesystem(t *testing.T) {
+	t.Parallel()
+
+	if got := filesystem(nil); got != nil {
+		t.Errorf("filesystem(nil) = %+v, want nil", got)
+	}
+
+	want := &Filesystem{Type: "ext4", Version: "1.0", Label: "rootfs"}
+	if diff := cmp.Diff(want, filesystem(&partition.Filesystem{Type: "ext4", Version: "1.0", Label: "rootfs"})); diff != "" {
+		t.Errorf("filesystem(ext4) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// An inspection starts with empty lists, so they show as empty rather than as null, and takes the format fields of
+// the disk list, keeping what it read.
+func TestWithListingOfEmptyInspection(t *testing.T) {
+	t.Parallel()
+
+	found := emptyInspection()
+	if found.Partitions == nil || found.PartitionNotes == nil || found.Overlays == nil || found.VMs == nil {
+		t.Errorf("emptyInspection() = %+v, want empty lists, not nil", found)
+	}
+
+	found.FileBytes, found.FullPath, found.Format, found.FormatVersion = 10, "/f/old.qc2", "raw", 1
+
+	issue := &FormatIssue{Level: IssueWarning}
+	image := Details{FullPath: "/f/a.qc2", Format: "qcow2", FormatVersion: 2, FormatIssue: issue, Size: "1 B"}
+
+	want := emptyInspection()
+	want.FileBytes, want.FullPath, want.Format, want.FormatVersion, want.FormatIssue = 10, "/f/a.qc2", "qcow2", 2, issue
+
+	if diff := cmp.Diff(want, withListing(found, image)); diff != "" {
+		t.Errorf("withListing() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The cache of inspections starts again empty once full, and forgets an inspection that is not to be kept.
+func TestCachedInspectionBounds(t *testing.T) {
+	ClearCache()
+	t.Cleanup(ClearCache)
+
+	path := filepath.Join(t.TempDir(), "kali.hdd")
+	disktest.WriteMBRImage(t, path)
+
+	inspectMu.Lock()
+	for i := range maxInspections {
+		inspections[fmt.Sprintf("/f/%d.qc2", i)] = inspectionEntry{}
+	}
+
+	// a stale inspection of a file that is gone
+	gone := filepath.Join(t.TempDir(), "gone.qc2")
+	inspections[gone] = inspectionEntry{stamps: []fileStamp{{path: gone}}}
+	inspectMu.Unlock()
+
+	if got := cachedInspection(t.Context(), Details{FullPath: path, Format: "raw", Kind: VMImage}, ""); got.PartitionTable != "mbr" {
+		t.Errorf("cachedInspection(kali.hdd) table = %q, want mbr", got.PartitionTable)
+	}
+
+	if got := cachedInspection(t.Context(), Details{FullPath: gone, Kind: VMImage}, ""); got.FileUnavailable == "" {
+		t.Errorf("cachedInspection(gone.qc2) = %+v, want the file unavailable", got)
+	}
+
+	inspectMu.Lock()
+	kept := slices.Sorted(maps.Keys(inspections))
+	inspectMu.Unlock()
+
+	if diff := cmp.Diff([]string{path}, kept); diff != "" {
+		t.Errorf("inspections kept mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -496,21 +711,5 @@ func TestReadPartitionsReadLimit(t *testing.T) {
 				t.Errorf("readPartitions() mismatch (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-// phenix says why when it cannot make a folder for the qemu-img output.
-func TestInspectNoTempFolder(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "kali.qc2")
-	dct.WriteQcow2(t, path, dct.Qcow2{})
-
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "gone"))
-
-	fails := fakeQemuImg(t, "exit 1\n")
-
-	found, _ := inspect(t.Context(), Details{FullPath: path, Format: "qcow2", Kind: VMImage}, fails)
-
-	if want := "phenix cannot read the partitions: no such file or directory"; found.PartitionsUnavailable != want {
-		t.Errorf("inspect() reason = %q, want %q", found.PartitionsUnavailable, want)
 	}
 }

@@ -552,3 +552,105 @@ func TestRoleAllowedAgreesWithItsPolicies(t *testing.T) {
 		}
 	})
 }
+
+// GetRoles and RoleFromConfig fail when the store fails to list roles or a
+// stored role does not decode, and RoleFromConfig fails for a missing role.
+//
+//nolint:paralleltest // replaces the store
+func TestGetRolesErrors(t *testing.T) {
+	t.Run("a failing store", func(t *testing.T) {
+		storetest.Use(t, userFailingStore{Store: storetest.NewBolt(t), list: map[string]bool{"Role": true}})
+
+		if roles, err := GetRoles(); roles != nil || !errors.Is(err, errUserStore) {
+			t.Errorf("GetRoles() = %v, %v, want nil, %v", roles, err, errUserStore)
+		}
+
+		if role, err := RoleFromConfig("disabled"); role != nil || !errors.Is(err, errUserStore) {
+			t.Errorf("RoleFromConfig(disabled) = %v, %v, want nil, %v", role, err, errUserStore)
+		}
+	})
+
+	t.Run("a role that does not decode", func(t *testing.T) {
+		storetest.UseBolt(t)
+		userStoreRaw(t, "role/broken", map[string]any{"roleName": "Broken", "policies": "all of them"})
+
+		if roles, err := GetRoles(); roles != nil || err == nil || !strings.HasPrefix(err.Error(), "decoding roles config") {
+			t.Errorf("GetRoles() = %v, %v, want nil and a decoding error", roles, err)
+		}
+
+		for _, name := range []string{"broken", "Broken"} {
+			if role, err := RoleFromConfig(name); role != nil || err == nil || !strings.HasPrefix(err.Error(), "decoding role") {
+				t.Errorf("RoleFromConfig(%s) = %v, %v, want nil and a decoding error", name, role, err)
+			}
+		}
+	})
+
+	// RoleFromConfig wraps a nil error with %w (a defect). This pins the
+	// message it gives now; when that is fixed, want a message with no "%!".
+	t.Run("a missing role", func(t *testing.T) {
+		storetest.UseBolt(t)
+
+		const want = "could not find role in store: %!w(<nil>)"
+
+		if role, err := RoleFromConfig("nobody"); role != nil || err == nil || err.Error() != want {
+			t.Errorf("RoleFromConfig(nobody) = %v, %v, want nil and %q", role, err, want)
+		}
+	})
+}
+
+// Saving a role that the store fails to update returns the store's error.
+//
+//nolint:paralleltest // replaces the store
+func TestRoleSaveError(t *testing.T) {
+	storetest.UseBolt(t)
+	userStoreRaw(t, "role/saved", map[string]any{"roleName": "Saved", "policies": []any{}})
+
+	role, err := RoleFromConfig("Saved")
+	if err != nil {
+		t.Fatalf("RoleFromConfig(Saved) error = %v", err)
+	}
+
+	storetest.Use(t, userFailingStore{Store: storetest.NewBolt(t), update: true})
+
+	if err := role.Save(); !errors.Is(err, errUserStore) || !strings.HasPrefix(err.Error(), "updating role in store") {
+		t.Errorf("Save() error = %v, want an update error that wraps %v", err, errUserStore)
+	}
+}
+
+// SetResourceNames with no names, or one empty name, scopes unnamed policies
+// to every resource, and a list of names is copied, not shared.
+func TestSetResourceNamesDefaults(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		names []string
+		want  []string
+	}{
+		"no names":       {names: nil, want: []string{"*"}},
+		"one empty name": {names: []string{""}, want: []string{"*"}},
+		"two names":      {names: []string{"a", "b/*"}, want: []string{"a", "b/*"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newRole(&v1.RoleSpec{Name: "r", Policies: []*v1.PolicySpec{
+				policy("experiments", nil, "get"), policy("vms", nil, "list"),
+			}}, nil)
+
+			if err := r.SetResourceNames(tc.names...); err != nil {
+				t.Fatalf("SetResourceNames(%q) error = %v", tc.names, err)
+			}
+
+			for _, p := range r.Spec.Policies {
+				if diff := cmp.Diff(tc.want, p.ResourceNames); diff != "" {
+					t.Errorf("SetResourceNames(%q) names of %v mismatch (-want +got):\n%s", tc.names, p.Resources, diff)
+				}
+			}
+
+			r.Spec.Policies[0].ResourceNames[0] = "changed"
+			if r.Spec.Policies[1].ResourceNames[0] == "changed" {
+				t.Errorf("SetResourceNames(%q) shares one list between policies", tc.names)
+			}
+		})
+	}
+}
