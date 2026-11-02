@@ -99,11 +99,11 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 		stdIn = bytes.NewBuffer(o.stdin)
 	}
 
-	// Not using `exec.CommandContext` here since we're catching the context being
-	// canceled below in order to gracefully terminate the child process. Using
-	// `exec.CommandContext` forcefully kills the child process when the context
-	// is canceled.
+	// When ctx is canceled, send SIGTERM so that the child process can stop
+	// gracefully, and kill it if it still runs after killDelay.
 	cmd := exec.CommandContext(ctx, o.cmd, o.args...) //nolint:gosec // G204 callers name the command
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = killDelay
 
 	cmd.Stdin = stdIn
 	stdout, _ := cmd.StdoutPipe()
@@ -118,26 +118,9 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 	}
 
 	var (
-		done = make(chan struct{})
 		errs error
 		wg   sync.WaitGroup
 	)
-
-	go func() {
-		select {
-		case <-done:
-			return
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-
-			select {
-			case <-done:
-				return
-			case <-time.After(killDelay):
-				_ = cmd.Process.Kill()
-			}
-		}
-	}()
 
 	wg.Add(1)
 
@@ -201,8 +184,6 @@ func (shell) ExecCommand(ctx context.Context, opts ...Option) ([]byte, []byte, e
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("waiting for command to complete: %w", err))
 	}
-
-	close(done)
 
 	return stdoutBytes, stderrBytes, errs
 }
