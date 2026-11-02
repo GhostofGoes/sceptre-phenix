@@ -696,22 +696,45 @@ func TestThrottledProgressIsSentLater(t *testing.T) {
 func TestSnapshotsAreCopies(t *testing.T) {
 	t.Parallel()
 
-	r := newTestRegistry(t)
+	r := newTestRegistry(t, WithArtifactDir(t.TempDir()))
 
 	started, err := r.Start(Spec{
 		Kind: "test", Owner: "alice", Params: map[string]string{"action": "start"}, Items: []string{"a"},
-		Run: outcomes(map[string]string{"a": "ok"}, nil),
+		Run: func(ctx context.Context, run *Run) error {
+			if err := outcomes(map[string]string{"a": "ok"}, nil)(ctx, run); err != nil {
+				return err
+			}
+
+			folder, err := run.Dir()
+			if err != nil {
+				return err
+			}
+
+			path := filepath.Join(folder, "out.zip")
+			if err := os.WriteFile(path, []byte("zip"), 0o600); err != nil {
+				return err
+			}
+
+			return run.SetArtifact(path, "out.zip", false)
+		},
 	})
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
 	j := wait(t, r, started.ID)
+	if j.Started == nil || j.Finished == nil || j.Artifact == nil {
+		t.Fatalf("finished job: Started = %v, Finished = %v, Artifact = %v; want all set", j.Started, j.Finished, j.Artifact)
+	}
+
+	wantStarted, wantFinished := *j.Started, *j.Finished
 
 	j.Items[0].Status = ItemFailed
 	j.Items[0].Result[0] = 'x'
 	j.Params["action"] = "stop"
-	j.Finished = nil
+	*j.Started = time.Time{}
+	*j.Finished = time.Time{}
+	j.Artifact.Name = "x"
 
 	again, _ := r.Get(started.ID)
 
@@ -727,8 +750,16 @@ func TestSnapshotsAreCopies(t *testing.T) {
 		t.Errorf("Get() after changing a snapshot: Params[action] = %q, want %q", again.Params["action"], "start")
 	}
 
-	if again.Finished == nil {
-		t.Error("Get() after changing a snapshot: Finished = nil, want set")
+	if again.Started == nil || !again.Started.Equal(wantStarted) {
+		t.Errorf("Get() after changing a snapshot: Started = %v, want %v", again.Started, wantStarted)
+	}
+
+	if again.Finished == nil || !again.Finished.Equal(wantFinished) {
+		t.Errorf("Get() after changing a snapshot: Finished = %v, want %v", again.Finished, wantFinished)
+	}
+
+	if again.Artifact == nil || again.Artifact.Name != "out.zip" {
+		t.Errorf("Get() after changing a snapshot: Artifact = %v, want name %q", again.Artifact, "out.zip")
 	}
 
 	listed := r.List(Filter{})

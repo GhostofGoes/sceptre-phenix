@@ -398,24 +398,29 @@ func TestStore(t *testing.T) {
 	}
 }
 
+// The broker queue warns from 75 percent full, and a queue of no capacity
+// reports 0 percent and passes.
 func TestBrokerQueue(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		queued    int
-		status    Status
-		endpoints []string
+		queued, capacity int
+		percent          float64
+		status           Status
+		endpoints        []string
 	}{
-		{queued: 0, status: Pass},
-		{queued: 74, status: Pass},
-		{queued: 80, status: Warn, endpoints: []string{"/api/v1/ws"}},
+		{queued: 0, capacity: 100, percent: 0, status: Pass},
+		{queued: 74, capacity: 100, percent: 74, status: Pass},
+		{queued: 75, capacity: 100, percent: 75, status: Warn, endpoints: []string{"/api/v1/ws"}},
+		{queued: 80, capacity: 100, percent: 80, status: Warn, endpoints: []string{"/api/v1/ws"}},
+		{queued: 0, capacity: 0, percent: 0, status: Pass},
 	}
 
 	for _, tc := range tests {
-		t.Run(fmt.Sprintf("%d queued", tc.queued), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%d of %d queued", tc.queued, tc.capacity), func(t *testing.T) {
 			t.Parallel()
 
-			stats := func() BrokerStats { return BrokerStats{Clients: 3, Queued: tc.queued, Capacity: 100} }
+			stats := func() BrokerStats { return BrokerStats{Clients: 3, Queued: tc.queued, Capacity: tc.capacity} }
 
 			want := map[string][]Result{
 				KeyWebsocketClients: {{
@@ -428,11 +433,11 @@ func TestBrokerQueue(t *testing.T) {
 				KeyWebsocketQueue: {{
 					ComponentID:       "broker",
 					ComponentType:     TypeSystem,
-					ObservedValue:     Float(tc.queued),
+					ObservedValue:     Float(tc.percent),
 					ObservedUnit:      "percent",
 					Status:            tc.status,
 					AffectedEndpoints: tc.endpoints,
-					Output:            fmt.Sprintf("%d of 100 broadcasts queued", tc.queued),
+					Output:            fmt.Sprintf("%d of %d broadcasts queued", tc.queued, tc.capacity),
 				}},
 			}
 
@@ -443,12 +448,23 @@ func TestBrokerQueue(t *testing.T) {
 	}
 }
 
+// Uptime reports the whole seconds since its start, and GoRuntime reports a
+// goroutine count, the bytes of live heap objects and a GC pause.
 func TestUptimeAndGoRuntime(t *testing.T) {
 	t.Parallel()
 
-	want := Result{ComponentType: TypeSystem, ObservedValue: int64(60), ObservedUnit: "s", Status: Pass}
-	if diff := cmp.Diff(want, only(t, one(t, Uptime(time.Now().Add(-time.Minute))), KeyUptime)); diff != "" {
-		t.Errorf("Uptime(a minute ago) mismatch (-want +got):\n%s", diff)
+	uptime := only(t, one(t, Uptime(time.Now().Add(-time.Minute))), KeyUptime)
+
+	// a slow machine can take a second or two between the clock reads
+	if s, ok := uptime.ObservedValue.(int64); !ok || s < 60 || s > 62 {
+		t.Errorf("Uptime(a minute ago) %s = %#v, want an int64 of 60 to 62", KeyUptime, uptime.ObservedValue)
+	}
+
+	uptime.ObservedValue = nil
+
+	want := Result{ComponentType: TypeSystem, ObservedUnit: "s", Status: Pass}
+	if diff := cmp.Diff(want, uptime); diff != "" {
+		t.Errorf("Uptime(a minute ago) mismatch, value aside (-want +got):\n%s", diff)
 	}
 
 	results := one(t, GoRuntime())

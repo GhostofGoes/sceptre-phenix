@@ -931,31 +931,86 @@ func TestClusterHints(t *testing.T) {
 	}
 }
 
-// The parsers of /proc and ovs-vsctl output never panic, and meshNodeKey drops only leading zeros, once.
+// The parsers of /proc and ovs-vsctl output never panic, parseOpenFilesLimit reads the open-files line among others,
+// and meshNodeKey drops only the leading zeros of each number.
 func TestClusterParsersProperty(t *testing.T) {
 	t.Parallel()
+
+	limit := rapid.OneOf(rapid.Just(unlimitedOpenFiles), rapid.IntRange(0, 1<<20))
 
 	rapid.Check(t, func(t *rapid.T) {
 		text := rapid.String().Draw(t, "text")
 
 		parseMeminfo(text)
 		parseOVSBridges(text)
+		parseOpenFilesLimit(text)
 
-		if soft, hard, ok := parseOpenFilesLimit(text); ok && (soft < unlimitedOpenFiles || hard < unlimitedOpenFiles) {
-			t.Fatalf("parseOpenFilesLimit(%q) = %d, %d", text, soft, hard)
+		var limits strings.Builder
+
+		limits.WriteString("Limit                     Soft Limit           Hard Limit           Units\n")
+
+		for range rapid.IntRange(0, 3).Draw(t, "before") {
+			limits.WriteString(rapid.SampledFrom([]string{
+				"Max cpu time              unlimited            unlimited            seconds",
+				"Max processes             63395                63395                processes",
+				"Max open                  1                    1                    files",
+				"Max open files",
+			}).Draw(t, "other") + "\n")
+		}
+
+		soft, hard := limit.Draw(t, "soft"), limit.Draw(t, "hard")
+		limits.WriteString("Max open files            " + limitText(soft) + " " + limitText(hard) + " files\n")
+		limits.WriteString("Max open files            1 1 files\n")
+
+		if gotSoft, gotHard, ok := parseOpenFilesLimit(limits.String()); !ok || gotSoft != soft || gotHard != hard {
+			t.Fatalf("parseOpenFilesLimit(%q) = %d, %d, %v, want %d, %d, true", limits.String(), gotSoft, gotHard, ok,
+				soft, hard)
 		}
 
 		name := rapid.StringMatching(`[a-z0-9-]{0,12}`).Draw(t, "name")
-		key := meshNodeKey(name)
-
-		if meshNodeKey(key) != key {
-			t.Fatalf("meshNodeKey(%q) = %q, which changes again", name, key)
-		}
-
-		if strings.ReplaceAll(key, "0", "") != strings.ReplaceAll(name, "0", "") {
-			t.Fatalf("meshNodeKey(%q) = %q, which changes more than zeros", name, key)
+		if got, want := meshNodeKey(name), trimDigitRuns(name); got != want {
+			t.Fatalf("meshNodeKey(%q) = %q, want %q", name, got, want)
 		}
 	})
+}
+
+// limitText is n as /proc/<pid>/limits writes it.
+func limitText(n int) string {
+	if n == unlimitedOpenFiles {
+		return unlimitedText
+	}
+
+	return strconv.Itoa(n)
+}
+
+// trimDigitRuns is a model of meshNodeKey: each run of digits in name loses its leading zeros, but keeps one digit.
+func trimDigitRuns(name string) string {
+	var out, run strings.Builder
+
+	flush := func() {
+		digits := strings.TrimLeft(run.String(), "0")
+		if digits == "" && run.Len() > 0 {
+			digits = "0"
+		}
+
+		out.WriteString(digits)
+		run.Reset()
+	}
+
+	for _, r := range name {
+		if r >= '0' && r <= '9' {
+			run.WriteRune(r)
+
+			continue
+		}
+
+		flush()
+		out.WriteRune(r)
+	}
+
+	flush()
+
+	return out.String()
 }
 
 // --report redacts the mesh nodes, the host minimega answers from and the nodes that VM schedules name, which the

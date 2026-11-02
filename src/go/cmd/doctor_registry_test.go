@@ -791,14 +791,13 @@ func TestDoctorExitError(t *testing.T) {
 		strict bool
 		want   error
 	}{
-		"pass":          {status: doctorPass},
-		"pass, strict":  {status: doctorPass, strict: true},
-		"warn":          {status: doctorWarn},
-		"warn, strict":  {status: doctorWarn, strict: true, want: errDoctorWarned},
-		"fail":          {status: doctorFail, want: errDoctorFailed},
-		"fail, strict":  {status: doctorFail, strict: true, want: errDoctorFailed},
-		"skip, strict":  {status: doctorSkip, strict: true},
-		"warn, default": {status: doctorWarn, strict: false},
+		"pass":         {status: doctorPass},
+		"pass, strict": {status: doctorPass, strict: true},
+		"warn":         {status: doctorWarn},
+		"warn, strict": {status: doctorWarn, strict: true, want: errDoctorWarned},
+		"fail":         {status: doctorFail, want: errDoctorFailed},
+		"fail, strict": {status: doctorFail, strict: true, want: errDoctorFailed},
+		"skip, strict": {status: doctorSkip, strict: true},
 	}
 
 	for name, tc := range tests {

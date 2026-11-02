@@ -56,14 +56,34 @@ func TestSlowComponentViewerDoesNotBlockUpdates(t *testing.T) {
 
 	var want strings.Builder
 
-	polltest.Within(t, "sending the updates", func() {
-		for i := range 2 * viewerQueue {
-			line := strconv.Itoa(i) + "\n"
-			want.WriteString(line)
+	// the fast viewer reads each line before the next is sent, so on a busy
+	// machine only the stuck viewer's queue fills
+	for i := range 2 * viewerQueue {
+		line := strconv.Itoa(i) + "\n"
+		want.WriteString(line)
+		sent := want.Len()
 
+		polltest.Within(t, "sending update "+strconv.Itoa(i), func() {
 			UpdateComponent(update(cmp, statusRunning, line))
-		}
+		})
+		polltest.Until(t, "the fast viewer reading line "+strconv.Itoa(i), func() bool {
+			return len(fastConn.String()) >= sent
+		})
+	}
 
+	// before the success update, which finishes every viewer still listed;
+	// the update's handshake orders this read of ws after the edit
+	if _, ok := ws[componentKey(cmp)][slow.id]; ok {
+		t.Errorf("UpdateComponent(%s) x %d: ws[%q] still lists the slow viewer, want it dropped",
+			cmp, 2*viewerQueue, componentKey(cmp))
+	}
+
+	// its queue filled behind the write it is stuck in
+	if !drained(slow) {
+		t.Errorf("UpdateComponent(%s) x %d: slow viewer's queue still open, want it dropped", cmp, 2*viewerQueue)
+	}
+
+	polltest.Within(t, "sending the success update", func() {
 		UpdateComponent(update(cmp, statusSuccess, ""))
 	})
 
@@ -72,11 +92,6 @@ func TestSlowComponentViewerDoesNotBlockUpdates(t *testing.T) {
 	if got := fastConn.String(); got != want.String()+finishedMarker {
 		t.Errorf("UpdateComponent(%s) x %d: fast viewer received %d bytes, want %d",
 			cmp, 2*viewerQueue, len(got), want.Len()+len(finishedMarker))
-	}
-
-	// its queue filled behind the write it is stuck in
-	if !drained(slow) {
-		t.Errorf("UpdateComponent(%s) x %d: slow viewer's queue still open, want it dropped", cmp, 2*viewerQueue)
 	}
 }
 

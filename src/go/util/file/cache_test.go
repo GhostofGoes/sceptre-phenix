@@ -410,14 +410,40 @@ func (f *recordingFiles) DeleteFile(path string) error {
 	return nil
 }
 
+// recordingExistingFiles also records the files DeleteExistingFiles deletes,
+// each with the prefix "existing ".
+type recordingExistingFiles struct {
+	*recordingFiles
+}
+
+func (f recordingExistingFiles) DeleteExistingFiles(names []string) error {
+	for _, name := range names {
+		f.deleted = append(f.deleted, "existing "+name)
+	}
+
+	return nil
+}
+
+// DeleteFile and DeleteExistingFiles, with or without a cluster that deletes
+// only existing files, delete the files and drop every cached listing.
 func TestDeletingFilesDropsCachedListings(t *testing.T) { //nolint:paralleltest // replaces package globals
 	for name, tc := range map[string]struct {
-		remove func() error
-		want   []string
+		remove   func() error
+		existing bool // the cluster deletes only existing files
+		want     []string
 	}{
 		"DeleteFile": {
 			remove: func() error { return DeleteFile("exp/files/a") },
 			want:   []string{"exp/files/a"},
+		},
+		"DeleteExistingFiles one file at a time": {
+			remove: func() error { return DeleteExistingFiles([]string{"exp/files/a", "exp/files/b"}) },
+			want:   []string{"exp/files/a", "exp/files/b"},
+		},
+		"DeleteExistingFiles through the cluster": {
+			remove:   func() error { return DeleteExistingFiles([]string{"exp/files/a"}) },
+			existing: true,
+			want:     []string{"existing exp/files/a"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -429,6 +455,10 @@ func TestDeletingFilesDropsCachedListings(t *testing.T) { //nolint:paralleltest 
 
 			files := &recordingFiles{ClusterFiles: nil, deleted: nil}
 			DefaultClusterFiles = files
+
+			if tc.existing {
+				DefaultClusterFiles = recordingExistingFiles{recordingFiles: files}
+			}
 
 			if err := tc.remove(); err != nil {
 				t.Fatalf("%s error = %v", name, err)

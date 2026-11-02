@@ -444,11 +444,6 @@ func TestTerminalWriterOutlastsUnattachedViewer(t *testing.T) {
 		path = "/experiments/exp/scorch/terminals/4343"
 	)
 
-	original := terminalInitTimeout
-	terminalInitTimeout = 20 * time.Millisecond
-
-	t.Cleanup(func() { terminalInitTimeout = original })
-
 	fakeTerminal(t, pid)
 
 	var (
@@ -465,10 +460,15 @@ func TestTerminalWriterOutlastsUnattachedViewer(t *testing.T) {
 
 	writerID := clientID(writer)
 
-	// the writer attaches, as StreamTerminal does
-	mu.Lock()
-	close(termClientIDs[writerID])
-	mu.Unlock()
+	// the writer attaches, as StreamTerminal does, before its timeout is short
+	if readOnly, status := claimTerminalClient(pid, writerID, true); readOnly || status != http.StatusOK {
+		t.Fatalf("claimTerminalClient(%d, writer) = %t, %d; want false, 200", pid, readOnly, status)
+	}
+
+	original := terminalInitTimeout
+	terminalInitTimeout = 20 * time.Millisecond
+
+	t.Cleanup(func() { terminalInitTimeout = original })
 
 	pending := make([]string, 0, 2)
 

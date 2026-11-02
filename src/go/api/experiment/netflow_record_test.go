@@ -16,6 +16,7 @@ import (
 
 	"phenix/util/common"
 	"phenix/util/polltest"
+	"phenix/util/testenv"
 )
 
 // netflowTestStart is the start of every recorder the tests make directly.
@@ -127,8 +128,8 @@ func TestNetflowRecorderCap(t *testing.T) {
 	}
 
 	c := r.capture()
-	if c.Size > 10 || !c.Truncated || c.State != NetflowStateRecording {
-		t.Errorf("capture() at the size limit = %+v, want at most 10 bytes, truncated and recording", c)
+	if c.Size != 10 || !c.Truncated || c.State != NetflowStateRecording {
+		t.Errorf("capture() at the size limit = %+v, want 10 bytes, truncated and recording", c)
 	}
 }
 
@@ -878,7 +879,7 @@ func TestOpenNetflowCaptureRecording(t *testing.T) {
 //nolint:paralleltest // replaces the store and the experiment files directory
 func TestOpenNetflowCaptureUnreadable(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("root opens a file of any mode")
+		testenv.Skipf(t, "root opens a file of any mode")
 	}
 
 	useNetflows(t, "a")

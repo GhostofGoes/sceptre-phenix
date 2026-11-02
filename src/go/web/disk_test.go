@@ -1267,6 +1267,8 @@ func TestDownloadDiskResumes(t *testing.T) {
 	}
 }
 
+// The checksum of a disk gives its path, size and SHA-256, and refuses an image
+// that the role may not get, a folder, a path outside, or a missing image.
 func TestGetDiskChecksum(t *testing.T) {
 	dir := useDiskFilesDir(t).dir
 

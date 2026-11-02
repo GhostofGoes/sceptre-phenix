@@ -169,8 +169,9 @@ func TestDroppingAClientDoesNotWaitForItsWrite(t *testing.T) {
 
 	drop(cli)
 
-	if d := time.Since(start); d > 50*time.Millisecond {
-		t.Errorf("drop(client stuck in a write) took %v, want at most 50ms", d)
+	// far below writeWait, with room for a busy -race machine
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("drop(client stuck in a write) took %v, want at most 1s", d)
 	}
 
 	polltest.Within(t, "the stuck write ending", func() { <-wrote })

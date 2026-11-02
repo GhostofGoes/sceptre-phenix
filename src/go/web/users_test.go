@@ -433,6 +433,7 @@ func TestCreateUserTokenForOtherUser(t *testing.T) {
 		want         int
 	}{
 		{"own token", "test-user", patch("test-user"), http.StatusOK},
+		{"users/tokens for the target", "bob", combinedRole(patch("bob"), tokens("bob")), http.StatusOK},
 		{"users/tokens for someone else", "bob", combinedRole(patch("bob"), tokens("carol")), http.StatusForbidden},
 	} {
 		w := httptest.NewRecorder()

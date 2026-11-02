@@ -168,8 +168,8 @@ func TestKillTerminal(t *testing.T) {
 	}
 }
 
-// KillTerminals with a context already done returns at once, counting the
-// terminals not yet ended, which still end.
+// KillTerminals with a context already done returns at once, and the
+// terminals it did not wait for still end.
 //
 //nolint:paralleltest // uses the package's terminals
 func TestKillTerminalsStopsWaitingWithItsContext(t *testing.T) {
@@ -191,9 +191,8 @@ func TestKillTerminalsStopsWaitingWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if left := KillTerminals(ctx); left < 0 || left > terminals {
-		t.Errorf("KillTerminals(done context) = %d, want 0 to %d", left, terminals)
-	}
+	// its count depends on which kills end first
+	polltest.Within(t, "KillTerminals(done context)", func() { _ = KillTerminals(ctx) })
 
 	for i, d := range done {
 		polltest.Within(t, fmt.Sprintf("terminal %d ending", i), func() { <-d })

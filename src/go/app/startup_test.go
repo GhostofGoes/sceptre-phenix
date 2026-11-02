@@ -111,7 +111,7 @@ func TestStartupPreStartC2TriggerMatrix(t *testing.T) {
 }
 
 // StartupUsesC2 is false for the nodes whose startup scripts PreStart skips: routers, nodes with the default apps
-// off, and operating systems it makes no scripts for.
+// off or set to not boot, and operating systems it makes no scripts for.
 func TestStartupUsesC2Skips(t *testing.T) {
 	t.Parallel()
 
@@ -123,6 +123,7 @@ func TestStartupUsesC2Skips(t *testing.T) {
 		"router":            {modify: func(n *v1.Node) { n.TypeF = "Router" }},
 		"default apps off":  {modify: func(n *v1.Node) { n.AnnotationsF[defaultAppsAnnotation] = false }},
 		"other os":          {modify: func(n *v1.Node) { n.HardwareF.OSTypeF = "plan9" }},
+		"do not boot":       {modify: func(n *v1.Node) { n.GeneralF.DoNotBootF = boolPtr(true) }},
 		"linux, C2 enabled": {modify: func(*v1.Node) {}, want: true},
 	}
 

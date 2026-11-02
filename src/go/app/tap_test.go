@@ -29,9 +29,9 @@ func TestTapCleanupNoopWhenStatusMissing(t *testing.T) {
 	}
 }
 
-// TestTapCleanupDeletesRecordedTaps verifies Cleanup still parses and
-// processes status when the tap app previously recorded taps it created.
-func TestTapCleanupDeletesRecordedTaps(t *testing.T) {
+// TestTapCleanupEmptyTapStatus verifies that Cleanup parses a recorded tap
+// status that holds no taps and returns no error.
+func TestTapCleanupEmptyTapStatus(t *testing.T) {
 	exp := types.NewExperiment(store.ConfigMetadata{Name: "tap-cleanup-test"})
 	exp.Spec.SetExperimentName("tap-cleanup-test")
 

@@ -3,7 +3,9 @@ package util
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"pgregory.net/rapid"
 
 	"phenix/util/mm"
+	"phenix/util/polltest"
 	"phenix/web/cache"
 )
 
@@ -196,6 +199,29 @@ func TestGetScreenshotCaches(t *testing.T) {
 	}
 }
 
+// screenshotWaiters counts the goroutines that wait in GetScreenshotContext
+// for a shared minimega command to end.
+func screenshotWaiters() int {
+	buf := make([]byte, 1<<20)
+
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			count := 0
+
+			for stack := range strings.SplitSeq(string(buf[:n]), "\n\n") {
+				if strings.Contains(stack, " [select") && strings.Contains(stack, "phenix/web/util.GetScreenshotContext(") {
+					count++
+				}
+			}
+
+			return count
+		}
+
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
 // Concurrent requests for a screenshot share one minimega command.
 //
 //nolint:paralleltest // replaces minimega and the web cache
@@ -205,7 +231,6 @@ func TestGetScreenshotSharesARequest(t *testing.T) {
 	var (
 		started = make(chan struct{})
 		release = make(chan struct{})
-		arrived sync.WaitGroup
 		done    sync.WaitGroup
 		shots   [callers][]byte
 		errs    [callers]error
@@ -220,23 +245,22 @@ func TestGetScreenshotSharesARequest(t *testing.T) {
 		return []byte("png"), nil
 	})
 
-	arrived.Add(callers)
 	done.Add(callers)
 
 	for i := range callers {
 		go func() {
 			defer done.Done()
 
-			arrived.Done()
-
 			shots[i], errs[i] = GetScreenshot("exp", "vm", "200")
 		}()
 	}
 
-	// hold the first minimega command open until every caller has started; one
-	// that asks after it finishes reads the cached screenshot instead
-	arrived.Wait()
+	// hold the first minimega command open until every caller waits on its
+	// result; one that asks after it finishes reads the cached screenshot
 	<-started
+	polltest.Until(t, "every caller waiting on the shared request", func() bool {
+		return screenshotWaiters() == callers
+	})
 	close(release)
 	done.Wait()
 

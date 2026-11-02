@@ -3,33 +3,43 @@ package shell_test
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 
 	"phenix/util/shell"
 	"phenix/util/testenv"
 )
 
+// ExecCommand sends each line of a stream to its channel, without the line
+// ending, and also returns the lines joined.
 func TestExecCommandCopiesStreamedBytes(t *testing.T) {
 	testenv.RequireCommands(t, "sh")
 
 	tests := []struct {
-		name      string
-		script    string
-		streamOpt func(chan []byte) shell.Option
-		want      []string
+		name       string
+		script     string
+		streamOpt  func(chan []byte) shell.Option
+		want       []string
+		wantStdout string
+		wantStderr string
 	}{
 		{
-			name:      "stdout",
-			script:    "printf 'alpha\nbravo\ncharl\n'",
-			streamOpt: shell.StreamStdout,
-			want:      []string{"alpha", "bravo", "charl"},
+			name:       "stdout",
+			script:     "printf 'alpha\nbravo\ncharl\n'",
+			streamOpt:  shell.StreamStdout,
+			want:       []string{"alpha", "bravo", "charl"},
+			wantStdout: "alphabravocharl",
 		},
 		{
-			name:      "stderr",
-			script:    "printf 'alpha\nbravo\ncharl\n' >&2",
-			streamOpt: shell.StreamStderr,
-			want:      []string{"alpha", "bravo", "charl"},
+			name:       "stderr",
+			script:     "printf 'alpha\nbravo\ncharl\n' >&2",
+			streamOpt:  shell.StreamStderr,
+			want:       []string{"alpha", "bravo", "charl"},
+			wantStderr: "alphabravocharl",
 		},
 	}
 
@@ -37,28 +47,111 @@ func TestExecCommandCopiesStreamedBytes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stream := make(chan []byte, len(tt.want))
 
-			_, _, err := shell.ExecCommand(
-				context.Background(),
+			stdout, stderr, err := shell.ExecCommand(
+				t.Context(),
 				shell.Command("sh"),
 				shell.Args("-c", tt.script),
 				tt.streamOpt(stream),
 			)
 			if err != nil {
-				t.Fatalf("ExecCommand returned error: %v", err)
+				t.Fatalf("ExecCommand() error = %v, want nil", err)
 			}
 
-			var got [][]byte
+			var got []string
 			for line := range stream {
-				got = append(got, line)
+				got = append(got, string(line))
 			}
 
-			if len(got) != len(tt.want) {
-				t.Fatalf("expected %d lines, got %d", len(tt.want), len(got))
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("streamed lines mismatch (-want +got):\n%s", diff)
 			}
 
-			for i, want := range tt.want {
-				if string(got[i]) != want {
-					t.Fatalf("line %d: expected %q, got %q", i, want, string(got[i]))
+			if string(stdout) != tt.wantStdout || string(stderr) != tt.wantStderr {
+				t.Errorf("ExecCommand() = %q, %q, want %q, %q", stdout, stderr, tt.wantStdout, tt.wantStderr)
+			}
+		})
+	}
+}
+
+// ExecCommand gives the command its stdin and extra environment, returns its
+// output, and reports a command that does not start or exits non-zero.
+func TestExecCommandResult(t *testing.T) {
+	testenv.RequireCommands(t, "sh", "cat")
+
+	tests := []struct {
+		name       string
+		opts       []shell.Option
+		wantStdout string
+		wantStderr string
+		wantErr    string // substring of the error; empty for no error
+		wantExit   int    // exit code in the error; 0 for none
+		wantErrIs  error
+	}{
+		{
+			name:       "stdout and stderr",
+			opts:       []shell.Option{shell.Command("sh"), shell.Args("-c", "printf 'out\n'; printf 'err\n' >&2")},
+			wantStdout: "out",
+			wantStderr: "err",
+		},
+		{
+			name: "stdin and env",
+			opts: []shell.Option{
+				shell.Command("sh"),
+				shell.Args("-c", `cat; printf '%s\n' "$PHENIX_SHELL_TEST"`),
+				shell.Stdin([]byte("in\n")),
+				shell.Env("PHENIX_SHELL_TEST=env"),
+			},
+			wantStdout: "inenv",
+		},
+		{
+			name:       "split bytes keeps line endings",
+			opts:       []shell.Option{shell.Command("sh"), shell.Args("-c", "printf 'a\nb'"), shell.SplitBytes()},
+			wantStdout: "a\nb",
+		},
+		{
+			name:       "non-zero exit",
+			opts:       []shell.Option{shell.Command("sh"), shell.Args("-c", "printf 'out\n'; printf 'err\n' >&2; exit 3")},
+			wantStdout: "out",
+			wantStderr: "err",
+			wantErr:    "waiting for command to complete",
+			wantExit:   3,
+		},
+		{
+			name:      "missing command",
+			opts:      []shell.Option{shell.Command("phenix-shell-test-no-such-command")},
+			wantErr:   "starting command",
+			wantErrIs: exec.ErrNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, stderr, err := shell.ExecCommand(t.Context(), tt.opts...)
+
+			if string(stdout) != tt.wantStdout || string(stderr) != tt.wantStderr {
+				t.Errorf("ExecCommand() = %q, %q, want %q, %q", stdout, stderr, tt.wantStdout, tt.wantStderr)
+			}
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ExecCommand() error = %v, want nil", err)
+				}
+
+				return
+			}
+
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ExecCommand() error = %v, want one that contains %q", err, tt.wantErr)
+			}
+
+			if tt.wantErrIs != nil && !errors.Is(err, tt.wantErrIs) {
+				t.Errorf("ExecCommand() error = %v, want one that wraps %v", err, tt.wantErrIs)
+			}
+
+			if tt.wantExit != 0 {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != tt.wantExit {
+					t.Errorf("ExecCommand() error = %v, want an exit error with code %d", err, tt.wantExit)
 				}
 			}
 		})

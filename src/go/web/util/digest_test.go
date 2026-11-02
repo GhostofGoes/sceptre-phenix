@@ -392,12 +392,17 @@ func TestDigestCacheForgetsFailuresPastTheBound(t *testing.T) {
 		}
 	}
 
+	// B first: the recompute of A that Start(pathA) begins can forget B
+	if _, err := c.Start(pathB, infoB); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("DigestCache.Start(%q) of the last failure = %v, want %v", pathB, err, os.ErrNotExist)
+	}
+
 	if sum, err := c.Start(pathA, infoA); sum != nil || err != nil {
 		t.Errorf("DigestCache.Start(%q) of a forgotten failure = %x, %v; want nil, nil", pathA, sum, err)
 	}
 
-	if _, err := c.Start(pathB, infoB); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("DigestCache.Start(%q) of the last failure = %v, want %v", pathB, err, os.ErrNotExist)
+	if !c.Wait(pathA, infoA, 10*time.Second) {
+		t.Fatalf("DigestCache.Wait(%q) = false after 10s, want true", pathA)
 	}
 }
 

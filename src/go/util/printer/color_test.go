@@ -41,36 +41,55 @@ func colorTables(t *testing.T, render func(termcolor.Palette, *bytes.Buffer)) (s
 	return plain.String(), colored.String()
 }
 
-// The Started column of a running experiment is green, its interrupted mark
-// yellow, and a stopped experiment's empty, even when it was interrupted.
+// The Started column of a running experiment is green and its interrupted
+// mark yellow. A stopped experiment's is empty, even when it was interrupted.
 func TestPrintTableOfExperimentsColors(t *testing.T) {
 	t.Parallel()
 
-	running := types.NewExperiment(store.ConfigMetadata{Name: "running"})
-	running.Status.SetStartTime("2024-01-01T00:00:00Z")
+	const (
+		started   = "2024-01-01T00:00:00Z"
+		reason    = "minimega could not list the VMs"
+		greenTime = "\x1b[32m" + started + "\x1b[0m"
+		yellowTag = "\x1b[33m(interrupted)\x1b[0m"
+	)
 
-	interrupted := types.NewExperiment(store.ConfigMetadata{Name: "interrupted"})
-	interrupted.Status.SetStartTime("2024-01-01T00:00:00Z")
-	interrupted.Status.SetInterrupted("minimega could not list the VMs")
-
-	stopped := types.NewExperiment(store.ConfigMetadata{Name: "stopped"})
-
-	// an interruption is shown only while the experiment runs
-	stoppedInterrupted := types.NewExperiment(store.ConfigMetadata{Name: "stopped-interrupted"})
-	stoppedInterrupted.Status.SetInterrupted("minimega could not list the VMs")
-
-	plain, colored := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) {
-		PrintTableOfExperiments(out, p, *running, *interrupted, *stopped, *stoppedInterrupted)
-	})
-
-	if got := strings.Count(plain, "(interrupted)"); got != 1 {
-		t.Errorf("experiments table has %d interrupted marks, want 1:\n%s", got, plain)
+	tests := []struct {
+		name, started, interrupted string
+		wantMarks                  int
+		wantColored                []string
+	}{
+		{name: "running", started: started, wantColored: []string{greenTime}},
+		{name: "running and interrupted", started: started, interrupted: reason, wantMarks: 1, wantColored: []string{greenTime, yellowTag}},
+		{name: "stopped"},
+		{name: "stopped and interrupted", interrupted: reason},
 	}
 
-	for _, want := range []string{"\x1b[32m2024-01-01T00:00:00Z\x1b[0m", "\x1b[33m(interrupted)\x1b[0m"} {
-		if !strings.Contains(colored, want) {
-			t.Errorf("colored experiments table lacks %q:\n%s", want, colored)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			exp := types.NewExperiment(store.ConfigMetadata{Name: "exp"})
+			exp.Status.SetStartTime(tt.started)
+			exp.Status.SetInterrupted(tt.interrupted)
+
+			plain, colored := colorTables(t, func(p termcolor.Palette, out *bytes.Buffer) {
+				PrintTableOfExperiments(out, p, *exp)
+			})
+
+			if got := strings.Count(plain, "(interrupted)"); got != tt.wantMarks {
+				t.Errorf("experiments table has %d interrupted marks, want %d:\n%s", got, tt.wantMarks, plain)
+			}
+
+			if tt.started == "" && strings.Contains(plain, started) {
+				t.Errorf("experiments table shows a start time for a stopped experiment:\n%s", plain)
+			}
+
+			for _, want := range tt.wantColored {
+				if !strings.Contains(colored, want) {
+					t.Errorf("colored experiments table lacks %q:\n%s", want, colored)
+				}
+			}
+		})
 	}
 }
 

@@ -104,6 +104,8 @@ func TestListenerManagerConcurrentAccess(t *testing.T) {
 	}
 }
 
+// The manager gives each new listener a larger ID, also after a removal, and
+// does not find a removed ID.
 func TestListenerManagerIDsAreUniqueAndNotReused(t *testing.T) {
 	var (
 		manager = newListenerManager()
@@ -117,10 +119,16 @@ func TestListenerManagerIDsAreUniqueAndNotReused(t *testing.T) {
 		t.Fatalf("listeners received duplicate ID %d", first.ID)
 	}
 
+	if third.ID <= second.ID {
+		t.Fatalf("third listener ID = %d, want greater than %d", third.ID, second.ID)
+	}
+
 	manager.remove(first.ToKey())
 
-	if third.ID <= second.ID {
-		t.Fatalf("new listener ID = %d, want greater than %d", third.ID, second.ID)
+	fourth, _ := manager.add(ft.Listener{Exp: "experiment-4", VM: "vm", DstHost: "127.0.0.1", DstPort: 83})
+
+	if fourth.ID <= third.ID || fourth.ID == first.ID {
+		t.Fatalf("listener ID after a removal = %d, want greater than %d and not the removed ID %d", fourth.ID, third.ID, first.ID)
 	}
 
 	if err := manager.withListener(first.ID, func(*LocalListener) error { return nil }); !errors.Is(err, errListenerNotFound) {

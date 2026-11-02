@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// boltFreePages never panics on a store file it reads without the lock, and when it gives a count, the free pages
-// are at most the pages, and the pages are those of the newer valid meta page.
+// boltFreePages never panics on a store file it reads without the lock. When it gives a count, the free pages are
+// at most the pages, the pages are those of the newer valid meta page, and the free pages are the free page list count.
 func FuzzBoltFreePages(f *testing.F) {
 	for _, count := range []int{0, 1, 3, boltCountOverflow + 1} {
 		f.Add(doctorFreeBolt(count), int64(4*doctorFilesPageSize))
@@ -52,8 +52,27 @@ func FuzzBoltFreePages(f *testing.F) {
 
 		second, _ := parseBoltMeta(data[min(uint64(len(data)), at):])
 
-		if pages != first.pages && pages != second.pages {
-			t.Fatalf("boltFreePages() pages = %d, want the count of a meta page (%d or %d)", pages, first.pages, second.pages)
+		meta := second
+		if !second.valid() || first.valid() && first.txid >= second.txid {
+			meta = first
+		}
+
+		if pages != meta.pages {
+			t.Fatalf("boltFreePages() pages = %d, want %d of the newer valid meta page", pages, meta.pages)
+		}
+
+		list := data[min(uint64(len(data)), meta.freelist*at):]
+		if len(list) < boltPageHeader {
+			t.Fatalf("boltFreePages() = %d, %d without a free page list header at page %d", free, pages, meta.freelist)
+		}
+
+		want := uint64(binary.NativeEndian.Uint16(list[10:]))
+		if want == boltCountOverflow && len(list) >= boltFreelistRead {
+			want = binary.NativeEndian.Uint64(list[boltPageHeader:])
+		}
+
+		if free != want {
+			t.Fatalf("boltFreePages() free = %d, want %d from the free page list", free, want)
 		}
 	})
 }

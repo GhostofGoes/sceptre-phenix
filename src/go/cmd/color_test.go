@@ -58,28 +58,36 @@ func TestColorFlagInArgs(t *testing.T) {
 	}
 }
 
-// A --color=<mode> argument is found whatever comes before it, unless a "--"
-// comes first.
+// A --color=<mode> argument at the end is found unless the argument before it
+// takes it as a value, and nothing after a "--" changes what is found.
 func TestColorFlagInArgsProperty(t *testing.T) {
 	t.Parallel()
 
+	token := rapid.OneOf(
+		rapid.SampledFrom([]string{"--", "--color", "--color=on", "--color=off", "on", "exp"}),
+		rapid.StringMatching(`[a-z-]{0,8}`),
+	)
+
 	rapid.Check(t, func(t *rapid.T) {
-		before := rapid.SliceOf(rapid.StringMatching(`[a-z-]{0,8}`)).Draw(t, "before")
+		before := rapid.SliceOf(token).Draw(t, "before")
+		tail := rapid.SliceOf(token).Draw(t, "tail")
 		mode := rapid.SampledFrom([]string{"auto", "on", "off"}).Draw(t, "mode")
+
 		args := append(slices.Clone(before), "--color="+mode)
-
-		cut := slices.Index(before, "--")
-		hasValueFlag := slices.Contains(before, "--color")
-
 		got, found := colorFlagInArgs(args)
 
-		switch {
-		case cut >= 0:
-			if found && slices.Index(before, "--color") > cut {
-				t.Fatalf("colorFlagInArgs(%q) found %q past --", args, got)
-			}
-		case !hasValueFlag && (got != mode || !found):
+		if !slices.Contains(before, "--") && (len(before) == 0 || before[len(before)-1] != "--color") &&
+			(got != mode || !found) {
 			t.Fatalf("colorFlagInArgs(%q) = %q, %v, want %q", args, got, found, mode)
+		}
+
+		// A --color at the end of before takes "x" as its value, not the "--".
+		head := append(slices.Clone(before), "x")
+		want, wantFound := colorFlagInArgs(head)
+
+		args = append(append(slices.Clone(head), "--"), tail...)
+		if got, found := colorFlagInArgs(args); got != want || found != wantFound {
+			t.Fatalf("colorFlagInArgs(%q) = %q, %v, want %q, %v as before the --", args, got, found, want, wantFound)
 		}
 	})
 }

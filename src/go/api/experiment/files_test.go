@@ -23,6 +23,7 @@ import (
 	"phenix/util/common"
 	"phenix/util/file"
 	"phenix/util/mm"
+	"phenix/util/testenv"
 )
 
 // listedFiles lists experiment files, copies mesh-only ones to the headnode and records deletions;
@@ -1156,7 +1157,7 @@ func TestZipPlanWriteReportsWriterFailures(t *testing.T) { //nolint:paralleltest
 // A file phenix cannot open is left out with SkipFailed and fails the archive without it.
 func TestZipPlanWriteUnreadableFile(t *testing.T) { //nolint:paralleltest // replaces package state
 	if os.Geteuid() == 0 {
-		t.Skip("root opens a file of any mode")
+		testenv.Skipf(t, "root opens a file of any mode")
 	}
 
 	useFilesDir(t, "exp", map[string]string{"a.log": "alpha", "secret.log": "x"})

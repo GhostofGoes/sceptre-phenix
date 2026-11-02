@@ -21,6 +21,7 @@ import (
 	"pgregory.net/rapid"
 
 	"phenix/store"
+	"phenix/util/testenv"
 )
 
 // doctorHostPrefixes are the paths a doctorHostFS answers for, in place of the real file system.
@@ -882,7 +883,8 @@ func escapeMount(s string) string {
 	return b.String()
 }
 
-// The parsers of host files read back what they are given, and never panic on other input.
+// The parsers of host files read back what they are given, and never panic on other input. scriptKeyring gives the
+// first absolute keyring path of a script, or "".
 func TestHostParsersProperty(t *testing.T) {
 	t.Parallel()
 
@@ -913,9 +915,36 @@ func TestHostParsersProperty(t *testing.T) {
 			t.Fatalf("parseOVSShow() = %q, %q, want %q, %q", gotVersion, gotBridges, version, bridges)
 		}
 
-		keyring := scriptKeyring(s)
-		if keyring != "" && (!filepath.IsAbs(keyring) || !strings.Contains(s, keyring)) {
-			t.Fatalf("scriptKeyring(%q) = %q, not an absolute path in the script", s, keyring)
+		_ = scriptKeyring(s)
+
+		var (
+			script      strings.Builder
+			wantKeyring string
+		)
+
+		for range rapid.IntRange(0, 6).Draw(t, "lines") {
+			path := rapid.StringMatching(`[a-z0-9_.-]{1,10}(/[a-z0-9_.-]{1,10}){0,2}`).Draw(t, "path")
+
+			switch rapid.IntRange(0, 3).Draw(t, "kind") {
+			case 0:
+				script.WriteString(rapid.StringMatching(`[a-z =#"]{0,20}`).Draw(t, "noise"))
+			case 1:
+				script.WriteString("keyring " + path)
+			case 2:
+				script.WriteString("# keyring /" + path)
+			default:
+				script.WriteString(rapid.StringMatching(`[ \t]{0,3}`).Draw(t, "indent") + "keyring /" + path + " x")
+
+				if wantKeyring == "" {
+					wantKeyring = "/" + path
+				}
+			}
+
+			script.WriteString("\n")
+		}
+
+		if got := scriptKeyring(script.String()); got != wantKeyring {
+			t.Fatalf("scriptKeyring(%q) = %q, want %q", script.String(), got, wantKeyring)
 		}
 	})
 }
@@ -925,9 +954,7 @@ func TestHostParsersProperty(t *testing.T) {
 func TestRunDoctorCommand(t *testing.T) {
 	t.Parallel()
 
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh on PATH to run")
-	}
+	testenv.RequireCommands(t, "sh")
 
 	t.Run("output and exit status", func(t *testing.T) {
 		t.Parallel()

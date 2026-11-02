@@ -45,6 +45,8 @@ func useDHCP(t *testing.T, replies ...[]string) *dhcpMM {
 	return fake
 }
 
+// waitForDHCP polls minimega once for all DHCP interfaces of a VM until each has
+// an address, and records each address for its host and VLAN.
 func TestWaitForDHCPPollsOnceForAllInterfaces(t *testing.T) { //nolint:paralleltest // replaces package globals
 	fake := useDHCP(t,
 		nil,
@@ -117,6 +119,7 @@ func stateFailures(wg *mm.StateGroup) []bool {
 	return failures
 }
 
+// waitForDHCP records one timeout for each DHCP interface that gets no address.
 func TestWaitForDHCPTimesOutPerInterface(t *testing.T) { //nolint:paralleltest // replaces package globals
 	useDHCP(t, []string{"10.0.0.1"})
 

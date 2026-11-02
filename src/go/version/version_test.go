@@ -7,6 +7,8 @@ import (
 	"pgregory.net/rapid"
 )
 
+// Label names a release tag as a version and any other tag as a branch,
+// with the repository only when it is a known fork.
 func TestLabel(t *testing.T) {
 	originalRepo := Repo
 	originalTag := Tag
@@ -24,6 +26,10 @@ func TestLabel(t *testing.T) {
 		{name: "release", repo: upstreamRepo, tag: "v2026.08.26", want: "Version v2026.08.26"},
 		{name: "upstream branch", repo: upstreamRepo, tag: "main", want: "Branch main"},
 		{name: "fork branch", repo: "GhostofGoes/sceptre-phenix", tag: "main", want: "Branch main [ghostofgoes/sceptre-phenix]"},
+		{name: "empty repo branch", repo: "", tag: "main", want: "Branch main"},
+		{name: "unset repo branch", repo: "repo not set", tag: "main", want: "Branch main"},
+		{name: "fork prerelease", repo: "GhostofGoes/sceptre-phenix", tag: "v1.2.3-rc.1+build5", want: "Version v1.2.3-rc.1+build5"},
+		{name: "tag with a suffix", repo: upstreamRepo, tag: "v1.2.3.4", want: "Branch v1.2.3.4"},
 	}
 
 	for _, test := range tests {
@@ -37,6 +43,8 @@ func TestLabel(t *testing.T) {
 	}
 }
 
+// API gives a release tag without its "v", and 0.0.0-dev with the commit as
+// build metadata for any other build.
 func TestAPI(t *testing.T) {
 	originalCommit, originalTag := Commit, Tag
 

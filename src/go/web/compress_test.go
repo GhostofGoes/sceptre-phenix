@@ -125,7 +125,11 @@ func TestCompressResponsesPassesWebsocketUpgrades(t *testing.T) {
 	}
 }
 
+// Flush on a gzipped response sends the client all the body written so far,
+// before the handler writes more.
 func TestCompressResponsesFlushes(t *testing.T) {
+	rec := httptest.NewRecorder()
+
 	h := CompressResponses(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, "first chunk\n")
@@ -136,12 +140,42 @@ func TestCompressResponsesFlushes(t *testing.T) {
 		}
 
 		f.Flush()
+
+		if !rec.Flushed {
+			t.Error("Flush did not flush the underlying writer")
+		}
+
+		zr, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("gzip.NewReader(body sent before the second chunk) error = %v", err)
+		}
+
+		// the gzip stream is not closed yet, so the read ends early
+		sent, err := io.ReadAll(zr)
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("reading the body sent before the second chunk: %v", err)
+		}
+
+		if diff := cmp.Diff("first chunk\n", string(sent)); diff != "" {
+			t.Errorf("body sent at Flush mismatch (-want +got):\n%s", diff)
+		}
+
 		_, _ = io.WriteString(w, "second chunk\n")
 	}))
 
-	resp := get(t, h, "/api/v1/logs", "gzip")
-	if got, want := readBody(t, resp), "first chunk\nsecond chunk\n"; got != want {
-		t.Errorf("GET /api/v1/logs flushed between chunks = %q, want %q", got, want)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	h.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	defer resp.Body.Close()
+
+	if enc := resp.Header.Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("GET /api/v1/logs Content-Encoding = %q, want gzip", enc)
+	}
+
+	if diff := cmp.Diff("first chunk\nsecond chunk\n", readBody(t, resp)); diff != "" {
+		t.Errorf("GET /api/v1/logs body mismatch (-want +got):\n%s", diff)
 	}
 }
 

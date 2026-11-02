@@ -371,8 +371,13 @@ func TestCreateWebSharkCaptureOfRunningCapture(t *testing.T) {
 
 	noMtime := cmpopts.IgnoreMapEntries(func(k string, _ any) bool { return k == "mtime" })
 
-	if diff := cmp.Diff(map[string]any{"kind": "init", "size": float64(whole)}, <-events, noMtime); diff != "" {
-		t.Errorf("first /webshark/watch event mismatch (-want +got):\n%s", diff)
+	select {
+	case ev := <-events:
+		if diff := cmp.Diff(map[string]any{"kind": "init", "size": float64(whole)}, ev, noMtime); diff != "" {
+			t.Errorf("first /webshark/watch event mismatch (-want +got):\n%s", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("/webshark/watch sent no event within 5s, want an init")
 	}
 
 	live.write(t, two[100:])
@@ -796,17 +801,16 @@ func TestFindWebShark(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		kinds   map[string]string
-		want    string
-		wantOK  bool
-		wantDir []string
+		kinds  map[string]string
+		want   string
+		wantOK bool
 	}{
-		"none":             {map[string]string{}, "", false, nil},
-		"relative":         {map[string]string{"webshark": "file", "/opt/phenix/webshark": "file"}, "webshark", true, nil},
-		"installed":        {map[string]string{"/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true, nil},
-		"index.html a dir": {map[string]string{"webshark": "folder"}, "", false, nil},
+		"none":             {map[string]string{}, "", false},
+		"relative":         {map[string]string{"webshark": "file", "/opt/phenix/webshark": "file"}, "webshark", true},
+		"installed":        {map[string]string{"/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true},
+		"index.html a dir": {map[string]string{"webshark": "folder"}, "", false},
 		"index.html a dir, then installed": {
-			map[string]string{"webshark": "folder", "/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true, nil,
+			map[string]string{"webshark": "folder", "/opt/phenix/webshark": "file"}, "/opt/phenix/webshark", true,
 		},
 	}
 
@@ -1192,12 +1196,17 @@ func (w *websharkWriter) Write(b []byte) (int, error) {
 	return w.body.Write(b)
 }
 
-// events counts the capture-changed events written so far.
-func (w *websharkWriter) events() int {
+// written is the body written so far.
+func (w *websharkWriter) written() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return strings.Count(w.body.String(), "event: capture-changed")
+	return w.body.String()
+}
+
+// events counts the capture-changed events written so far.
+func (w *websharkWriter) events() int {
+	return strings.Count(w.written(), "event: capture-changed")
 }
 
 func (w *websharkWriter) Flush() {}
@@ -1258,16 +1267,18 @@ func TestSharkWatchWait(t *testing.T) {
 	tests := map[string]struct {
 		due     bool
 		changed <-chan struct{}
-		// how long until the watch ends: 0 for never, below 0 for already
-		ends      time.Duration
+		// ended ends the watch before wait; heartbeat ends it after a heartbeat
+		ended     bool
 		w         func() http.ResponseWriter
 		want      bool
 		heartbeat bool
 	}{
-		"due":                     {due: true, w: websharkRecorder, want: true},
-		"changed":                 {changed: changed, w: websharkRecorder, want: true},
-		"watch ended":             {ends: -1, w: websharkRecorder},
-		"heartbeat, then ended":   {ends: 80 * time.Millisecond, w: websharkRecorder, heartbeat: true},
+		"due":         {due: true, w: websharkRecorder, want: true},
+		"changed":     {changed: changed, w: websharkRecorder, want: true},
+		"watch ended": {ended: true, w: websharkRecorder},
+		"heartbeat, then ended": {
+			w: func() http.ResponseWriter { return &websharkWriter{header: http.Header{}, ok: 1 << 20} }, heartbeat: true,
+		},
 		"heartbeat to no watcher": {w: func() http.ResponseWriter { return &websharkWriter{header: http.Header{}} }},
 	}
 
@@ -1278,11 +1289,8 @@ func TestSharkWatchWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			t.Cleanup(cancel)
 
-			switch {
-			case tc.ends < 0:
+			if tc.ended {
 				cancel()
-			case tc.ends > 0:
-				time.AfterFunc(tc.ends, cancel)
 			}
 
 			var due chan time.Time
@@ -1296,15 +1304,26 @@ func TestSharkWatchWait(t *testing.T) {
 
 			var got bool
 
-			polltest.Within(t, "wait returning", func() { got = watch.wait(ctx, due, tc.changed) })
+			done := make(chan struct{})
+
+			go func() {
+				defer close(done)
+
+				got = watch.wait(ctx, due, tc.changed)
+			}()
+
+			if tc.heartbeat {
+				ww, _ := w.(*websharkWriter)
+				polltest.Until(t, "a heartbeat", func() bool {
+					return strings.HasPrefix(ww.written(), "event: heartbeat\ndata: {\"t\":")
+				})
+				cancel()
+			}
+
+			polltest.Within(t, "wait returning", func() { <-done })
 
 			if got != tc.want {
 				t.Errorf("wait(%s) = %t, want %t", name, got, tc.want)
-			}
-
-			if rec, ok := w.(*httptest.ResponseRecorder); ok && tc.heartbeat &&
-				!strings.HasPrefix(rec.Body.String(), "event: heartbeat\ndata: {\"t\":") {
-				t.Errorf("wait(%s) wrote %q, want heartbeats", name, rec.Body.String())
 			}
 		})
 	}
@@ -1341,6 +1360,8 @@ func TestWatchSharkTapEndsWhenTheWatcherLeaves(t *testing.T) {
 			}()
 
 			if ok > 0 {
+				// the init event must read the size before the capture grows
+				polltest.Until(t, "the init event", func() bool { return w.events() == 1 })
 				live.write(t, testPcapRecord(60))
 			}
 

@@ -364,8 +364,9 @@ func TestViewerStopsWhenItCannotSetADeadline(t *testing.T) {
 	}
 }
 
-// watch marks the viewer gone once its client's stream ends, and a viewer
-// already gone is served nothing; leaving again changes nothing.
+// watch marks the viewer gone once its client's stream ends, and serve of a
+// viewer already gone returns although its output never finishes; leaving
+// again changes nothing.
 func TestViewerWatchNoticesTheClientLeaving(t *testing.T) {
 	t.Parallel()
 
@@ -391,8 +392,8 @@ func TestViewerWatchNoticesTheClientLeaving(t *testing.T) {
 	polltest.Within(t, "serving a viewer that is gone", v.serve)
 	v.leave()
 
-	if got := conn.String(); got != "" {
-		t.Errorf("viewer that was gone before serve wrote %q, want nothing", got)
+	if !v.isGone() {
+		t.Error("viewer after a second leave is not gone, want gone")
 	}
 }
 

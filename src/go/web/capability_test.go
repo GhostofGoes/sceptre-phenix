@@ -308,7 +308,7 @@ func TestCaptureGrantWithoutSignIn(t *testing.T) {
 	}
 }
 
-// A WebShark grant does not stream, and its operations are counted.
+// A download through a WebShark grant succeeds and counts as one use of the grant.
 func TestCaptureGrantOperations(t *testing.T) {
 	useWebShark(t)
 	useExperimentFilesDir(t, map[string]string{"a.pcap": string(testPcapHeader())})
@@ -316,7 +316,10 @@ func TestCaptureGrantOperations(t *testing.T) {
 	server := serveAs(t, "alice", sharkRole()).URL
 	capture := openInWebShark(t, server, `{"path":"a.pcap"}`)
 
-	_ = do(t, http.MethodGet, server+"/webshark/json?method=download&capture="+capture.Capture, "")
+	download := "/webshark/json?method=download&capture=" + capture.Capture
+	if resp := do(t, http.MethodGet, server+download, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want %d", download, resp.StatusCode, http.StatusOK)
+	}
 
 	want := []capability.Grant{savedGrant(capture.ID, "alice", 1)}
 	if diff := cmp.Diff(want, captureGrants.List("alice", "test-experiment"), grantCmp); diff != "" {

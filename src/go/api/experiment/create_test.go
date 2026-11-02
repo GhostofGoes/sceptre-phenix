@@ -247,3 +247,143 @@ func TestCreateTakesTheLongestDefaultBridge(t *testing.T) { //nolint:paralleltes
 		t.Errorf("Create(bridge of %d characters) error = %v, want it to get as far as the topology", experiment.MaxBridgeNameLength, err)
 	}
 }
+
+// scenarioTestConfig is a scenario of two apps, annotated with topology when it is not "".
+func scenarioTestConfig(name, topology string) *store.Config {
+	c := &store.Config{
+		Version:  "phenix.sandia.gov/v2",
+		Kind:     "Scenario",
+		Metadata: store.ConfigMetadata{Name: name},
+		Spec: map[string]any{
+			"apps": []any{map[string]any{"name": "app-a"}, map[string]any{"name": "app-b"}},
+		},
+	}
+
+	if topology != "" {
+		c.Metadata.Annotations = map[string]string{"topology": topology}
+	}
+
+	return c
+}
+
+// Create copies the scenario into the experiment, with the disabled apps off, and
+// stores the base directory, VLAN range and aliases, schedules and GRE mesh it is given.
+func TestCreateStoresTheScenarioAndSettings(t *testing.T) { //nolint:paralleltest // replaces package state
+	useTestStore(t)
+
+	for _, c := range []*store.Config{annotationTestTopology(), scenarioTestConfig("scn", "annotated")} {
+		if err := store.Create(c); err != nil {
+			t.Fatalf("storing %s %s: %v", c.Kind, c.Metadata.Name, err)
+		}
+	}
+
+	baseDir := t.TempDir()
+
+	err := experiment.Create(
+		context.Background(),
+		experiment.CreateWithName("exp"),
+		experiment.CreateWithTopology("annotated"),
+		experiment.CreateWithScenario("scn"),
+		experiment.CreatedWithDisabledApplications([]string{"app-b"}),
+		experiment.CreateWithBaseDirectory(baseDir),
+		experiment.CreateWithVLANMin(100),
+		experiment.CreateWithVLANMax(200),
+		experiment.CreateWithVLANAliases(map[string]int{"EXP-1": 150}),
+		experiment.CreateWithSchedules(map[string]string{"server": "node1"}),
+		experiment.CreateWithGREMesh(true),
+	)
+	if err != nil {
+		t.Fatalf("Create(exp) error = %v", err)
+	}
+
+	exp, err := experiment.Get("exp")
+	if err != nil {
+		t.Fatalf("Get(exp) error = %v", err)
+	}
+
+	type settings struct {
+		Scenario    string
+		Disabled    map[string]bool
+		BaseDir     string
+		VLANMin     int
+		VLANMax     int
+		VLANAliases map[string]int
+		Schedules   map[string]string
+		UseGREMesh  bool
+	}
+
+	got := settings{
+		Scenario:    exp.Metadata.Annotations["scenario"],
+		Disabled:    map[string]bool{},
+		BaseDir:     exp.Spec.BaseDir(),
+		VLANMin:     exp.Spec.VLANs().Min(),
+		VLANMax:     exp.Spec.VLANs().Max(),
+		VLANAliases: exp.Spec.VLANs().Aliases(),
+		Schedules:   exp.Spec.Schedules(),
+		UseGREMesh:  exp.Spec.UseGREMesh(),
+	}
+
+	if exp.Spec.Scenario() != nil {
+		for _, a := range exp.Spec.Scenario().Apps() {
+			got.Disabled[a.Name()] = a.Disabled()
+		}
+	}
+
+	want := settings{
+		Scenario:    "scn",
+		Disabled:    map[string]bool{"app-a": false, "app-b": true},
+		BaseDir:     baseDir,
+		VLANMin:     100,
+		VLANMax:     200,
+		VLANAliases: map[string]int{"EXP-1": 150},
+		Schedules:   map[string]string{"server": "node1"},
+		UseGREMesh:  true,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Get(exp) after Create() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Create refuses a scenario the store does not hold, or one that is not marked
+// for the topology, and creates nothing.
+func TestCreateRefusesABadScenario(t *testing.T) { //nolint:paralleltest // replaces package state
+	tests := []struct {
+		name     string
+		scenario *store.Config // stored as scenario scn, or nil
+		want     string        // the error
+	}{
+		{name: "a scenario that does not exist", want: "scenario doesn't exist"},
+		{name: "a scenario with no topology", scenario: scenarioTestConfig("scn", ""), want: "topology annotation missing from scenario"},
+		{
+			name:     "a scenario of another topology",
+			scenario: scenarioTestConfig("scn", "other"),
+			want:     "experiment/scenario topology mismatch for scenario scn",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useTestStore(t)
+
+			if err := store.Create(annotationTestTopology()); err != nil {
+				t.Fatalf("storing topology annotated: %v", err)
+			}
+
+			if tc.scenario != nil {
+				if err := store.Create(tc.scenario); err != nil {
+					t.Fatalf("storing scenario scn: %v", err)
+				}
+			}
+
+			err := experiment.Create(context.Background(),
+				experiment.CreateWithName("exp"), experiment.CreateWithTopology("annotated"), experiment.CreateWithScenario("scn"))
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("Create(scenario scn) error = %v, want %q", err, tc.want)
+			}
+
+			if _, err := experiment.Get("exp"); err == nil {
+				t.Error("Get(exp) after a refused Create succeeded, want no experiment")
+			}
+		})
+	}
+}

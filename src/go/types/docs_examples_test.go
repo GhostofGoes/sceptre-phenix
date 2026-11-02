@@ -29,7 +29,13 @@ var exampleDocs = []string{ //nolint:gochecknoglobals // test table
 	"skills/*/references/*.md",
 }
 
-var yamlFence = regexp.MustCompile("^(\\s*)(```+)\\s*(?:yaml|yml)\\s*$")
+var yamlFence = regexp.MustCompile("^(\\s*)(```+)\\s*(?:yaml|yml)(?:\\s.*)?$")
+
+// invalidExamples names the docs examples, by file and config name, that show a validation
+// failure on purpose. They must fail validation.
+var invalidExamples = map[string]bool{ //nolint:gochecknoglobals // test table
+	"docs/content/workflow.md helloworld": true, // explains a misplaced image
+}
 
 // configHeader matches a block that starts a config, so a block of loose YAML fragments that
 // does not parse is not reported.
@@ -43,47 +49,78 @@ type yamlExample struct {
 
 // TestDocsConfigExamplesValidate validates each docs YAML document with an apiVersion and kind as
 // `phenix config create` or `phenix workflow apply` would, skipping ones that elide with "...".
+// Each example in invalidExamples must be found and must fail validation.
 func TestDocsConfigExamplesValidate(t *testing.T) {
-	var checked int
+	var (
+		checked int
+		invalid = map[string]bool{}
+	)
 
 	for _, ex := range yamlExamples(t) {
-		dec := yaml.NewDecoder(strings.NewReader(ex.body))
-
-		for {
-			var node yaml.Node
-
-			err := dec.Decode(&node)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			if err != nil {
-				if configHeader.MatchString(ex.body) {
-					t.Errorf("%s: parsing YAML: %v", ex.where, err)
-				}
-
-				break
-			}
-
-			var doc map[string]any
-			if err := node.Decode(&doc); err != nil || doc["apiVersion"] == nil || doc["kind"] == nil ||
-				elided(&node) {
-				continue
-			}
-
-			checked++
-
-			if err := validateExample(&node, doc); err != nil {
-				t.Errorf("%s: %v", ex.where, err)
-			}
-		}
+		checked += checkExamples(t, ex.where, ex.body, invalid)
 	}
 
-	if checked == 0 {
-		t.Fatal("found no YAML config examples; did the docs move?")
+	// Pins that the extractor finds the docs examples.
+	if minimum := 10; checked < minimum {
+		t.Fatalf("validated %d YAML config examples, want at least %d; did the docs move?", checked, minimum)
+	}
+
+	if diff := cmp.Diff(invalidExamples, invalid); diff != "" {
+		t.Errorf("invalid docs examples found mismatch (-want +got):\n%s", diff)
 	}
 
 	t.Logf("validated %d YAML config examples", checked)
+}
+
+// checkExamples validates each YAML document in body, from where ("file" or "file:line"), that has
+// an apiVersion and a kind and does not elide content with "...". A document in invalidExamples
+// must fail; checkExamples adds it to invalid. It returns how many documents it validated.
+func checkExamples(t *testing.T, where, body string, invalid map[string]bool) int {
+	t.Helper()
+
+	var (
+		checked    int
+		file, _, _ = strings.Cut(where, ":")
+		dec        = yaml.NewDecoder(strings.NewReader(body))
+	)
+
+	for {
+		var node yaml.Node
+
+		err := dec.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			return checked
+		}
+
+		if err != nil {
+			if configHeader.MatchString(body) {
+				t.Errorf("%s: parsing YAML: %v", where, err)
+			}
+
+			return checked
+		}
+
+		var doc map[string]any
+		if err := node.Decode(&doc); err != nil || doc["apiVersion"] == nil || doc["kind"] == nil ||
+			elided(&node) {
+			continue
+		}
+
+		checked++
+
+		metadata, _ := doc["metadata"].(map[string]any)
+		name, _ := metadata["name"].(string)
+		err = validateExample(&node, doc)
+
+		switch key := file + " " + name; {
+		case !invalidExamples[key] && err != nil:
+			t.Errorf("%s: %v", where, err)
+		case invalidExamples[key] && err == nil:
+			t.Errorf("%s: config %s passes validation, want it to fail as the docs show", where, name)
+		case invalidExamples[key]:
+			invalid[key] = true
+		}
+	}
 }
 
 func validateExample(node *yaml.Node, doc map[string]any) error {
@@ -186,27 +223,33 @@ func fileExamples(t *testing.T, path string) []yamlExample {
 }
 
 // TestDocsFileExamples checks that fileExamples finds each YAML fence, of
-// three or more backticks and indented or not, and strips the fence's
-// indentation from the block.
+// three or more backticks, indented or not and with or without attributes,
+// and strips the fence's indentation from the block.
 func TestDocsFileExamples(t *testing.T) {
 	t.Parallel()
 
 	doc := strings.Join([]string{
-		"# Title",            // 1
-		"```yaml",            // 2
-		"apiVersion: v1",     // 3
-		"```",                // 4
-		"```go",              // 5
-		"package main",       // 6
-		"```",                // 7
-		"1. A step:",         // 8
-		"",                   // 9
-		"    ```` yml",       // 10
-		"    kind: Topology", // 11
-		"      nested: ```",  // 12
-		"    ````",           // 13
-		"```yaml",            // 14
-		"never closed",       // 15
+		"# Title",             // 1
+		"```yaml",             // 2
+		"apiVersion: v1",      // 3
+		"```",                 // 4
+		"```go",               // 5
+		"package main",        // 6
+		"```",                 // 7
+		"1. A step:",          // 8
+		"",                    // 9
+		"    ```` yml",        // 10
+		"    kind: Topology",  // 11
+		"      nested: ```",   // 12
+		"    ````",            // 13
+		"```yaml title=\"a\"", // 14
+		"kind: Role",          // 15
+		"```",                 // 16
+		"```yamlx",            // 17
+		"not yaml",            // 18
+		"```",                 // 19
+		"```yaml",             // 20
+		"never closed",        // 21
 	}, "\n")
 
 	path := filepath.Join(t.TempDir(), "doc.md")
@@ -222,11 +265,11 @@ func TestDocsFileExamples(t *testing.T) {
 		bodies = append(bodies, ex.body)
 	}
 
-	if diff := cmp.Diff([]string{"2", "10"}, where); diff != "" {
+	if diff := cmp.Diff([]string{"2", "10", "14"}, where); diff != "" {
 		t.Errorf("fileExamples() lines mismatch (-want +got):\n%s", diff)
 	}
 
-	if diff := cmp.Diff([]string{"apiVersion: v1", "kind: Topology\n  nested: ```"}, bodies); diff != "" {
+	if diff := cmp.Diff([]string{"apiVersion: v1", "kind: Topology\n  nested: ```", "kind: Role"}, bodies); diff != "" {
 		t.Errorf("fileExamples() bodies mismatch (-want +got):\n%s", diff)
 	}
 }

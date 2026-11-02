@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -390,7 +391,15 @@ func TestDoctorCommandColors(t *testing.T) { //nolint:paralleltest // sets envir
 			cmd.SetArgs(append([]string{"--skip", "minimega,server", "-x"}, tc.args...))
 			cmd.SetContext(t.Context())
 
-			_ = cmd.Execute()
+			_ = cmd.Execute() // a warning or failure on the host exits non-zero
+
+			if out.Len() == 0 {
+				t.Fatal("doctor output is empty")
+			}
+
+			if slices.Contains(tc.args, "json") && !json.Valid(out.Bytes()) {
+				t.Errorf("doctor -o json output is not JSON:\n%s", out.String())
+			}
 
 			if got := strings.Contains(out.String(), "\x1b["); got != tc.wantColor {
 				t.Errorf("doctor output has escape codes = %v, want %v:\n%q", got, tc.wantColor, out.String())

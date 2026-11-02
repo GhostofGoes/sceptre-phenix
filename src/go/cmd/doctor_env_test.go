@@ -16,6 +16,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/sys/unix"
 	"pgregory.net/rapid"
+
+	"phenix/util/testenv"
 )
 
 // fakeDoctorEnv is a doctorEnv holding only vars, with vim on PATH, the user
@@ -534,7 +536,7 @@ func TestEnvChecksPermissions(t *testing.T) {
 	t.Parallel()
 
 	if os.Geteuid() == 0 {
-		t.Skip("root can read and write any directory")
+		testenv.Skipf(t, "root can read and write any directory")
 	}
 
 	locked := filepath.Join(t.TempDir(), "locked")

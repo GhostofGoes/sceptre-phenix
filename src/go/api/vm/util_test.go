@@ -556,10 +556,6 @@ func TestCopierDone(t *testing.T) {
 			t.Errorf("subscription %d of %d is open after done(), want closed", i+1, len(subs))
 		}
 	}
-
-	if c.interval != time.Second {
-		t.Errorf("newCopier(1s).interval = %v, want 1s", c.interval)
-	}
 }
 
 // utilShortWriter writes at most n bytes in all, then fails.

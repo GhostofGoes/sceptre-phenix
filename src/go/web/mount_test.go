@@ -912,9 +912,18 @@ func TestUnmountVMStates(t *testing.T) {
 					tc.vm, state, users, tc.wantState, tc.wantUsers)
 			}
 
-			got := countAudit(events(), "vm-unmount", tc.wantAudit, map[string]any{"phenix.vm.name": tc.vm})
-			if want := map[bool]int{true: 1, false: 0}[tc.wantAudit != ""]; got != want {
-				t.Errorf("vm-unmount %q audit events = %d, want %d", tc.wantAudit, got, want)
+			want, outcomes := 1, []string{tc.wantAudit}
+			if tc.wantAudit == "" {
+				want, outcomes = 0, []string{"success", "failure"}
+			}
+
+			got := 0
+			for _, outcome := range outcomes {
+				got += countAudit(events(), "vm-unmount", outcome, map[string]any{"phenix.vm.name": tc.vm})
+			}
+
+			if got != want {
+				t.Errorf("vm-unmount %v audit events = %d, want %d", outcomes, got, want)
 			}
 		})
 	}

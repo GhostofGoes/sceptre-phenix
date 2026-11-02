@@ -143,8 +143,9 @@ func TestPlanResume(t *testing.T) {
 	}
 }
 
-// Whatever the VMs' states, a plan re-arms only pending VMs minimega holds unstarted, never with a negative delay,
-// runs post-start apps only when nothing is interrupted, and is interrupted exactly when a pending VM is gone.
+// Whatever the VMs' states, a plan re-arms exactly the pending VMs minimega holds unstarted, a timer VM after the
+// time left to its due time or at once, and a C2-delayed VM only when every VM it waits on is present. It runs the
+// post-start apps only when nothing is interrupted, and is interrupted exactly when a pending VM is gone.
 func TestPlanResumeProperties(t *testing.T) {
 	t.Parallel()
 
@@ -156,30 +157,49 @@ func TestPlanResumeProperties(t *testing.T) {
 
 	rapid.Check(t, func(t *rapid.T) {
 		var (
-			timers = rapid.MapOf(vms, rapid.Map(rapid.IntRange(-120, 120), func(s int) string {
-				return now.Add(time.Duration(s) * time.Second).Format(time.RFC3339Nano)
-			})).Draw(t, "timers")
+			dueIn  = rapid.MapOf(vms, rapid.IntRange(-120, 120)).Draw(t, "dueIn")
 			c2     = rapid.MapOf(vms, rapid.MapOfN(vms, rapid.Bool(), 1, 2)).Draw(t, "c2")
 			states = rapid.MapOf(vms, state).Draw(t, "states")
+			timers = make(map[string]string, len(dueIn))
 		)
 
-		// a VM has one kind of delay
-		for vm := range timers {
+		for vm, s := range dueIn {
+			timers[vm] = now.Add(time.Duration(s) * time.Second).Format(time.RFC3339Nano)
+
+			// a VM has one kind of delay
 			delete(c2, vm)
 		}
 
 		plan := planResume(pendingStatus(timers, c2, true).Status, states, nil, now)
 
-		for vm, delay := range plan.delays {
-			if _, ok := timers[vm]; !ok || states[vm] != mmStateBuilding || delay < 0 {
-				t.Fatalf("plan re-arms %s after %v; pending %t, state %q", vm, delay, ok, states[vm])
+		want := resumePlan{delays: map[string]time.Duration{}, timers: map[string]string{}, c2s: map[string]map[string]bool{}}
+
+		for vm, s := range dueIn {
+			if states[vm] == mmStateBuilding {
+				want.delays[vm] = max(time.Duration(s)*time.Second, 0)
+				want.timers[vm] = timers[vm]
 			}
 		}
 
-		for vm := range plan.c2s {
-			if _, ok := c2[vm]; !ok || states[vm] != mmStateBuilding {
-				t.Fatalf("plan re-arms C2-delayed %s; pending %t, state %q", vm, ok, states[vm])
+		for vm, others := range c2 {
+			present := true
+
+			for other := range others {
+				if _, ok := states[other]; !ok {
+					present = false
+				}
 			}
+
+			if states[vm] == mmStateBuilding && present {
+				want.c2s[vm] = others
+			}
+		}
+
+		opts := cmp.Options{
+			cmp.AllowUnexported(resumePlan{}), cmpopts.EquateEmpty(), cmpopts.IgnoreFields(resumePlan{}, "interrupted", "postStart"),
+		}
+		if diff := cmp.Diff(want, plan, opts); diff != "" {
+			t.Fatalf("planResume() re-armed VMs mismatch (-want +got):\n%s", diff)
 		}
 
 		var gone bool

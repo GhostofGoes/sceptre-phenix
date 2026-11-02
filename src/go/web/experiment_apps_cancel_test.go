@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
@@ -16,6 +17,21 @@ import (
 	"phenix/web/rbac"
 	"phenix/web/weberror"
 )
+
+// receiveTrigger returns the next message on ch, and fails the test if no
+// message comes within a few seconds.
+func receiveTrigger(t *testing.T, ch chan any) any {
+	t.Helper()
+
+	select {
+	case msg := <-ch:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("no trigger-app publication within 5s")
+
+		return nil
+	}
+}
 
 // Canceling a triggered app announces it as canceled, not as a success, so the
 // app is not shown as having run successfully.
@@ -37,7 +53,7 @@ func TestCancelTriggeredAppsPublishesCanceled(t *testing.T) {
 
 	got := make([]app.TriggerPublication, 0, 2)
 	for range 2 {
-		pub, _ := (<-ch).(app.TriggerPublication)
+		pub, _ := receiveTrigger(t, ch).(app.TriggerPublication)
 		got = append(got, pub)
 	}
 
@@ -86,7 +102,7 @@ func TestCancelTriggeredAppsCancelsRuns(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	<-ch
+	receiveTrigger(t, ch)
 
 	polltest.Within(t, "canceling app one's run", func() { <-one.Done() })
 

@@ -151,6 +151,37 @@ func TestRenderRestoresCommands(t *testing.T) {
 
 var markdownLink = regexp.MustCompile(`\]\(([^)#]+)(?:#([^)]+))?\)`)
 
+// hostSpecific returns patterns that match the home directory, user name and host name of this
+// host only where a flag default shows them: as a path or a URL host. A bare word such as "root"
+// or "phenix" can also be in the help text, so it does not count.
+func hostSpecific() []*regexp.Regexp {
+	const nameEnd = `([^A-Za-z0-9._-]|$)`
+
+	var patterns []string
+
+	if home, err := os.UserHomeDir(); err == nil && home != "/" {
+		patterns = append(patterns, regexp.QuoteMeta(home)+nameEnd)
+	}
+
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		patterns = append(patterns, `/(home|Users)/`+regexp.QuoteMeta(u.Username)+nameEnd)
+	}
+
+	if host, err := os.Hostname(); err == nil && host != "" {
+		patterns = append(patterns, `://`+regexp.QuoteMeta(host)+nameEnd)
+	}
+
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		compiled = append(compiled, regexp.MustCompile(p))
+	}
+
+	return compiled
+}
+
+// render gives the same phenix pages on each run, with no path or URL of this host or user in
+// them, links only to generated pages and headings, and the documented store.endpoint default.
+//
 //nolint:paralleltest // renders the shared phenix command tree
 func TestRenderPhenixTree(t *testing.T) {
 	first := renderPages(t, cmd.Root())
@@ -159,23 +190,11 @@ func TestRenderPhenixTree(t *testing.T) {
 		t.Fatalf("render() differs between two runs (-first +second):\n%s", diff)
 	}
 
-	var hostSpecific []string
-
-	if home, err := os.UserHomeDir(); err == nil && home != "/" {
-		hostSpecific = append(hostSpecific, home)
-	}
-
-	if u, err := user.Current(); err == nil && len(u.Username) > 3 {
-		hostSpecific = append(hostSpecific, u.Username)
-	}
-
-	if host, err := os.Hostname(); err == nil && len(host) > 3 {
-		hostSpecific = append(hostSpecific, host)
-	}
+	leaks := hostSpecific()
 
 	for file, p := range first {
-		for _, s := range hostSpecific {
-			if strings.Contains(p.Body, s) {
+		for _, leak := range leaks {
+			if s := leak.FindString(p.Body); s != "" {
 				t.Errorf("render() %s contains %q, which depends on the host or user", file, s)
 			}
 		}

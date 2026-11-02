@@ -502,7 +502,7 @@ func TestListenCheckProperty(t *testing.T) {
 			return
 		}
 
-		name := rapid.StringMatching(`[a-z][a-z0-9-]{0,10}`).Draw(t, "service")
+		name := rapid.OneOf(rapid.Just("http"), rapid.StringMatching(`[a-z][a-z0-9-]{0,10}`)).Draw(t, "service")
 		got := listenCheck(doctorEnvLookupPort, host+":"+name)
 
 		_, err := doctorEnvLookupPort(name)

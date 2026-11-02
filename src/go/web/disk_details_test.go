@@ -65,6 +65,8 @@ func useDetailsDisks(t *testing.T) diskFiles {
 	return files
 }
 
+// A disk's details give its format, partitions, overlays, and the VMs that use
+// it in the experiments the role may get.
 func TestGetDiskDetails(t *testing.T) {
 	files := useDetailsDisks(t)
 	dir := files.dir
@@ -104,6 +106,8 @@ func TestGetDiskDetails(t *testing.T) {
 	}
 }
 
+// The details of a disk are served only for an image that the role may see and
+// that the disk list holds: other requests answer 400, 403 or 404.
 func TestGetDiskDetailsRefuses(t *testing.T) {
 	files := useDetailsDisks(t)
 	outside := files.outside

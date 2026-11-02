@@ -188,24 +188,9 @@ func TestRunVMActionsChecksDisks(t *testing.T) {
 		server   = serveAs(t, "alice", testRole("vms/start", "update", "exp/a", "exp/b")).URL
 	)
 
-	// the test minimega takes no screenshots
-	start := vmActions["start"]
-	screenshot := start.screenshot
-	start.screenshot = ""
+	vmActionsNoScreenshot(t)
 
-	t.Cleanup(func() { start.screenshot = screenshot })
-
-	resp := postVMActions(t, server, "start", "a", "b", "c")
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST start actions = %d, want %d: %s", resp.StatusCode, http.StatusAccepted, readBody(t, resp))
-	}
-
-	var started job.Job
-	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
-		t.Fatalf("decoding the job: %v", err)
-	}
-
-	j := waitJob(t, registry, started.ID)
+	j := vmActionsJob(t, registry, server, "exp", "start", "a", "b", "c")
 
 	wantItems := []job.Item{
 		{
@@ -238,23 +223,9 @@ func TestRunVMActionsChecksOnlyRelaunchedVMs(t *testing.T) {
 		server   = serveAs(t, "alice", testRole("vms/start", "update", "exp/a", "exp/b")).URL
 	)
 
-	start := vmActions["start"]
-	screenshot := start.screenshot
-	start.screenshot = ""
+	vmActionsNoScreenshot(t)
 
-	t.Cleanup(func() { start.screenshot = screenshot })
-
-	resp := postVMActions(t, server, "start", "a", "b")
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST start actions = %d, want %d: %s", resp.StatusCode, http.StatusAccepted, readBody(t, resp))
-	}
-
-	var started job.Job
-	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
-		t.Fatalf("decoding the job: %v", err)
-	}
-
-	j := waitJob(t, registry, started.ID)
+	j := vmActionsJob(t, registry, server, "exp", "start", "a", "b")
 
 	wantItems := []job.Item{
 		{Name: "a", Status: job.ItemSucceeded},

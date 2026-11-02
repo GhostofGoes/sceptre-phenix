@@ -463,10 +463,16 @@ func jobsBrokerClient(t *testing.T, role rbac.Role) func(resource string) []stri
 		broker.Start(background)
 	}()
 
+	t.Cleanup(func() {
+		stopBroker()
+		<-brokerStopped
+	})
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), middleware.ContextKeyRole, role)
 		broker.ServeWS(w, r.WithContext(context.WithValue(ctx, middleware.ContextKeyUser, "alice")))
 	}))
+	t.Cleanup(server.Close)
 
 	// an earlier test's client leaves when this broker reads its unregister, which would hide the new client
 	for deadline := time.Now().Add(5 * time.Second); broker.CurrentStats().Clients > 0 && time.Now().Before(deadline); {
@@ -529,10 +535,6 @@ func jobsBrokerClient(t *testing.T, role rbac.Role) func(resource string) []stri
 
 			time.Sleep(time.Millisecond)
 		}
-
-		server.Close()
-		stopBroker()
-		<-brokerStopped
 	})
 
 	polltest.Until(t, "the broker has the client", func() bool { return broker.CurrentStats().Clients > before })

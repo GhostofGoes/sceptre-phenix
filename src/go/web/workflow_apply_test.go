@@ -10,12 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
 	"strings"
 	"testing"
 	"testing/iotest"
 
 	"github.com/golang/mock/gomock"
+	gocmp "github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
 
 	"phenix/api/experiment"
@@ -316,8 +316,8 @@ func assertWorkflowResult(t *testing.T, rec *httptest.ResponseRecorder, want wor
 		"dryRun":     dryRun,
 	}
 
-	if !reflect.DeepEqual(got, wantBody) {
-		t.Fatalf("expected body %v, got %v", wantBody, got)
+	if diff := gocmp.Diff(wantBody, got); diff != "" {
+		t.Fatalf("body mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -1564,8 +1564,8 @@ func TestApplyWorkflowUpdateWritesExperiment(t *testing.T) {
 		"scenario":                "scn",
 	}
 
-	if !reflect.DeepEqual(written.Metadata.Annotations, wantAnnotations) {
-		t.Errorf("expected annotations %v, got %v", wantAnnotations, written.Metadata.Annotations)
+	if diff := gocmp.Diff(wantAnnotations, written.Metadata.Annotations); diff != "" {
+		t.Errorf("annotations mismatch (-want +got):\n%s", diff)
 	}
 
 	raw, err := json.Marshal(written.Spec)
@@ -1587,8 +1587,8 @@ func TestApplyWorkflowUpdateWritesExperiment(t *testing.T) {
 		Scenario:      storedScenario{Apps: []storedApp{{Name: "app1", Metadata: map[string]any{"from": "base"}}}},
 	}
 
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("expected written spec %+v, got %+v", want, got)
+	if diff := gocmp.Diff(want, got); diff != "" {
+		t.Errorf("written spec mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -1746,8 +1746,10 @@ func TestApplyWorkflowDryRunChecksPendingReferences(t *testing.T) {
 				refs = append(refs, configDryRunPending(t, doc))
 			}
 
-			if tc.wantRefs != nil && !reflect.DeepEqual(refs, tc.wantRefs) {
-				t.Fatalf("pending refs = %q, want %q", refs, tc.wantRefs)
+			if tc.wantRefs != nil {
+				if diff := gocmp.Diff(tc.wantRefs, refs); diff != "" {
+					t.Fatalf("pending refs mismatch (-want +got):\n%s", diff)
+				}
 			}
 
 			assertPendingApplyDryRun(t, body, refs, tc.wantCause)
@@ -1819,8 +1821,8 @@ func TestApplyWorkflowDryRunChecksPendingIncludes(t *testing.T) {
 				refs = append(refs, configDryRunPending(t, doc))
 			}
 
-			if !reflect.DeepEqual(refs, tc.wantRefs) {
-				t.Fatalf("pending refs = %q, want %q", refs, tc.wantRefs)
+			if diff := gocmp.Diff(tc.wantRefs, refs); diff != "" {
+				t.Fatalf("pending refs mismatch (-want +got):\n%s", diff)
 			}
 
 			assertPendingApplyDryRun(t, body, refs, tc.wantCause)

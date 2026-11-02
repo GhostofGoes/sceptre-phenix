@@ -81,7 +81,10 @@ func runningStageExperiment(t *testing.T, appNames ...string) *types.Experiment 
 	m := store.NewMockStore(ctrl)
 	m.EXPECT().Get(gomock.Any()).Return(errors.New("store unavailable")).AnyTimes()
 
+	oldStore := store.DefaultStore
 	store.DefaultStore = m //nolint:reassign // monkey patching for test
+
+	t.Cleanup(func() { store.DefaultStore = oldStore }) //nolint:reassign // restore the patched store
 
 	appConfigs := make([]map[string]any, 0, len(appNames))
 	for _, name := range appNames {

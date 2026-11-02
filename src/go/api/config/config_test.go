@@ -16,6 +16,7 @@ import (
 	"phenix/types"
 )
 
+// List refuses a kind that is not a config kind.
 func TestListError(t *testing.T) {
 	configs := store.Configs(
 		[]store.Config{
@@ -29,16 +30,11 @@ func TestListError(t *testing.T) {
 		},
 	)
 
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	m := store.NewMockStore(ctrl)
+	m := useMockStore(t)
 	m.EXPECT().
 		List(gomock.Eq("Topology"), gomock.Eq("Scenario"), gomock.Eq("Experiment"), gomock.Eq("Image")).
 		Return(configs, nil).
 		AnyTimes()
-
-	store.DefaultStore = m //nolint:reassign // mocking
 
 	_, err := config.List("blech")
 	if err == nil {
@@ -47,6 +43,7 @@ func TestListError(t *testing.T) {
 	}
 }
 
+// Create expands ${BRANCH_NAME} in the YAML it is given.
 func TestCreateEnv(t *testing.T) {
 	expected := store.Config{
 		Version: "phenix.sandia.gov/v1",
@@ -63,13 +60,8 @@ metadata:
   name: ${BRANCH_NAME}-test-experiment
 `
 
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	m := store.NewMockStore(ctrl)
+	m := useMockStore(t)
 	m.EXPECT().Create(gomock.Eq(&expected)).Return(nil).AnyTimes()
-
-	store.DefaultStore = m //nolint:reassign // mocking
 
 	t.Setenv("BRANCH_NAME", "foobar")
 	options := []config.CreateOption{config.CreateFromYAML([]byte(cfg))}
@@ -157,10 +149,11 @@ func TestUpdateIfRevisionConflicts(t *testing.T) {
 // config edit refuses to save over a config that changed while it was being
 // edited, whatever revision the edited YAML gives.
 func TestEditIfRevisionConflicts(t *testing.T) {
-	// the "editor" sets the revision in the YAML to the config's new one
+	// the "editor" sets the revision in the YAML to the config's new one, and fails if the YAML has no revision 1
 	editor := filepath.Join(t.TempDir(), "editor")
 
-	script := "#!/bin/sh\nsed 's/revision: 1$/revision: 2/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
+	script := "#!/bin/sh\ngrep -q 'revision: 1$' \"$1\" || exit 1\n" +
+		"sed 's/revision: 1$/revision: 2/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
 	if err := os.WriteFile(editor, []byte(script), 0o700); err != nil {
 		t.Fatalf("writing the test editor: %v", err)
 	}

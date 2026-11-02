@@ -16,14 +16,20 @@ func TestUnsubscribeReleasesPublishers(t *testing.T) {
 
 	const topic = "unsubscribe-test"
 
+	first := Subscribe(topic)
 	ch := Subscribe(topic)
 	published := make(chan struct{})
+
+	t.Cleanup(func() { Unsubscribe(topic, first) })
 
 	go func() {
 		defer close(published)
 
 		Publish(topic, "first") // no one reads ch
 	}()
+
+	// Publish sends in subscription order, so it now waits on ch.
+	<-first
 
 	Unsubscribe(topic, ch)
 
@@ -40,6 +46,15 @@ func TestUnsubscribeReleasesPublishers(t *testing.T) {
 
 		Publish(topic, "second")
 	}()
+
+	select {
+	case got := <-first:
+		if got != "second" {
+			t.Errorf("remaining subscriber got %v, want second", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("remaining subscriber got nothing for 5s, want second")
+	}
 
 	select {
 	case <-done:

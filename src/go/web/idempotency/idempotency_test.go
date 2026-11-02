@@ -51,11 +51,19 @@ type answer struct {
 	Body     string
 }
 
-// send sends a POST of body to target as user, with key when it is set.
-func send(t interface{ Helper() }, h http.Handler, user, target, key, body string) answer {
+// send sends a POST of body to target as alice, with key when it is set.
+func send(t interface{ Helper() }, h http.Handler, target, key, body string) answer {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	return sendMethod(t, h, http.MethodPost, "alice", target, key, body)
+}
+
+// sendMethod sends a request of method with body to target as user, with key
+// when it is set.
+func sendMethod(t interface{ Helper() }, h http.Handler, method, user, target, key, body string) answer {
+	t.Helper()
+
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), middleware.ContextKeyUser, user))
 
 	if key != "" {
@@ -83,7 +91,7 @@ func TestRetryReplaysTheFirstAnswer(t *testing.T) {
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
 	)
 
-	first := send(t, h, "alice", actions, "k1", "start")
+	first := send(t, h, actions, "k1", "start")
 	want := answer{Status: http.StatusAccepted, Location: "/api/v1/jobs/1", Body: `{"id":"1","body":"start"}`}
 
 	if diff := cmp.Diff(want, first); diff != "" {
@@ -91,7 +99,7 @@ func TestRetryReplaysTheFirstAnswer(t *testing.T) {
 	}
 
 	want.Replayed = "true"
-	if diff := cmp.Diff(want, send(t, h, "alice", actions, "k1", "start")); diff != "" {
+	if diff := cmp.Diff(want, send(t, h, actions, "k1", "start")); diff != "" {
 		t.Errorf("retried POST with Idempotency-Key k1 mismatch (-want +got):\n%s", diff)
 	}
 
@@ -100,6 +108,8 @@ func TestRetryReplaysTheFirstAnswer(t *testing.T) {
 	}
 }
 
+// A key replays only for the same user, method and path; any other request
+// with that key starts a new job.
 func TestKeysAreScopedToUserMethodAndPath(t *testing.T) {
 	t.Parallel()
 
@@ -108,24 +118,27 @@ func TestKeysAreScopedToUserMethodAndPath(t *testing.T) {
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
 	)
 
-	send(t, h, "alice", actions, "k1", "start")
+	send(t, h, actions, "k1", "start")
 
 	tests := []struct {
-		name, user, target, key string
-		want                    string
+		name, method, user, target, key string
+		want                            string
 	}{
-		{name: "another user's same key", user: "bob", target: actions, key: "k1", want: "/api/v1/jobs/2"},
-		{name: "the same key on another path", user: "alice", target: "/api/v1/experiments/other/vms/actions", key: "k1",
-			want: "/api/v1/jobs/3"},
-		{name: "another key", user: "alice", target: actions, key: "k2", want: "/api/v1/jobs/4"},
-		{name: "no key", user: "alice", target: actions, key: "", want: "/api/v1/jobs/5"},
+		{name: "another user's same key", method: http.MethodPost, user: "bob", target: actions, key: "k1",
+			want: "/api/v1/jobs/2"},
+		{name: "the same key on another path", method: http.MethodPost, user: "alice",
+			target: "/api/v1/experiments/other/vms/actions", key: "k1", want: "/api/v1/jobs/3"},
+		{name: "the same key with another method", method: http.MethodDelete, user: "alice", target: actions, key: "k1",
+			want: "/api/v1/jobs/4"},
+		{name: "another key", method: http.MethodPost, user: "alice", target: actions, key: "k2", want: "/api/v1/jobs/5"},
+		{name: "no key", method: http.MethodPost, user: "alice", target: actions, key: "", want: "/api/v1/jobs/6"},
 	}
 
 	for _, tt := range tests {
-		got := send(t, h, tt.user, tt.target, tt.key, "start")
+		got := sendMethod(t, h, tt.method, tt.user, tt.target, tt.key, "start")
 		if got.Status != http.StatusAccepted || got.Location != tt.want || got.Replayed != "" {
-			t.Errorf("%s: POST = %d at %q (replayed %q), want a new job at %s", tt.name, got.Status, got.Location, got.Replayed,
-				tt.want)
+			t.Errorf("%s: %s = %d at %q (replayed %q), want a new job at %s", tt.name, tt.method, got.Status, got.Location,
+				got.Replayed, tt.want)
 		}
 	}
 }
@@ -138,7 +151,7 @@ func TestKeyReusedForAnotherRequestIsRefused(t *testing.T) {
 		h    = New(DefaultTTL, DefaultMaxEntries, DefaultMaxBytes).Wrap(&jobs)
 	)
 
-	send(t, h, "alice", actions+"?disk=a", "k1", "start")
+	send(t, h, actions+"?disk=a", "k1", "start")
 
 	for name, target := range map[string]string{"another body": actions + "?disk=a", "another query": actions + "?disk=b"} {
 		body := "start"
@@ -146,7 +159,7 @@ func TestKeyReusedForAnotherRequestIsRefused(t *testing.T) {
 			body = "stop"
 		}
 
-		if got := send(t, h, "alice", target, "k1", body); got.Status != http.StatusUnprocessableEntity {
+		if got := send(t, h, target, "k1", body); got.Status != http.StatusUnprocessableEntity {
 			t.Errorf("POST of %s with a used Idempotency-Key = %d, want %d", name, got.Status, http.StatusUnprocessableEntity)
 		}
 	}
@@ -166,10 +179,10 @@ func TestOnlyAcceptedAnswersAreKept(t *testing.T) {
 
 	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError} {
 		target := actions + "?status=" + strconv.Itoa(status)
-		send(t, h, "alice", target, "k-"+strconv.Itoa(status), "start")
+		send(t, h, target, "k-"+strconv.Itoa(status), "start")
 
 		// the retry is served again rather than answered from the first
-		if got := send(t, h, "alice", target, "k-"+strconv.Itoa(status), "start"); got.Status != status || got.Replayed != "" {
+		if got := send(t, h, target, "k-"+strconv.Itoa(status), "start"); got.Status != status || got.Replayed != "" {
 			t.Errorf("retry of a POST answered %d = %d (replayed %q), want it served again", status, got.Status, got.Replayed)
 		}
 	}
@@ -190,11 +203,11 @@ func TestKeyBeingServedIsConflict(t *testing.T) {
 		done = make(chan answer)
 	)
 
-	go func() { done <- send(t, h, "alice", actions, "k1", "start") }()
+	go func() { done <- send(t, h, actions, "k1", "start") }()
 
 	<-entered
 
-	if got := send(t, h, "alice", actions, "k1", "start"); got.Status != http.StatusConflict {
+	if got := send(t, h, actions, "k1", "start"); got.Status != http.StatusConflict {
 		t.Errorf("POST with the Idempotency-Key of a request still being served = %d, want %d", got.Status, http.StatusConflict)
 	}
 
@@ -217,15 +230,15 @@ func TestKeysExpire(t *testing.T) {
 
 	store.now = func() time.Time { return now }
 
-	send(t, h, "alice", actions, "k1", "start")
+	send(t, h, actions, "k1", "start")
 
 	now = now.Add(59 * time.Minute)
-	if got := send(t, h, "alice", actions, "k1", "start"); got.Replayed != "true" {
+	if got := send(t, h, actions, "k1", "start"); got.Replayed != "true" {
 		t.Errorf("retry within the TTL replayed = %q, want true", got.Replayed)
 	}
 
 	now = now.Add(time.Minute)
-	if got := send(t, h, "alice", actions, "k1", "start"); got.Replayed != "" || got.Location != "/api/v1/jobs/2" {
+	if got := send(t, h, actions, "k1", "start"); got.Replayed != "" || got.Location != "/api/v1/jobs/2" {
 		t.Errorf("retry after the TTL = %q (replayed %q), want a new job", got.Location, got.Replayed)
 	}
 }
@@ -256,14 +269,14 @@ func TestStoreIsBounded(t *testing.T) {
 
 			// each answer is 25 bytes, so a third answer is one too many either way
 			for _, key := range []string{"k1", "k2", "k3"} {
-				send(t, h, "alice", actions, key, "start")
+				send(t, h, actions, key, "start")
 			}
 
-			if got := send(t, h, "alice", actions, "k1", "start"); got.Replayed != "" {
+			if got := send(t, h, actions, "k1", "start"); got.Replayed != "" {
 				t.Errorf("retry of the oldest key once the store is full replayed = %q, want it forgotten", got.Replayed)
 			}
 
-			if got := send(t, h, "alice", actions, "k3", "start"); got.Replayed != "true" {
+			if got := send(t, h, actions, "k3", "start"); got.Replayed != "true" {
 				t.Errorf("retry of the newest key replayed = %q, want true", got.Replayed)
 			}
 
@@ -287,7 +300,7 @@ func TestInvalidKeyIsRefused(t *testing.T) {
 	)
 
 	for _, key := range []string{strings.Repeat("k", MaxKeyLength+1), "tab\tkey", "café"} {
-		if got := send(t, h, "alice", actions, key, "start"); got.Status != http.StatusBadRequest {
+		if got := send(t, h, actions, key, "start"); got.Status != http.StatusBadRequest {
 			t.Errorf("POST with Idempotency-Key %q = %d, want %d", key, got.Status, http.StatusBadRequest)
 		}
 	}
@@ -333,7 +346,7 @@ func TestOneJobPerKeyProperty(t *testing.T) {
 		for range rapid.IntRange(1, 20).Draw(t, "requests") {
 			key := rapid.SampledFrom([]string{"a", "b", "c"}).Draw(t, "key")
 			body := rapid.SampledFrom([]string{"start", "stop"}).Draw(t, "body")
-			got := send(t, h, "alice", actions, key, body)
+			got := send(t, h, actions, key, body)
 
 			kept, seen := first[key]
 
@@ -405,7 +418,7 @@ func TestOversizedBodyIsServedWithoutTheKey(t *testing.T) {
 	)
 
 	for range 2 {
-		if got := send(t, h, "alice", actions, "k1", body); got.Status != http.StatusAccepted || got.Replayed != "" {
+		if got := send(t, h, actions, "k1", body); got.Status != http.StatusAccepted || got.Replayed != "" {
 			t.Errorf("POST of a %d byte body = %d (replayed %q), want it served", len(body), got.Status, got.Replayed)
 		}
 	}
@@ -466,12 +479,12 @@ func TestRecordedAnswers(t *testing.T) {
 					}))
 			)
 
-			first := send(t, h, "alice", actions, "k1", "start")
+			first := send(t, h, actions, "k1", "start")
 			if first.Status != test.wantStatus {
 				t.Errorf("first POST = %d, want %d", first.Status, test.wantStatus)
 			}
 
-			retry := send(t, h, "alice", actions, "k1", "start")
+			retry := send(t, h, actions, "k1", "start")
 			if replayed := retry.Replayed == "true"; replayed != test.wantReplay || retry.Body != first.Body {
 				t.Errorf("retried POST replayed %t with a %d byte body, want replayed %t with the first's %d bytes",
 					replayed, len(retry.Body), test.wantReplay, len(first.Body))
@@ -521,7 +534,7 @@ func TestKeyExpiringWhileServed(t *testing.T) {
 	now.Store(&start)
 	store.now = func() time.Time { return *now.Load() }
 
-	go func() { done <- send(t, h, "alice", actions, "held", "start") }()
+	go func() { done <- send(t, h, actions, "held", "start") }()
 
 	<-entered
 
@@ -529,7 +542,7 @@ func TestKeyExpiringWhileServed(t *testing.T) {
 	now.Store(&later)
 
 	// another request expires the held key
-	send(t, h, "alice", actions, "other", "start")
+	send(t, h, actions, "other", "start")
 
 	close(release)
 
@@ -539,7 +552,7 @@ func TestKeyExpiringWhileServed(t *testing.T) {
 
 	go func() { <-entered }()
 
-	if got := send(t, h, "alice", actions, "held", "start"); got.Replayed != "" || got.Location != "/api/v1/jobs/3" {
+	if got := send(t, h, actions, "held", "start"); got.Replayed != "" || got.Location != "/api/v1/jobs/3" {
 		t.Errorf("retry of a key that expired while served = %q (replayed %q), want a new job", got.Location, got.Replayed)
 	}
 }
@@ -557,16 +570,16 @@ func TestKeysBeingServedAreNotEvicted(t *testing.T) {
 		done    = make(chan answer)
 	)
 
-	go func() { done <- send(t, h, "alice", actions, "held", "start") }()
+	go func() { done <- send(t, h, actions, "held", "start") }()
 
 	<-entered
 
 	// the store is full of the held key, so this answer is the one evicted
-	if got := send(t, h, "alice", actions, "other", "start"); got.Status != http.StatusAccepted {
+	if got := send(t, h, actions, "other", "start"); got.Status != http.StatusAccepted {
 		t.Errorf("POST beside a held key = %d, want %d", got.Status, http.StatusAccepted)
 	}
 
-	if got := send(t, h, "alice", actions, "held", "start"); got.Status != http.StatusConflict {
+	if got := send(t, h, actions, "held", "start"); got.Status != http.StatusConflict {
 		t.Errorf("POST of the held key = %d, want %d", got.Status, http.StatusConflict)
 	}
 
@@ -574,11 +587,11 @@ func TestKeysBeingServedAreNotEvicted(t *testing.T) {
 
 	first := <-done
 
-	if got := send(t, h, "alice", actions, "held", "start"); got.Replayed != "true" || got.Location != first.Location {
+	if got := send(t, h, actions, "held", "start"); got.Replayed != "true" || got.Location != first.Location {
 		t.Errorf("retry of the held key = %q (replayed %q), want %q replayed", got.Location, got.Replayed, first.Location)
 	}
 
-	if got := send(t, h, "alice", actions, "other", "start"); got.Replayed != "" {
+	if got := send(t, h, actions, "other", "start"); got.Replayed != "" {
 		t.Errorf("retry of the evicted key replayed = %q, want it served again", got.Replayed)
 	}
 }

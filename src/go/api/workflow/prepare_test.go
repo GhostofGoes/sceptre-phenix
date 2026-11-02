@@ -14,6 +14,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"pgregory.net/rapid"
 
+	"phenix/api/experiment"
 	"phenix/api/workflow"
 	"phenix/store"
 	"phenix/types"
@@ -1147,6 +1148,12 @@ func TestCheckBridge(t *testing.T) {
 			bridge: "br1",
 			action: workflow.ActionUpdateAndStart,
 			exp:    "exp1",
+			mode:   auto,
+		},
+		{
+			name:   "auto mode and an experiment name at the length limit",
+			action: workflow.ActionCreateAndStart,
+			exp:    strings.Repeat("e", experiment.MaxBridgeNameLength),
 			mode:   auto,
 		},
 		{

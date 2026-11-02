@@ -5,11 +5,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"pgregory.net/rapid"
+
+	"phenix/util/mm/mmtest"
 )
 
 // Cloning and renaming an image never replace a file, whether the kernel
@@ -111,4 +116,62 @@ func dirFiles(t *testing.T, dir string) map[string]string {
 	}
 
 	return files
+}
+
+// ResizeDisk sends minimega a size only when the whole size is an optionally signed integer and a unit, so the size
+// cannot add words or commands to the minimega command.
+func TestResizeDiskChecksTheSize(t *testing.T) {
+	received := mmtest.Use(t, nil)
+
+	tests := map[string]bool{
+		"10G": true, "+1M": true, "-2K": true, "3T": true, "4P": true, "5E": true,
+		"": false, "10": false, "G": false, "1g": false, "+G": false, "1.5G": false, "10G extra": false,
+		"1G\nvm kill all": false, " 1G": false, "1G ": false, "1G\n": false, "1GB": false, "++1G": false,
+	}
+
+	var want []string
+
+	for size, ok := range tests {
+		err := MMDiskFiles{}.ResizeDisk("/images/a.qc2", size)
+		if ok {
+			want = append(want, "disk resize /images/a.qc2 "+size)
+		}
+
+		if (err == nil) != ok {
+			t.Errorf("ResizeDisk(/images/a.qc2, %q) error = %v, want an error only for an invalid size", size, err)
+		}
+	}
+
+	if diff := cmp.Diff(want, mmtest.Bases(received()), cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("ResizeDisk commands sent to minimega mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// diskSizeRe accepts a size only when it is an optionally signed integer and a unit, as a model of the format says.
+func TestDiskSizeReMatchesItsFormat(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(rt *rapid.T) {
+		size := rapid.OneOf(
+			rapid.StringMatching(`[+-]{0,2}[0-9]{0,4}[KMGTPEkmgB. ]{0,2}[\n;a-z]?`),
+			rapid.String(),
+		).Draw(rt, "size")
+
+		if got, want := diskSizeRe.MatchString(size), actionsValidSize(size); got != want {
+			rt.Fatalf("diskSizeRe.MatchString(%q) = %t, want %t", size, got, want)
+		}
+	})
+}
+
+// actionsValidSize is a model of the size format: an optional sign, one or more digits, and one unit letter.
+func actionsValidSize(size string) bool {
+	if strings.HasPrefix(size, "+") || strings.HasPrefix(size, "-") {
+		size = size[1:]
+	}
+
+	if len(size) < 2 || strings.IndexByte("KMGTPE", size[len(size)-1]) < 0 {
+		return false
+	}
+
+	return strings.Trim(size[:len(size)-1], "0123456789") == ""
 }

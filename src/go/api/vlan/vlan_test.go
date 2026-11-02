@@ -56,6 +56,8 @@ func newExperiment(name string, aliases map[string]int) *types.Experiment {
 	return exp
 }
 
+// AliasID gives the VLAN ID of an alias from the spec of a stopped experiment
+// and from the status of a running one, and fails for an alias it cannot give.
 func TestAliasID(t *testing.T) {
 	stopped := newExperiment("stopped", map[string]int{"MYVLAN": 105, "AUTO": 0})
 

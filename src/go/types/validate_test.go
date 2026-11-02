@@ -220,8 +220,8 @@ func TestValidateConfigSpecRejectsWorkflowKind(t *testing.T) {
 
 // TestValidateConfigSpecUsesOwnVersion proves a config validates against the
 // schema file of its own apiVersion: each kind has a schema at its stored
-// version, and a kind at a version whose file does not hold it is a lookup
-// failure, not a validation failure.
+// version, and a kind at a version whose file does not hold it gives
+// ErrValidationFailed that wraps version.ErrInvalidKind.
 func TestValidateConfigSpecUsesOwnVersion(t *testing.T) {
 	specs := map[string]map[string]any{
 		"Topology":   {"nodes": []any{}},

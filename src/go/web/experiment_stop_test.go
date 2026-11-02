@@ -1,8 +1,11 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"sync/atomic"
@@ -221,22 +224,45 @@ func TestFailedStopWithNothingToResumeKeepsPeriodicApps(t *testing.T) {
 		t.Fatalf("after a failed stop: %d cancelers, waiter %t; want 1 (periodic apps) and a waiter", cancels, wg != nil)
 	}
 
-	forced := make(chan int, 1)
+	forced := make(chan error, 1)
 
-	go func() {
-		resp := do(t, http.MethodPost, stop+"?force=true", "")
-		_ = readBody(t, resp)
-		forced <- resp.StatusCode
-	}()
+	go func() { forced <- postStatus(t.Context(), stop+"?force=true", http.StatusOK) }()
 
 	select {
-	case code := <-forced:
-		if code != http.StatusOK {
-			t.Errorf("POST stop?force=true = %d, want %d", code, http.StatusOK)
+	case err := <-forced:
+		if err != nil {
+			t.Error(err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("POST stop?force=true did not return; the periodic apps were not canceled")
 	}
+}
+
+// postStatus sends an empty POST to url and reports an error unless the
+// status is want. Unlike do it may run outside the test's goroutine.
+func postStatus(ctx context.Context, url string, want int) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("making POST %s: %w", url, err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", url, err)
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading POST %s: %w", url, err)
+	}
+
+	if resp.StatusCode != want {
+		return fmt.Errorf("POST %s = %d, want %d: %s", url, resp.StatusCode, want, body)
+	}
+
+	return nil
 }
 
 // dropCanceler cancels and removes only the handle it is given; every other

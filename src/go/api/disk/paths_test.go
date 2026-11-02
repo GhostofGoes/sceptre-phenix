@@ -12,6 +12,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/sandia-minimega/minimega/v2/pkg/minicli"
 	"pgregory.net/rapid"
+
+	"phenix/util/diskchain"
 )
 
 // The disk actions act on images inside the files directory, except in the
@@ -363,9 +365,18 @@ func TestUsableImage(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"/dev/null", "/proc/self/exe", "/run/a.qc2", "/sys/a.qc2"} {
+	// most of these paths do not exist, so the error shows that the system directory check refused them
+	for _, path := range []string{"/dev/null", "/proc/self/exe", "/run/a.qc2", "/sys/a.qc2", "/dev/../dev/a.qc2"} {
 		if usableImage(path) {
 			t.Errorf("usableImage(%s) = true, want false for a system directory", path)
+		}
+
+		if f, err := openRegular(path); !errors.Is(err, diskchain.ErrSystemDir) {
+			if f != nil {
+				_ = f.Close()
+			}
+
+			t.Errorf("openRegular(%s) error = %v, want %v", path, err, diskchain.ErrSystemDir)
 		}
 	}
 }

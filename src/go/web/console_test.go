@@ -178,6 +178,8 @@ func echoTestConsole(t *testing.T, ws *websocket.Conn, line string) {
 	readConsoleUntil(t, ws, line+"\r\n"+line+"\r\n")
 }
 
+// A console history keeps the newest output that fits, and replays it from the
+// start of a line.
 func TestConsoleHistory(t *testing.T) {
 	t.Parallel()
 
@@ -216,6 +218,8 @@ func consoleHistoryModel(all []byte, size int) []byte {
 	return kept
 }
 
+// A console history of any size replays what a model of it keeps, after each
+// write.
 func TestConsoleHistoryProperties(t *testing.T) {
 	t.Parallel()
 
@@ -238,6 +242,8 @@ func TestConsoleHistoryProperties(t *testing.T) {
 	})
 }
 
+// A websocket that attaches to a console gets the earlier output, and each
+// websocket gets the new output.
 func TestConsoleReplaysOutputToAnotherWebSocket(t *testing.T) {
 	registry := useTestConsoles(t, time.Minute)
 	api := consoleAPI(t, "alice", consoleRole())
@@ -384,6 +390,7 @@ func TestConsoleDropsASlowWebSocket(t *testing.T) {
 	}
 }
 
+// A console ends when no websocket attaches to it within its grace period.
 func TestConsoleEndsIfNoWebSocketEverAttaches(t *testing.T) {
 	registry := useTestConsoles(t, 100*time.Millisecond)
 	pid := createTestConsole(t, consoleAPI(t, "alice", consoleRole()))
@@ -391,6 +398,8 @@ func TestConsoleEndsIfNoWebSocketEverAttaches(t *testing.T) {
 	waitConsoleEnded(t, registry.lookup(pid))
 }
 
+// A console ends when its process exits: its websocket closes, the end is
+// audited, and the console refuses a new websocket.
 func TestConsoleEndsWhenItsProcessExits(t *testing.T) {
 	registry := useTestConsoles(t, time.Minute)
 	api := consoleAPI(t, "alice", consoleRole())
@@ -439,6 +448,8 @@ func TestConsoleEndsWhenItsProcessExits(t *testing.T) {
 	}
 }
 
+// A DELETE ends the console before it answers, audits the end, and answers
+// 404 for that console after.
 func TestDeleteConsoleEndsIt(t *testing.T) {
 	registry := useTestConsoles(t, time.Minute)
 	api := consoleAPI(t, "alice", consoleRole())
@@ -471,6 +482,8 @@ func TestDeleteConsoleEndsIt(t *testing.T) {
 	}
 }
 
+// Only the user who started a console may use it: the requests of other users
+// answer 404 and are audited.
 func TestConsoleIsOnlyItsOwners(t *testing.T) {
 	registry := useTestConsoles(t, time.Minute)
 
@@ -516,6 +529,8 @@ func TestConsoleIsOnlyItsOwners(t *testing.T) {
 	}
 }
 
+// The console routes refuse, and audit, a role that does not have the
+// permission each route needs.
 func TestConsoleRoutesNeedPermission(t *testing.T) {
 	useTestConsoles(t, time.Minute)
 
@@ -558,6 +573,7 @@ func TestConsoleRoutesNeedPermission(t *testing.T) {
 	}
 }
 
+// A POST that starts a console answers 405 when the console is disabled.
 func TestCreateConsoleNeedsTheConsoleEnabled(t *testing.T) {
 	useTestConsoles(t, time.Minute)
 

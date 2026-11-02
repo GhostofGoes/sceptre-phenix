@@ -234,6 +234,9 @@ func TestExperimentDeleteSkipsRunningExperimentWithoutForce(t *testing.T) {
 		return nil
 	}).Times(1)
 
+	originalStore := store.DefaultStore
+	t.Cleanup(func() { store.DefaultStore = originalStore }) //nolint:reassign // restore test double
+
 	store.DefaultStore = m //nolint:reassign // monkey patching for test
 
 	root := &cobra.Command{Use: "phenix", SilenceUsage: true}
@@ -279,6 +282,9 @@ func TestExperimentDeleteForceStopsRunningExperimentBeforeDeleting(t *testing.T)
 	}).Times(1)
 	m.EXPECT().Delete(gomock.Any()).Return(nil).Times(1)
 
+	originalStore := store.DefaultStore
+	t.Cleanup(func() { store.DefaultStore = originalStore }) //nolint:reassign // restore test double
+
 	store.DefaultStore = m //nolint:reassign // monkey patching for test
 
 	root := &cobra.Command{Use: "phenix", SilenceUsage: true}
@@ -308,7 +314,6 @@ func TestExperimentStopKeepInjectionSnapshotsFlag(t *testing.T) {
 		t.Fatalf("expected flag to default to false, got %q", flag.DefValue)
 	}
 	if flag.Shorthand != "K" {
-		t.Fatalf("expected flag shorthand to be %q, got %q", "K", flag.Shorthand)
 		t.Fatalf("expected flag shorthand to be %q, got %q", "K", flag.Shorthand)
 	}
 }

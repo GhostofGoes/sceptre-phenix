@@ -81,18 +81,69 @@ func TestUpdateDoesNotDuplicateScriptOrder(t *testing.T) {
 }
 
 type setupImageTest struct {
-	name           string
-	img            v1.Image
-	wantMirror     string
-	wantComponents []string
-	wantPackages   []string
-	wantNoPackages []string
+	name            string
+	img             v1.Image
+	wantMirror      string
+	wantComponents  []string
+	wantPackages    []string
+	wantNoPackages  []string
+	wantAllPackages []string
+	wantScriptOrder []string
 }
 
+// SetupImage picks the mirror and components for the release, adds the packages
+// and scripts of the variant, and adds the scripts in ScriptPaths last.
 func TestSetupImage(t *testing.T) {
 	const ubuntuMirror = "http://us.archive.ubuntu.com/ubuntu"
 
+	minbaseScripts := []string{
+		"POSTBUILD_APT_CLEANUP", "POSTBUILD_NO_ROOT_PASSWD", "POSTBUILD_PHENIX_HOSTNAME", "POSTBUILD_PHENIX_BASE",
+	}
+
+	script := t.TempDir() + "/extra.sh"
+	if err := os.WriteFile(script, []byte("echo extra"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", script, err)
+	}
+
 	tests := []setupImageTest{
+		{
+			name:            "mingui kali adds the kali desktop and its script",
+			img:             v1.Image{Variant: "mingui", Release: "kali-rolling", Mirror: ubuntuMirror},
+			wantMirror:      "http://http.kali.org/kali",
+			wantComponents:  image.KaliComponents,
+			wantAllPackages: slices.Concat(image.DefaultPackages, image.KaliPackages, image.KaliMinGUIPackages),
+			wantScriptOrder: slices.Concat([]string{"POSTBUILD_KALI_GUI"}, minbaseScripts),
+		},
+		{
+			name:            "mingui debian adds the xfce desktop and the gui script",
+			img:             v1.Image{Variant: "mingui", Release: "bookworm", Mirror: ubuntuMirror},
+			wantMirror:      "http://ftp.us.debian.org/debian",
+			wantComponents:  image.DebianComponents,
+			wantAllPackages: slices.Concat(image.DefaultPackages, image.DebianPackages, image.DebianMinGUIPackages),
+			wantScriptOrder: slices.Concat([]string{"POSTBUILD_GUI"}, minbaseScripts),
+		},
+		{
+			name:            "mingui ubuntu adds the xubuntu desktop and the gui script",
+			img:             v1.Image{Variant: "mingui", Release: "noble", Mirror: ubuntuMirror},
+			wantMirror:      ubuntuMirror,
+			wantComponents:  image.UbuntuComponents,
+			wantAllPackages: slices.Concat(image.DefaultPackages, image.UbuntuPackages, image.UbuntuMinGUIPackages),
+			wantScriptOrder: slices.Concat([]string{"POSTBUILD_GUI"}, minbaseScripts),
+		},
+		{
+			name: "SkipDefaultPackages keeps only the given and release packages",
+			img: v1.Image{
+				Variant: "minbase", Release: "bookworm", Mirror: ubuntuMirror,
+				Packages: []string{"git"}, SkipDefaultPackages: true,
+			},
+			wantAllPackages: slices.Concat([]string{"git"}, image.DebianPackages),
+			wantScriptOrder: minbaseScripts,
+		},
+		{
+			name:            "ScriptPaths are read and run after the variant scripts",
+			img:             v1.Image{Variant: "minbase", Release: "noble", Mirror: ubuntuMirror, ScriptPaths: []string{script}},
+			wantScriptOrder: slices.Concat(minbaseScripts, []string{script}),
+		},
 		{
 			name:           "ubuntu keeps default mirror and ubuntu components",
 			img:            v1.Image{Variant: "minbase", Release: "noble", Mirror: ubuntuMirror},
@@ -141,6 +192,45 @@ func TestSetupImage(t *testing.T) {
 			checkSetupImage(t, tt, img)
 		})
 	}
+
+	img := v1.Image{Variant: "minbase", Release: "noble", ScriptPaths: []string{script}}
+	if err := image.SetupImage(&img); err != nil {
+		t.Fatalf("SetupImage(ScriptPaths) error = %v", err)
+	}
+
+	if got := img.Scripts[script]; got != "echo extra" {
+		t.Errorf("SetupImage(ScriptPaths) Scripts[%q] = %q, want %q", script, got, "echo extra")
+	}
+}
+
+// SetupImage refuses a variant that it does not know and a script path that it
+// cannot read.
+func TestSetupImageErrors(t *testing.T) {
+	missing := t.TempDir() + "/missing.sh"
+
+	tests := map[string]struct {
+		img     v1.Image
+		wantErr error
+	}{
+		"unknown variant": {img: v1.Image{Variant: "maxgui", Release: "noble"}},
+		"empty variant":   {img: v1.Image{Release: "noble"}},
+		"missing script":  {img: v1.Image{Variant: "minbase", Release: "noble", ScriptPaths: []string{missing}}, wantErr: fs.ErrNotExist},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			img := tc.img
+
+			err := image.SetupImage(&img)
+			if err == nil {
+				t.Fatalf("SetupImage(%+v) error = nil, want an error", tc.img)
+			}
+
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("SetupImage(%+v) error = %v, want %v", tc.img, err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func checkSetupImage(t *testing.T, tt setupImageTest, img v1.Image) {
@@ -163,6 +253,24 @@ func checkSetupImage(t *testing.T, tt setupImageTest, img v1.Image) {
 	for _, pkg := range tt.wantNoPackages {
 		if slices.Contains(img.Packages, pkg) {
 			t.Errorf("unexpected package %q in %v", pkg, img.Packages)
+		}
+	}
+
+	if tt.wantAllPackages != nil {
+		if diff := cmp.Diff(tt.wantAllPackages, img.Packages); diff != "" {
+			t.Errorf("packages mismatch (-want +got):\n%s", diff)
+		}
+	}
+
+	if tt.wantScriptOrder != nil {
+		if diff := cmp.Diff(tt.wantScriptOrder, img.ScriptOrder); diff != "" {
+			t.Errorf("script order mismatch (-want +got):\n%s", diff)
+		}
+
+		for _, name := range tt.wantScriptOrder {
+			if img.Scripts[name] == "" {
+				t.Errorf("Scripts[%q] is empty, want the script", name)
+			}
 		}
 	}
 }

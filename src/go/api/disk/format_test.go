@@ -17,6 +17,7 @@ import (
 	"phenix/util/diskchain"
 	"phenix/util/diskchain/diskchaintest"
 	"phenix/util/mm/mmtest"
+	"phenix/util/testenv"
 )
 
 // formatFields are the Details fields that tell an image's format.
@@ -433,9 +434,7 @@ func TestGetImageThroughMinimegaReportsFormat(t *testing.T) {
 
 // Each issue names its image, and its command names the image as one shell word, whatever the path holds.
 func TestFormatIssueNamesItsImage(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh to read the commands")
-	}
+	testenv.RequireCommands(t, "sh")
 
 	rapid.Check(t, func(rt *rapid.T) {
 		path := "/" + rapid.StringMatching(`[a-z '"$;\\ .-]{1,12}`).Draw(rt, "name")

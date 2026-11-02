@@ -3,7 +3,7 @@ package scorch
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"phenix/store"
 	"phenix/types"
 	"phenix/util/plog"
+	"phenix/util/polltest"
 )
 
 func TestProcessLogChannel(t *testing.T) {
@@ -183,6 +186,63 @@ func TestProcessLogChannelTreatsInvalidJSONAsText(t *testing.T) {
 	}
 }
 
+// processLogChannel gives a text entry the level of the "| LEVEL |" marker in
+// it (INFO without one), and treats a JSON line without a level as text.
+func TestProcessLogChannelLevels(t *testing.T) {
+	tests := map[string]struct {
+		line      string
+		wantLevel string
+		wantMsg   string
+	}{
+		"ERROR marker":       {line: "12:00 | ERROR | broke", wantLevel: levelError},
+		"ERR marker":         {line: "12:00 | ERR | broke", wantLevel: levelError},
+		"WARN marker":        {line: "12:00 | WARN | odd", wantLevel: levelWarn},
+		"WARNING marker":     {line: "12:00 | WARNING | odd", wantLevel: levelWarn},
+		"DEBUG marker":       {line: "12:00 | DEBUG | detail", wantLevel: levelDebug},
+		"DBG marker":         {line: "12:00 | DBG | detail", wantLevel: levelDebug},
+		"no marker":          {line: "plain text", wantLevel: levelInfo},
+		"marker needs bars":  {line: "ERROR without bars", wantLevel: levelInfo},
+		"JSON without level": {line: `{"msg":"no level"}`, wantLevel: levelInfo},
+		"JSON with level":    {line: `{"level":"WARN","msg":"structured"}`, wantLevel: levelWarn, wantMsg: "structured"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			type logEntry struct {
+				Level string
+				Msg   string
+			}
+
+			var got []logEntry
+
+			ch := make(chan []byte)
+			done := make(chan struct{})
+
+			go func() {
+				defer close(done)
+
+				processLogChannel(ch, func(level, msg string) { got = append(got, logEntry{level, msg}) })
+			}()
+
+			ch <- []byte(tc.line)
+			close(ch)
+			<-done
+
+			wantMsg := tc.wantMsg
+			if wantMsg == "" {
+				wantMsg = tc.line
+			}
+
+			want := []logEntry{{Level: tc.wantLevel, Msg: wantMsg}}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("processLogChannel(%q) entries mismatch (-want +got):\n%s", tc.line, diff)
+			}
+		})
+	}
+}
+
+// run logs the stdout of a component as a phenix app entry, and each
+// structured stderr line as a scorch entry at the level that the line names.
 func TestUserComponentRunRoutesStdoutAndStructuredStderr(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "component.sh")
@@ -190,6 +250,9 @@ func TestUserComponentRunRoutesStdoutAndStructuredStderr(t *testing.T) {
 		"#!/bin/sh",
 		"printf 'component stdout\\n'",
 		"printf '{\"level\":\"INFO\",\"msg\":\"component stderr\",\"traceback\":\"trace line\"}\\n' >&2",
+		"printf '{\"level\":\"ERR\",\"msg\":\"short error\"}\\n' >&2",
+		"printf '{\"level\":\"WARNING\",\"msg\":\"long warning\"}\\n' >&2",
+		"printf '{\"level\":\"DBG\",\"msg\":\"short debug\"}\\n' >&2",
 		"cat >/dev/null",
 	}, "\n") + "\n"
 
@@ -197,9 +260,8 @@ func TestUserComponentRunRoutesStdoutAndStructuredStderr(t *testing.T) {
 		t.Fatalf("writing temp script: %v", err)
 	}
 
-	plog.NewPhenixHandler(io.Discard, false)
-
 	type logEntry struct {
+		level   string
 		logType string
 		msg     string
 	}
@@ -210,12 +272,12 @@ func TestUserComponentRunRoutesStdoutAndStructuredStderr(t *testing.T) {
 	)
 
 	handlerName := "test-user-component-run"
-	plog.AddHandler(handlerName, plog.NewUIHandler("DEBUG", func(_ time.Time, _, logType, message string) {
+	plog.AddHandler(handlerName, plog.NewUIHandler("DEBUG", func(_ time.Time, level, logType, message string) {
 		mu.Lock()
 		defer mu.Unlock()
-		entries = append(entries, logEntry{logType: logType, msg: message})
+		entries = append(entries, logEntry{level: level, logType: logType, msg: message})
 	}))
-	defer plog.RemoveHandler(handlerName)
+	t.Cleanup(func() { plog.RemoveHandler(handlerName) })
 
 	exp := types.NewExperiment(store.ConfigMetadata{Name: "test-exp"})
 	exp.Spec.SetExperimentName("test-exp")
@@ -236,50 +298,33 @@ func TestUserComponentRunRoutesStdoutAndStructuredStderr(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for {
+	want := []struct {
+		level, logType, msg string
+	}{
+		{"INFO", string(plog.TypeScorch), "component stderr\ntrace line"},
+		{"ERROR", string(plog.TypeScorch), "short error"},
+		{"WARN", string(plog.TypeScorch), "long warning"},
+		{"DEBUG", string(plog.TypeScorch), "short debug"},
+		{"INFO", string(plog.TypePhenixApp), "component stdout"},
+	}
+
+	found := func(level, logType, msg string) bool {
 		mu.Lock()
-		count := len(entries)
-		mu.Unlock()
+		defer mu.Unlock()
 
-		if count >= 2 || time.Now().After(deadline) {
-			break
+		for _, entry := range entries {
+			if entry.level == level && entry.logType == logType &&
+				strings.Contains(entry.msg, msg) && strings.Contains(entry.msg, "component=test-component") {
+				return true
+			}
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		return false
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(entries) < 2 {
-		t.Fatalf("expected at least 2 log entries, got %d", len(entries))
-	}
-
-	var (
-		foundScorchLog bool
-		foundStdoutLog bool
-	)
-
-	for _, entry := range entries {
-		if entry.logType == string(plog.TypeScorch) &&
-			strings.Contains(entry.msg, "component stderr\ntrace line") &&
-			strings.Contains(entry.msg, "component=test-component") {
-			foundScorchLog = true
-		}
-
-		if entry.logType == string(plog.TypePhenixApp) &&
-			strings.Contains(entry.msg, "component stdout") &&
-			strings.Contains(entry.msg, "component=test-component") {
-			foundStdoutLog = true
-		}
-	}
-
-	if !foundScorchLog {
-		t.Fatalf("did not find routed structured stderr log in %+v", entries)
-	}
-
-	if !foundStdoutLog {
-		t.Fatalf("did not find routed stdout log in %+v", entries)
+	for _, w := range want {
+		polltest.Until(t, fmt.Sprintf("a %s %s entry with %q", w.level, w.logType, w.msg), func() bool {
+			return found(w.level, w.logType, w.msg)
+		})
 	}
 }

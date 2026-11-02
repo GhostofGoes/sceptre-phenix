@@ -81,6 +81,8 @@ func storedHosts(t *testing.T, hosts ...HostState) []any {
 	return stored
 }
 
+// The summary of a running experiment counts its VMs, hosts and checks, and
+// lists its down VMs, its run history and its newest failing checks.
 func TestSummarizeRunningExperiment(t *testing.T) {
 	t.Parallel()
 
@@ -167,6 +169,7 @@ func TestSummarizeRunningExperiment(t *testing.T) {
 	}
 }
 
+// Without a recorded run time, the last run is the time of the newest check.
 func TestSummarizeWithoutRunTimeUsesNewestCheck(t *testing.T) {
 	t.Parallel()
 
@@ -208,6 +211,8 @@ func TestSummarizeWithoutRunTimeUsesNewestCheck(t *testing.T) {
 	}
 }
 
+// A delayed VM that no longer waits for its start (not BUILDING) and is not
+// running counts as down, not as delayed.
 func TestSummarizeCountsDelayedVMAsDownOnceStarted(t *testing.T) {
 	t.Parallel()
 
@@ -231,6 +236,8 @@ func TestSummarizeCountsDelayedVMAsDownOnceStarted(t *testing.T) {
 	}
 }
 
+// A stopped experiment reports no soh results, and an experiment without a
+// scenario is not configured.
 func TestSummarizeStoppedAndUnconfigured(t *testing.T) {
 	t.Parallel()
 
@@ -269,6 +276,7 @@ func TestSummarizeStoppedAndUnconfigured(t *testing.T) {
 	}
 }
 
+// Summarize fails for a soh status that it cannot decode.
 func TestSummarizeReportsUndecodableResults(t *testing.T) {
 	t.Parallel()
 
@@ -399,6 +407,7 @@ func TestSummarizeWithoutTopology(t *testing.T) {
 	}
 }
 
+// Each failing check names the target, file, service or test that it checked.
 func TestSummarizeDescribesWhatFailingChecksLookedAt(t *testing.T) {
 	t.Parallel()
 
@@ -495,6 +504,8 @@ func asStored(t rapid.TB, v any) any {
 	return decoded
 }
 
+// writeRunFinished keeps the soh status, marks the app initialized, and adds the
+// run to a history of at most MaxRunHistory runs that the summary reads.
 func TestWriteRunFinishedRecordsTheRunForTheSummary(t *testing.T) { //nolint:paralleltest // replaces the default store
 	full := make([]any, 0, MaxRunHistory)
 

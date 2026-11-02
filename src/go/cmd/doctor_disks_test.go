@@ -14,6 +14,7 @@ import (
 
 	"phenix/api/disk"
 	dct "phenix/util/diskchain/diskchaintest"
+	"phenix/util/testenv"
 )
 
 // The disk-chains check reads the images in minimega's files directory, or <base-dir.phenix>/images without one, and
@@ -188,7 +189,7 @@ func TestDiskChainsCheckUnreadable(t *testing.T) {
 	t.Parallel()
 
 	if os.Geteuid() == 0 {
-		t.Skip("root reads every directory")
+		testenv.Skipf(t, "root reads every directory")
 	}
 
 	dir := newDoctorTestDir(t)

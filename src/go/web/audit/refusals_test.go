@@ -3,9 +3,11 @@ package audit_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,13 +242,19 @@ func TestUnixSocketAndDryRun(t *testing.T) {
 	}
 }
 
+// tokenRefusedRuns counts the runs of TestTokenRefused in this process.
+//
+//nolint:gochecknoglobals // each run in a process needs a new source
+var tokenRefusedRuns atomic.Uint64
+
 // TokenRefused audits the auth middleware's refusals through the server's
 // own limit: one a window for a source and reason.
 func TestTokenRefused(t *testing.T) {
 	events := capture(t)
 
-	// a documentation address no other test refuses, so the shared limit is fresh
-	r := refusedRequest("198.51.100.77")
+	// each run refuses a new documentation address, so the shared limit is fresh
+	ip := fmt.Sprintf("2001:db8::%x", tokenRefusedRuns.Add(1))
+	r := refusedRequest("[" + ip + "]")
 
 	audit.TokenRefused(r, middleware.Refusal{Reason: middleware.RefusedInvalid, User: "", Verified: false})
 	audit.TokenRefused(r, middleware.Refusal{Reason: middleware.RefusedInvalid, User: "", Verified: false})
@@ -257,7 +265,7 @@ func TestTokenRefused(t *testing.T) {
 	}
 
 	want := map[string]any{
-		"event.action": "request-auth", "event.reason": "invalid", "source.ip": "198.51.100.77",
+		"event.action": "request-auth", "event.reason": "invalid", "source.ip": ip,
 		"user.name": "", "phenix.suppressed": float64(0),
 	}
 

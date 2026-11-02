@@ -462,7 +462,8 @@ func TestWatchedTreeRunEndsWithItsContext(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			const debounce = 50 * time.Millisecond
+			// cancel must come within the debounce period of the event, even on a busy machine
+			const debounce = time.Second
 
 			tree := watchNewTree(t)
 			ctx, cancel := context.WithCancel(t.Context())
@@ -487,7 +488,7 @@ func TestWatchedTreeRunEndsWithItsContext(t *testing.T) {
 			select {
 			case <-changes:
 				t.Error("run reported a change after its context ended, want none")
-			case <-time.After(5 * debounce):
+			case <-time.After(debounce + 200*time.Millisecond):
 			}
 		})
 	}

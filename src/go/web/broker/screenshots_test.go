@@ -221,7 +221,17 @@ func TestUnchangedScreenshotsAreNotResent(t *testing.T) {
 //
 //nolint:paralleltest // replaces the clients, their dependencies and the frame cache
 func TestScreenshotRound(t *testing.T) {
-	useFakeShots(t, map[string]string{"exp/vm1": "one", "exp/gone": "old"})
+	fake := useFakeShots(t, map[string]string{"exp/vm1": "one", "exp/gone": "old"})
+
+	// hold keeps the first round in its screenshot request until it closes
+	entered, hold := make(chan struct{}, 2), make(chan struct{})
+	take := deps.screenshot
+	deps.screenshot = func(ctx context.Context, exp, vm, width string) ([]byte, error) {
+		entered <- struct{}{}
+		<-hold
+
+		return take(ctx, exp, vm, width)
+	}
 
 	frames.frames[shotKey{exp: "exp", vm: "gone", width: "200"}] = frame{}
 
@@ -234,17 +244,17 @@ func TestScreenshotRound(t *testing.T) {
 
 	withClients(t, showing, left)
 
-	shotRound.Store(true)
 	startScreenshotRound(context.Background())
+	polltest.Until(t, "the round asking for a screenshot", func() bool { return len(entered) > 0 })
 
-	if got := received(showing); len(got) != 0 {
-		t.Errorf("a round started during another sent %d messages, want none", len(got))
-	}
-
-	shotRound.Store(false)
 	startScreenshotRound(context.Background())
+	close(hold)
 
 	polltest.Until(t, "the round ending", func() bool { return !shotRound.Load() })
+
+	if diff := cmp.Diff(map[shotKey]int{{exp: "exp", vm: "vm1", width: "200"}: 1}, fake.requests()); diff != "" {
+		t.Errorf("screenshot requests of a round and one started during it mismatch (-want +got):\n%s", diff)
+	}
 
 	if diff := cmp.Diff(map[string]string{"exp/vm1": "data:image/png;base64,b25l"}, shotsOf(t, showing)); diff != "" {
 		t.Errorf("screenshots sent mismatch (-want +got):\n%s", diff)

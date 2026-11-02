@@ -200,7 +200,7 @@ func TestIsC2ClientActiveGivesUpOnCancel(t *testing.T) { //nolint:paralleltest /
 	}
 }
 
-var filterPrefix = regexp.MustCompile(`\.filter (\w+)=(\S+) `)
+var filterPrefix = regexp.MustCompile(`\.filter (\w+)=(\S*) `)
 
 // filtered answers cmd from rows as minicli would, applying a `.filter
 // <column>=<value>` prefix (the only kind c2Client sends) with filterMatches.
@@ -335,7 +335,7 @@ func TestActiveC2ClientsChecksUnsafeNamesAlone(t *testing.T) { //nolint:parallel
 	want := map[C2ClientRef]bool{
 		{VM: "a=b", ByUUID: false}:  true,
 		{VM: "c~d", ByUUID: true}:   false,
-		{VM: "blank", ByUUID: true}: true,
+		{VM: "blank", ByUUID: true}: false,
 		{VM: "web", ByUUID: false}:  false,
 	}
 

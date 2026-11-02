@@ -1,16 +1,18 @@
 package soh
 
 import (
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"unicode"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/mitchellh/mapstructure"
 	"pgregory.net/rapid"
 )
 
+// AllStates lists the networking, file, absent file, service, process and
+// container states, in that order.
 func TestHostStateAllStatesIncludesFiles(t *testing.T) {
 	t.Parallel()
 
@@ -31,11 +33,12 @@ func TestHostStateAllStatesIncludesFiles(t *testing.T) {
 	}
 
 	want := []State{networking, file, fileAbsent, service, process, container}
-	if got := state.AllStates(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("AllStates() = %#v, want %#v", got, want)
+	if diff := cmp.Diff(want, state.AllStates()); diff != "" {
+		t.Errorf("AllStates() mismatch (-want +got):\n%s", diff)
 	}
 }
 
+// The hostFiles metadata decodes into HostFiles.
 func TestSOHMetadataDecodesHostFiles(t *testing.T) {
 	t.Parallel()
 
@@ -50,11 +53,12 @@ func TestSOHMetadataDecodesHostFiles(t *testing.T) {
 		t.Fatalf("decoding metadata: %v", err)
 	}
 
-	if !reflect.DeepEqual(metadata.HostFiles, input["hostFiles"]) {
-		t.Fatalf("HostFiles = %#v, want %#v", metadata.HostFiles, input["hostFiles"])
+	if diff := cmp.Diff(input["hostFiles"], any(metadata.HostFiles)); diff != "" {
+		t.Errorf("HostFiles mismatch (-want +got):\n%s", diff)
 	}
 }
 
+// The hostFilesAbsent metadata decodes into HostFilesAbsent.
 func TestSOHMetadataDecodesHostFilesAbsent(t *testing.T) {
 	t.Parallel()
 
@@ -69,15 +73,12 @@ func TestSOHMetadataDecodesHostFilesAbsent(t *testing.T) {
 		t.Fatalf("decoding metadata: %v", err)
 	}
 
-	if !reflect.DeepEqual(metadata.HostFilesAbsent, input["hostFilesAbsent"]) {
-		t.Fatalf(
-			"HostFilesAbsent = %#v, want %#v",
-			metadata.HostFilesAbsent,
-			input["hostFilesAbsent"],
-		)
+	if diff := cmp.Diff(input["hostFilesAbsent"], any(metadata.HostFilesAbsent)); diff != "" {
+		t.Errorf("HostFilesAbsent mismatch (-want +got):\n%s", diff)
 	}
 }
 
+// The dockerContainers metadata decodes into HostContainers.
 func TestSOHMetadataDecodesDockerContainers(t *testing.T) {
 	t.Parallel()
 
@@ -92,15 +93,12 @@ func TestSOHMetadataDecodesDockerContainers(t *testing.T) {
 		t.Fatalf("decoding metadata: %v", err)
 	}
 
-	if !reflect.DeepEqual(metadata.HostContainers, input["dockerContainers"]) {
-		t.Fatalf(
-			"HostContainers = %#v, want %#v",
-			metadata.HostContainers,
-			input["dockerContainers"],
-		)
+	if diff := cmp.Diff(input["dockerContainers"], any(metadata.HostContainers)); diff != "" {
+		t.Errorf("HostContainers mismatch (-want +got):\n%s", diff)
 	}
 }
 
+// fileCheckCommand quotes the path for the shell of the VM's OS.
 func TestFileCheckCommand(t *testing.T) {
 	t.Parallel()
 
@@ -135,6 +133,7 @@ func TestFileCheckCommand(t *testing.T) {
 	}
 }
 
+// The hostServices metadata decodes into HostServices.
 func TestSOHMetadataDecodesHostServices(t *testing.T) {
 	t.Parallel()
 
@@ -149,11 +148,12 @@ func TestSOHMetadataDecodesHostServices(t *testing.T) {
 		t.Fatalf("decoding metadata: %v", err)
 	}
 
-	if !reflect.DeepEqual(metadata.HostServices, input["hostServices"]) {
-		t.Fatalf("HostServices = %#v, want %#v", metadata.HostServices, input["hostServices"])
+	if diff := cmp.Diff(input["hostServices"], any(metadata.HostServices)); diff != "" {
+		t.Errorf("HostServices mismatch (-want +got):\n%s", diff)
 	}
 }
 
+// serviceCheckCommand quotes the service name for the shell of the VM's OS.
 func TestServiceCheckCommand(t *testing.T) {
 	t.Parallel()
 
@@ -188,6 +188,7 @@ func TestServiceCheckCommand(t *testing.T) {
 	}
 }
 
+// containerCheckCommand quotes the container name for the shell of the VM's OS.
 func TestContainerCheckCommand(t *testing.T) {
 	t.Parallel()
 

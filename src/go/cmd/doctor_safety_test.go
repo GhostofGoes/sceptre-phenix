@@ -373,7 +373,7 @@ func TestShebangProperty(t *testing.T) {
 	})
 }
 
-// doctorBigFile is the file information of a store file of size bytes, owned by uid.
+// doctorBigFile is the file information of a store file of size bytes.
 type doctorBigFile struct {
 	os.FileInfo
 
@@ -443,6 +443,13 @@ func TestStoreFSCheck(t *testing.T) {
 		"big store, few free pages": {
 			fsType: "xfs", size: big, data: doctorFreeBolt(1),
 			want: row("", doctorPass, "DIR is on xfs. DIR/store.bdb is 200.0 MiB, and 1 of its 4 pages are free"),
+		},
+		"big store, half the pages free": {
+			fsType: "xfs", size: big, data: doctorFreeBolt(2),
+			want: row("", doctorPass, "DIR is on xfs. DIR/store.bdb is 200.0 MiB, and 2 of its 4 pages are free"),
+		},
+		"store of exactly 100 MiB": {
+			fsType: "xfs", size: compactMinBytes, data: doctorFreeBolt(3), want: row("", doctorPass, "DIR is on xfs"),
 		},
 		"big store, many free pages": {
 			fsType: "ext4", size: big, data: doctorFreeBolt(3),
@@ -592,7 +599,7 @@ func TestBoltFreePagesMatchesBbolt(t *testing.T) {
 				t.Fatalf("boltFreePages() why = %q", why)
 			}
 
-			// a read-only open loads no free page list
+			// a writable open loads the free page list
 			db, err = bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
 			if err != nil {
 				t.Fatalf("bbolt.Open() error = %v", err)

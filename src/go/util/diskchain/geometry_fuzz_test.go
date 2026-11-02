@@ -37,7 +37,8 @@ func FuzzParseGeometry(f *testing.F) {
 }
 
 // geometryCheck fails when g and err, what ParseGeometry read from data whose header is h, differ from the fields of
-// the header: its virtual size, its cluster size, and a reference count width of 1 to 64 bits.
+// the header: its virtual size, cluster size and snapshot count, and the version 3 compatible bits and reference count
+// width of 1 to 64 bits, or the version 2 width of 16 bits.
 func geometryCheck(data []byte, h diskchain.Header, g diskchain.Geometry, err error) error {
 	qcow, qcow2 := h.Format == diskchain.FormatQcow, h.Format == diskchain.FormatQcow2
 	be := binary.BigEndian
@@ -61,6 +62,14 @@ func geometryCheck(data []byte, h diskchain.Header, g diskchain.Geometry, err er
 		return fmt.Errorf("qcow2 refcount bits %d", g.RefcountBits)
 	case qcow2 && h.Version == 2 && (g.RefcountBits != 16 || g.Compatible != 0):
 		return fmt.Errorf("qcow2 version 2 refcount bits %d and compatible bits 0x%x", g.RefcountBits, g.Compatible)
+	case qcow2 && g.Snapshots != be.Uint32(data[60:]):
+		return fmt.Errorf("qcow2 snapshots %d, want %d", g.Snapshots, be.Uint32(data[60:]))
+	case qcow2 && h.Version >= 3 && len(data) < 104:
+		return fmt.Errorf("qcow2 version 3 header of %d bytes, want at least 104", len(data))
+	case qcow2 && h.Version >= 3 && g.RefcountBits != uint64(1)<<min(be.Uint32(data[96:]), 6):
+		return fmt.Errorf("qcow2 refcount bits %d, want %d", g.RefcountBits, uint64(1)<<min(be.Uint32(data[96:]), 6))
+	case qcow2 && h.Version >= 3 && g.Compatible != be.Uint64(data[80:]):
+		return fmt.Errorf("qcow2 compatible bits 0x%x, want 0x%x", g.Compatible, be.Uint64(data[80:]))
 	}
 
 	return nil
