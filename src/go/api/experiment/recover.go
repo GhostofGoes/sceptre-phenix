@@ -3,12 +3,15 @@ package experiment
 import (
 	"fmt"
 	"maps"
+	"os"
 	"slices"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 
 	"phenix/types"
 	"phenix/util/plog"
+	"phenix/util/shell"
 )
 
 // ResetAppsRunning clears the app running flags of every running experiment, which phenix ui calls as it
@@ -48,6 +51,45 @@ func ResetAppsRunning() error {
 			"cleared app running flags left by an earlier phenix",
 			"exp", exp.Metadata.Name, "apps", cleared,
 		)
+	}
+
+	return errs //nolint:wrapcheck // returning multierror
+}
+
+// ClearStaleStartMarkers removes the start markers whose start cannot be in progress, which phenix ui calls as it
+// starts. Stale markers are those of a process of this host that does not run, of this process, and of another host
+// that are StartMarkerMaxAge old.
+func ClearStaleStartMarkers() error {
+	exps, err := types.Experiments(false)
+	if err != nil {
+		return fmt.Errorf("listing experiments: %w", err)
+	}
+
+	var (
+		errs    error
+		host, _ = os.Hostname()
+		now     = time.Now()
+		self    = os.Getpid()
+	)
+
+	for _, exp := range exps {
+		m := exp.Status.Starting()
+
+		// this process starts no experiment before it recovers them
+		if m.IsZero() || (StartMarkerLiveOn(m, host, now, shell.ProcessExists) && (m.Host != host || m.PID != self)) {
+			continue
+		}
+
+		name := exp.Metadata.Name
+
+		if err := dropStartMarker(name, m); err != nil {
+			errs = multierror.Append(errs, fmt.Errorf("clearing the start marker of experiment %s: %w", name, err))
+
+			continue
+		}
+
+		plog.Warn(plog.TypeSystem, "cleared a stale experiment start marker",
+			"exp", name, "pid", m.PID, "host", m.Host, "since", m.Since)
 	}
 
 	return errs //nolint:wrapcheck // returning multierror

@@ -657,9 +657,10 @@ func newExperimentStartCmd() *cobra.Command {
 }
 
 // startError is the error a start of experiment name that failed with err returns: err itself for broken disk images,
-// so the list of VMs, disks and missing files is printed, and a humanized error otherwise.
+// so the list of VMs, disks and missing files is printed, and for a start that another process runs. Otherwise it is
+// a humanized error.
 func startError(err error, name string) error {
-	if errors.Is(err, experiment.ErrBrokenDisks) {
+	if errors.Is(err, experiment.ErrBrokenDisks) || errors.Is(err, experiment.ErrExperimentStarting) {
 		return fmt.Errorf("unable to start the %s experiment: %w", name, err)
 	}
 

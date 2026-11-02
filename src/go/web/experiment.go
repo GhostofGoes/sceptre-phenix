@@ -293,12 +293,12 @@ func addVMScreenshots(ctx context.Context, expName string, vms []mm.VM, size str
 }
 
 // anyExperimentLocked reports whether a handler holds the lock of any of the
-// experiments, as while one starts or stops. Starting or stopping keeps
-// minimega busy for as long as it takes, so asking it about VMs meanwhile
-// would stall the experiment list until it finishes.
+// experiments, as while one starts or stops, or another process starts one.
+// Starting or stopping keeps minimega busy for as long as it takes, so asking
+// it about VMs meanwhile would stall the experiment list until it finishes.
 func anyExperimentLocked(experiments []types.Experiment) bool {
 	for _, exp := range experiments {
-		if cache.IsExperimentLocked(exp.Metadata.Name) != "" {
+		if cache.IsExperimentLocked(exp.Metadata.Name) != "" || experiment.StartingElsewhere(exp.Status) {
 			return true
 		}
 	}
@@ -675,8 +675,11 @@ func GetExperiment(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// This will happen if another handler is currently acting on the
-	// experiment.
+	// experiment, or another process starts it.
 	status := cache.IsExperimentLocked(name)
+	if status == "" && experiment.StartingElsewhere(exp.Status) {
+		status = cache.StatusStarting
+	}
 
 	allowed, total := util.SelectVMs(name, vms, exp.Spec.Topology(), vmQuery, role)
 

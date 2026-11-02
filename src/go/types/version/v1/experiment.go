@@ -352,6 +352,9 @@ type ExperimentStatus struct {
 	DelayedC2F        map[string]map[string]bool `json:"delayedC2,omitempty"        mapstructure:"delayedC2"        structs:"delayedC2"        yaml:"delayedC2,omitempty"`
 	PostStartPendingF bool                       `json:"postStartPending,omitempty" mapstructure:"postStartPending" structs:"postStartPending" yaml:"postStartPending,omitempty"`
 	InterruptedF      string                     `json:"interrupted,omitempty"      mapstructure:"interrupted"      structs:"interrupted"      yaml:"interrupted,omitempty"`
+
+	// The start in progress, so another phenix process can report the experiment as starting.
+	StartingF ifaces.StartMarker `json:"starting,omitzero" mapstructure:"starting" structs:"starting,omitempty" yaml:"starting,omitempty"`
 }
 
 func (s *ExperimentStatus) Init() error {
@@ -561,4 +564,12 @@ func (s *ExperimentStatus) SetDelayedStarts(timers map[string]string, c2 map[str
 
 func (s *ExperimentStatus) SetInterrupted(reason string) {
 	s.InterruptedF = reason
+}
+
+func (s ExperimentStatus) Starting() ifaces.StartMarker {
+	return s.StartingF
+}
+
+func (s *ExperimentStatus) SetStarting(m ifaces.StartMarker) {
+	s.StartingF = m
 }

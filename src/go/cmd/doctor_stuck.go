@@ -7,6 +7,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"phenix/api/experiment"
+	ifaces "phenix/types/interfaces"
 )
 
 const (
@@ -18,6 +21,7 @@ const (
 	// Phrases in the details of rows, which their hints look for.
 	stuckPhrase       = "but no phenix process can own them"
 	interruptedPhrase = "was interrupted"
+	staleStartPhrase  = "that no phenix process runs"
 )
 
 // doctorStuck is what the stored status of a running experiment marks as in progress.
@@ -207,13 +211,18 @@ func stuckStatusCheck(ctx context.Context, in *doctorInput) doctorCheck {
 
 	var (
 		stuck, owned, interrupted []string
-		owners                    []string
+		owners, staleStarts       []string
 		running                   int
 		ui                        = in.phenixUI(ctx)
 		procs                     = in.phenixProcesses(ctx)
 	)
 
 	for _, exp := range experiments {
+		if in.staleStart(exp.starting, procs) {
+			m := exp.starting
+			staleStarts = append(staleStarts, fmt.Sprintf("%s (process %d on %s since %s)", exp.name, m.PID, m.Host, m.Since))
+		}
+
 		if !exp.running {
 			continue
 		}
@@ -252,6 +261,11 @@ func stuckStatusCheck(ctx context.Context, in *doctorInput) doctorCheck {
 			shortList(interrupted), interruptedPhrase))
 	}
 
+	if len(staleStarts) > 0 {
+		parts = append(parts, fmt.Sprintf("The store marks starts as in progress %s: %s",
+			staleStartPhrase, shortList(staleStarts)))
+	}
+
 	switch {
 	case len(parts) > 0:
 		parts[0] = capitalize(parts[0])
@@ -266,6 +280,31 @@ func stuckStatusCheck(ctx context.Context, in *doctorInput) doctorCheck {
 
 	return passCheck(fmt.Sprintf("no app run, SCORCH run or delayed start of the %s is marked as in progress",
 		plural(running, "running experiment", "running experiments")))
+}
+
+// staleStart reports whether the start marker m records a start that no phenix process runs: its process on this host
+// is not a phenix process, or it is from another host and experiment.StartMarkerMaxAge old. Without the processes of
+// this host, a marker of this host is not stale.
+func (in *doctorInput) staleStart(m ifaces.StartMarker, procs *doctorProcs) bool {
+	if m.IsZero() {
+		return false
+	}
+
+	var host string
+
+	if in.hostname != nil {
+		host, _ = in.hostname()
+	}
+
+	if m.Host == host && procs.why != "" {
+		return false
+	}
+
+	return !experiment.StartMarkerLiveOn(m, host, in.now(), func(pid int) bool {
+		_, ok := in.phenixArgs(pid)
+
+		return ok
+	})
 }
 
 // noOwnerReason says why no phenix process can own the operations in progress.
@@ -294,6 +333,11 @@ func stuckStatusHint(c doctorCheck) string {
 	if strings.Contains(c.Detail, interruptedPhrase) {
 		hints = append(hints, "for an interrupted start, stop the experiment with phenix experiment stop "+
 			"<experiment>, then start it again")
+	}
+
+	if strings.Contains(c.Detail, staleStartPhrase) {
+		hints = append(hints, "for a start that no phenix process runs, start or restart phenix ui, which "+
+			"clears its marker. A new start of the experiment also replaces the marker")
 	}
 
 	for i := 1; i < len(hints); i++ {

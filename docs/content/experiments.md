@@ -52,6 +52,10 @@ phenix exp restart <experiment name>
 Optionally, you can use the `--dry-run` flag to do everything except call out to
 minimega.
 
+While `phenix exp start` runs, the Experiments page of the web UI shows the
+experiment as `starting` after a page refresh. phēnix refuses a second start of
+the experiment until the first start ends.
+
 After an experiment stops successfully, phēnix deletes the VM disk snapshots
 created for file injection. To keep these snapshots for debugging, use
 `--keep-injection-snapshots` or its `-K` shorthand:

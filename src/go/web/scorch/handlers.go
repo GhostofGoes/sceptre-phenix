@@ -763,6 +763,9 @@ func GetPipelines(w http.ResponseWriter, r *http.Request) error {
 
 	// the experiment's own state, so the pipelines page can show it
 	status := cache.ExperimentStatus(name, exp.Running())
+	if status == cache.StatusStopped && experiment.StartingElsewhere(exp.Status) {
+		status = cache.StatusStarting
+	}
 
 	body, _ := json.Marshal(map[string]any{
 		"pipelines": pipelines,

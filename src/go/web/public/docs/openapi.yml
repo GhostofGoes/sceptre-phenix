@@ -1083,7 +1083,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: the experiment is already starting or stopping
+          description: >-
+            the experiment is already starting or stopping, or another phenix
+            process, such as `phenix experiment start`, starts it
           content:
             application/json:
               schema:
@@ -8699,8 +8701,10 @@ components:
           type: string
           description: >-
             what the server is doing to the experiment, such as starting,
-            stopping, creating or deleting. Otherwise, `GET /experiments`
-            reports started or stopped, and other responses leave it empty.
+            stopping, creating or deleting. It is also starting while another
+            phenix process, such as `phenix experiment start`, starts the
+            experiment. Otherwise, `GET /experiments` reports started or
+            stopped, and other responses leave it empty.
         apps:
           title: "Apps"
           description: "Applications configured for this scenario."

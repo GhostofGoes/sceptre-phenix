@@ -76,8 +76,9 @@ Check the phenix configuration without a running server
   The server group also looks at the state of phenix ui. stuck-status names
   the app runs, SCORCH runs and delayed starts that the store marks as in
   progress for a running experiment, when no phenix process can own them. It
-  also names the interrupted starts. ui-limits (Linux only) warns when phenix
-  ui has more than 80 percent of its soft limit of open files open. In the
+  also names the interrupted starts, and the starts in progress that no
+  phenix process runs. ui-limits (Linux only) warns when phenix ui has more
+  than 80 percent of its soft limit of open files open. In the
   tls group, ui.tls-cert warns when the TLS certificate expires within 30
   days, or when its names do not cover the host that users reach. It fails
   when the certificate expired or is not valid yet. In the env group,

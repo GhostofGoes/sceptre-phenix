@@ -219,10 +219,14 @@ func startExperiment(name string) error {
 	}
 }
 
-// startWebError is the 400 error of a start that failed with err. For broken disk images it has the code
-// broken_disks and lists each VM, disk and missing file in details.disks.
+// startWebError is the 400 error of a start that failed with err, or 409 while another process starts the experiment.
+// For broken disk images it has the code broken_disks and lists each VM, disk and missing file in details.disks.
 func startWebError(err error, format string, args ...any) *weberror.WebError {
 	werr := weberror.NewWebError(err, format, args...).SetStatus(http.StatusBadRequest)
+
+	if errors.Is(err, experiment.ErrExperimentStarting) {
+		werr = werr.SetStatus(http.StatusConflict)
+	}
 
 	var broken *experiment.BrokenDisksError
 	if errors.As(err, &broken) {
@@ -334,9 +338,14 @@ func resumeStart(name string) {
 var startProgress sync.Map //nolint:gochecknoglobals // shared with the list handler
 
 // experimentStatus is the experiment's status as the experiment lists report
-// it, and how far along its start is while it is starting.
+// it, and how far along its start is while it is starting. A start that
+// another process runs is starting, with an unknown progress of 0.
 func experimentStatus(exp types.Experiment) (cache.Status, float64) {
 	status := cache.ExperimentStatus(exp.Metadata.Name, exp.Running())
+	if status == cache.StatusStopped && experiment.StartingElsewhere(exp.Status) {
+		return cache.StatusStarting, 0
+	}
+
 	if status != cache.StatusStarting {
 		return status, 0
 	}

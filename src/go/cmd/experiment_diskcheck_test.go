@@ -14,6 +14,7 @@ import (
 	"phenix/api/experiment"
 	"phenix/store"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
 	v1 "phenix/types/version/v1"
 	dct "phenix/util/diskchain/diskchaintest"
 )
@@ -46,16 +47,25 @@ func brokenDiskExperiment(t *testing.T, name, started string) (store.Config, str
 	}, image
 }
 
-// runExperimentCmd runs phenix experiment with args against a mock store that reads cfg and allows no write.
-func runExperimentCmd(t *testing.T, cfg store.Config, sub *cobra.Command, args ...string) error {
+// runExperimentCmd runs phenix experiment with args against a mock store that holds cfg and allows exactly writes
+// writes, which change cfg.
+func runExperimentCmd(t *testing.T, cfg *store.Config, writes int, sub *cobra.Command, args ...string) error {
 	t.Helper()
 
 	m := store.NewMockStore(gomock.NewController(t))
 	m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
-		*c = cfg
+		*c = *cfg
 
 		return nil
 	}).AnyTimes()
+
+	if writes > 0 {
+		m.EXPECT().Update(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+			*cfg = *c
+
+			return nil
+		}).Times(writes)
+	}
 
 	original := store.DefaultStore
 	t.Cleanup(func() { store.DefaultStore = original }) //nolint:reassign // restore test double
@@ -77,16 +87,27 @@ func runExperimentCmd(t *testing.T, cfg store.Config, sub *cobra.Command, args .
 	return err
 }
 
-// A start refused for a broken disk prints each VM, disk and problem, not a humanized error.
+// A start refused for a broken disk prints each VM, disk and problem, not a humanized error. Its only store writes
+// add the start marker and remove it, so the experiment stays stopped with no marker.
 func TestExperimentStartPrintsBrokenDisks(t *testing.T) { //nolint:paralleltest // replaces the store
 	cfg, image := brokenDiskExperiment(t, "foo", "")
 
-	err := runExperimentCmd(t, cfg, newExperimentStartCmd(), "start", "foo")
+	err := runExperimentCmd(t, &cfg, 2, newExperimentStartCmd(), "start", "foo")
 
 	want := "unable to start the foo experiment: qemu cannot open 1 disk on 1 VM: " +
 		"1 error occurred:\n\t* VM a: disk " + image + ": backing chain loops back to " + image
 	if err == nil || err.Error() != want {
 		t.Errorf("experiment start error = %v, want %q", err, want)
+	}
+
+	exp, err := types.DecodeExperimentFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("DecodeExperimentFromConfig() error = %v", err)
+	}
+
+	if exp.Running() || !exp.Status.Starting().IsZero() {
+		t.Errorf("stored experiment after a refused start: running %t, start marker %+v; want stopped with no marker",
+			exp.Running(), exp.Status.Starting())
 	}
 }
 
@@ -94,7 +115,7 @@ func TestExperimentStartPrintsBrokenDisks(t *testing.T) { //nolint:paralleltest 
 func TestExperimentRestartChecksDisksBeforeStopping(t *testing.T) { //nolint:paralleltest // replaces the store
 	cfg, image := brokenDiskExperiment(t, "foo", "2024-01-01T00:00:00Z")
 
-	err := runExperimentCmd(t, cfg, newExperimentRestartCmd(), "restart", "foo")
+	err := runExperimentCmd(t, &cfg, 0, newExperimentRestartCmd(), "restart", "foo")
 
 	want := "unable to restart the foo experiment, which is still running: qemu cannot open 1 disk " +
 		"on 1 VM: 1 error occurred:\n\t* VM a: disk " + image + ": backing chain loops back to " + image
@@ -103,8 +124,8 @@ func TestExperimentRestartChecksDisksBeforeStopping(t *testing.T) { //nolint:par
 	}
 }
 
-// A start error for broken disks keeps the error, so its list prints, and any other start error stays humanized,
-// pointing to the error logs.
+// A start error for broken disks keeps the error, so its list prints, and so does a start that another process runs.
+// Any other start error stays humanized, pointing to the error logs.
 func TestStartErrorHumanizesOtherErrors(t *testing.T) {
 	t.Parallel()
 
@@ -123,6 +144,12 @@ func TestStartErrorHumanizesOtherErrors(t *testing.T) {
 		},
 		"other error": {
 			err: errors.New("minimega is down"), wantPrefix: "Unable to start the foo experiment (search error logs for ",
+		},
+		"starting elsewhere": {
+			err: &experiment.StartingError{
+				Name: "foo", Marker: ifaces.StartMarker{Since: "2026-11-02T10:00:00Z", PID: 7, Host: "elsewhere"},
+			},
+			wantPrefix: "unable to start the foo experiment: experiment foo is already starting (process 7 on host elsewhere",
 		},
 	}
 

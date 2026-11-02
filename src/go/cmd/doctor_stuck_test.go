@@ -20,6 +20,7 @@ import (
 	"phenix/api/scorch/scorchmd"
 	"phenix/store"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
 	v1 "phenix/types/version/v1"
 )
 
@@ -634,5 +635,95 @@ func TestDoctorProcsOwner(t *testing.T) {
 				t.Errorf("owner() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// stuck-status warns about a start marker that no phenix process runs: its process on this host is not a phenix
+// process, or it is from another host and old. Without the processes of this host, a marker of this host is not
+// stale.
+func TestStuckStatusCheckStaleStartMarkers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		recent = "2026-10-30T11:00:00Z" // an hour before the test's time
+		old    = "2026-10-28T12:00:00Z"
+		marked = func(name string, pid int, host, since string) doctorExperiment {
+			return doctorExperiment{name: name, stuck: doctorStuck{scorchRun: -1},
+				starting: ifaces.StartMarker{Since: since, PID: pid, Host: host}}
+		}
+		experiments = []doctorExperiment{
+			marked("gone", 77, "doctor-test-host", recent),
+			marked("runs", 78, "doctor-test-host", recent),
+			marked("old", 9, "far", old),
+			marked("new", 9, "far", recent),
+			{name: "none", stuck: doctorStuck{scorchRun: -1}},
+		}
+		hint = "for a start that no phenix process runs, start or restart phenix ui, which clears its marker. A new " +
+			"start of the experiment also replaces the marker"
+	)
+
+	tests := map[string]struct {
+		os   string
+		want doctorCheck
+	}{
+		"linux": {want: doctorCheck{Name: "", Status: doctorWarn, Detail: "The store marks starts as in progress " +
+			"that no phenix process runs: gone (process 77 on doctor-test-host since " + recent + "), old (process 9 on " +
+			"far since " + old + ")"}},
+		"no /proc": {os: "darwin", want: doctorCheck{Name: "", Status: doctorWarn, Detail: "The store marks starts " +
+			"as in progress that no phenix process runs: old (process 9 on far since " + old + ")"}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			host := doctorGoodHost()
+			host["/proc/78/cmdline"] = phenixCmdline("phenix", "experiment", "start", "runs")
+			host["/proc/77/cmdline"] = phenixCmdline("bash")
+
+			in, _ := leftoverInput(t, host, experiments, nil)
+			if tc.os != "" {
+				in.system.os = tc.os
+			}
+
+			got := stuckStatusCheck(t.Context(), in)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("stuckStatusCheck() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got := doctorHintOf(got, stuckStatusHint); got != hint {
+				t.Errorf("stuckStatusHint() = %q, want %q", got, hint)
+			}
+		})
+	}
+}
+
+// decodeDoctorExperiment reads the start marker of a stored status, as phenix writes it and reads it back as JSON.
+func TestDecodeDoctorStartMarker(t *testing.T) {
+	t.Parallel()
+
+	marker := ifaces.StartMarker{Since: "2026-10-30T10:00:00Z", PID: 4242, Host: "ws42"}
+
+	exp := types.NewExperiment(store.ConfigMetadata{Name: "e1"})
+	exp.Spec.SetExperimentName("e1")
+	exp.Spec.SetTopology(&v1.TopologySpec{NodesF: nil})
+	exp.Status.SetStarting(marker)
+
+	data, err := json.Marshal(store.Config{
+		Version: "phenix.sandia.gov/v1", Kind: "Experiment", Metadata: store.ConfigMetadata{Name: "e1"},
+		Spec:   structs.MapDefaultCase(exp.Spec, structs.CASESNAKE),
+		Status: structs.MapDefaultCase(exp.Status, structs.CASESNAKE),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var stored store.Config
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if diff := cmp.Diff(marker, decodeDoctorExperiment(stored).starting); diff != "" {
+		t.Errorf("decodeDoctorExperiment().starting mismatch (-want +got):\n%s", diff)
 	}
 }

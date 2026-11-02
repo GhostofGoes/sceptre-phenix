@@ -134,14 +134,19 @@ func TestRecoverExperimentsStoreFailure(t *testing.T) {
 	var logged []string
 
 	for _, line := range records() {
-		for _, msg := range []string{"clearing stale app running flags", "listing experiments with pending starts"} {
+		for _, msg := range []string{
+			"clearing stale app running flags", "clearing stale experiment start markers", "listing experiments with pending starts",
+		} {
 			if strings.Contains(line, `"msg":"`+msg+`"`) && strings.Contains(line, "store unreadable") {
 				logged = append(logged, msg)
 			}
 		}
 	}
 
-	if diff := cmp.Diff([]string{"clearing stale app running flags", "listing experiments with pending starts"}, logged); diff != "" {
+	want := []string{
+		"clearing stale app running flags", "clearing stale experiment start markers", "listing experiments with pending starts",
+	}
+	if diff := cmp.Diff(want, logged); diff != "" {
 		t.Errorf("recoverExperiments() with an unreadable store logged errors mismatch (-want +got):\n%s", diff)
 	}
 

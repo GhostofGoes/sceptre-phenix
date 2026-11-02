@@ -117,6 +117,12 @@ lack it). Points that are easy to miss:
 - `POST /experiments/{name}/stop` that cannot kill the VMs leaves the
   experiment running and answers 502 with `metadata.retry` `force`;
   `?force=true` marks it stopped anyway.
+- `POST /experiments/{name}/start` answers 409 while another phenix process,
+  such as `phenix experiment start`, starts the experiment. The stored status
+  key `starting` (`since`, `pid`, `host`) records that start, and the
+  experiment list reports it as `starting` with `percent` 0.
+- `POST .../vms/{name}/start` of a VM with `general.do_not_boot` that minimega
+  did not launch answers 409; redeploy the VM to launch it.
 - Paths use camelCase (`captureSubnet`, `memorySnapshot`, `captureTokens`).
 - `GET /schemas/{version}` returns the whole schema file (`v0` Workflow, `v1`
   Topology/Experiment/Image/User/Role, `v2` Scenario).

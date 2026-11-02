@@ -73,4 +73,21 @@ type ExperimentStatus interface { //nolint:interfacebloat // legacy interface
 
 	SetDelayedStarts(map[string]string, map[string]map[string]bool, bool)
 	SetInterrupted(string)
+
+	// The start in progress, and the process that runs it; the zero marker means no start is in progress.
+	Starting() StartMarker
+	SetStarting(StartMarker)
+}
+
+// StartMarker records a start in progress: when it began (RFC 3339, UTC), and the process ID and host name of the
+// process that runs it. The zero value records no start.
+type StartMarker struct {
+	Since string `json:"since" mapstructure:"since" structs:"since" yaml:"since"`
+	PID   int    `json:"pid"   mapstructure:"pid"   structs:"pid"   yaml:"pid"`
+	Host  string `json:"host"  mapstructure:"host"  structs:"host"  yaml:"host"`
+}
+
+// IsZero reports whether m records no start.
+func (m StartMarker) IsZero() bool {
+	return m.Since == "" && m.PID == 0 && m.Host == ""
 }

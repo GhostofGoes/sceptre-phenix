@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -125,6 +126,54 @@ func TestExperimentPendingStartsRoundTrip(t *testing.T) {
 		if got.Status.PostStartPending() != post || got.Status.Interrupted() != reason {
 			t.Errorf("PostStartPending(), Interrupted() after a round trip = %t, %q; want %t, %q",
 				got.Status.PostStartPending(), got.Status.Interrupted(), post, reason)
+		}
+	})
+}
+
+// The start marker survives the trip through a stored config and its JSON, and a zero marker leaves no starting key,
+// so a status stored before the marker existed decodes to the zero marker.
+func TestExperimentStartMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		var marker ifaces.StartMarker
+
+		if rapid.Bool().Draw(t, "marked") {
+			marker = ifaces.StartMarker{
+				Since: time.Unix(rapid.Int64Range(0, 1<<33).Draw(t, "since"), 0).UTC().Format(time.RFC3339),
+				PID:   rapid.IntRange(1, 1<<22).Draw(t, "pid"),
+				Host:  rapid.StringMatching(`[a-z][a-z0-9.-]{0,20}`).Draw(t, "host"),
+			}
+		}
+
+		exp := NewExperiment(store.ConfigMetadata{Name: "exp"})
+		exp.Status.SetStarting(marker)
+
+		status := structs.MapDefaultCase(exp.Status, structs.CASESNAKE)
+		if _, ok := status["starting"]; ok == marker.IsZero() {
+			t.Fatalf("stored status %v has a starting key: %t, want %t", status, ok, !marker.IsZero())
+		}
+
+		data, err := json.Marshal(store.Config{
+			Version: "phenix.sandia.gov/v1", Kind: "Experiment", Metadata: exp.Metadata,
+			Spec: structs.MapDefaultCase(exp.Spec, structs.CASESNAKE), Status: status,
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+
+		var c store.Config
+		if err := json.Unmarshal(data, &c); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+
+		got, err := DecodeExperimentFromConfig(c)
+		if err != nil {
+			t.Fatalf("DecodeExperimentFromConfig() error = %v", err)
+		}
+
+		if diff := cmp.Diff(marker, got.Status.Starting()); diff != "" {
+			t.Fatalf("Starting() after a round trip mismatch (-want +got):\n%s", diff)
 		}
 	})
 }

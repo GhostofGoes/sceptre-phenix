@@ -198,7 +198,8 @@ type doctorExperiment struct {
 	components []string    // the types of the SCORCH components of the scenario
 	appHosts   [][2]string // each app of the scenario and a host it names
 
-	stuck doctorStuck // what the stored status marks as in progress
+	stuck    doctorStuck        // what the stored status marks as in progress
+	starting ifaces.StartMarker // the start in progress that the stored status records, or the zero marker
 }
 
 // doctorVLANs is the VLAN part of a stored experiment's spec.
@@ -256,7 +257,8 @@ func decodeDoctorExperiment(c store.Config) doctorExperiment {
 		name: c.Metadata.Name, baseDir: "", running: false, vms: nil,
 		vlans: doctorVLANs{min: 0, max: 0, pinned: nil, count: 0}, schedules: nil,
 		nodes: nil, apps: nil, components: nil, appHosts: nil,
-		stuck: doctorStuck{apps: nil, scorch: false, scorchRun: -1, pending: false, interrupted: false},
+		stuck:    doctorStuck{apps: nil, scorch: false, scorchRun: -1, pending: false, interrupted: false},
+		starting: ifaces.StartMarker{Since: "", PID: 0, Host: ""},
 	}
 
 	decoded, err := types.DecodeExperimentFromConfig(c)
@@ -267,6 +269,10 @@ func decodeDoctorExperiment(c store.Config) doctorExperiment {
 	exp.baseDir = decoded.Spec.BaseDir()
 	exp.running = decoded.Running()
 	exp.stuck = decodeDoctorStuck(decoded.Status)
+
+	if decoded.Status != nil {
+		exp.starting = decoded.Status.Starting()
+	}
 	exp.apps, exp.components, exp.appHosts = doctorScenarioApps(decoded.Spec.Scenario())
 
 	if schedules := decoded.Spec.Schedules(); len(schedules) > 0 {
@@ -445,7 +451,8 @@ func experimentNamed(experiments []doctorExperiment, name string) (doctorExperim
 	return doctorExperiment{
 		name: "", baseDir: "", running: false, vms: nil, vlans: doctorVLANs{min: 0, max: 0, pinned: nil, count: 0},
 		schedules: nil, nodes: nil, apps: nil, components: nil, appHosts: nil,
-		stuck: doctorStuck{apps: nil, scorch: false, scorchRun: -1, pending: false, interrupted: false},
+		stuck:    doctorStuck{apps: nil, scorch: false, scorchRun: -1, pending: false, interrupted: false},
+		starting: ifaces.StartMarker{Since: "", PID: 0, Host: ""},
 	}, false
 }
 

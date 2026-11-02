@@ -20,6 +20,7 @@ import (
 	"phenix/store"
 	"phenix/tmpl"
 	"phenix/types"
+	ifaces "phenix/types/interfaces"
 	"phenix/types/version"
 	"phenix/util/common"
 	"phenix/util/file"
@@ -531,21 +532,23 @@ func Schedule(opts ...ScheduleOption) error {
 func Start(ctx context.Context, opts ...StartOption) error {
 	o := newStartOptions(opts...)
 
-	c, _ := store.NewConfig("experiment/" + o.name)
-
-	err := store.Get(c)
+	c, exp, marker, err := claimStart(o.name)
 	if err != nil {
-		return fmt.Errorf("getting experiment %s from store: %w", o.name, err)
+		return err
 	}
 
-	exp, err2 := types.DecodeExperimentFromConfig(*c)
-	if err2 != nil {
-		return fmt.Errorf("decoding experiment from config: %w", err2)
-	}
+	// the store write that records the start clears the marker; every other return clears it here
+	recorded := false
 
-	if exp.Running() && !exp.DryRun() {
-		return fmt.Errorf("experiment already running (started at: %s)", exp.Status.StartTime())
-	}
+	defer func() {
+		if recorded {
+			return
+		}
+
+		if err := dropStartMarker(o.name, marker); err != nil {
+			plog.Warn(plog.TypeSystem, "clearing experiment start marker", "exp", o.name, "err", err)
+		}
+	}()
 
 	if o.vlanMin != 0 {
 		exp.Spec.VLANs().SetMin(o.vlanMin)
@@ -751,6 +754,7 @@ func Start(ctx context.Context, opts ...StartOption) error {
 	}
 
 	exp.Status.SetStartTime(start)
+	exp.Status.SetStarting(ifaces.StartMarker{Since: "", PID: 0, Host: ""})
 
 	c.Spec = structs.MapDefaultCase(exp.Spec, structs.CASESNAKE)
 	c.Status = structs.MapDefaultCase(exp.Status, structs.CASESNAKE)
@@ -761,6 +765,8 @@ func Start(ctx context.Context, opts ...StartOption) error {
 
 		return fmt.Errorf("updating experiment config: %w", err)
 	}
+
+	recorded = true
 
 	if o.errChan != nil {
 		go finishStart(ctx, exp, o.dryrun, steps, o.errChan)
