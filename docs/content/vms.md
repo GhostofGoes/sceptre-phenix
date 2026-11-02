@@ -7,180 +7,18 @@
 The experiment must be started; click on the experiment name to enter the
 Running Experiment component. Within that component, click on the VM name (its
 tooltip reads `details and actions`) and you will be presented with the VM's
-details card. The card gathers everything phēnix knows about the VM together
-with every action you can take on it. The URL `/experiment/<name>?vm=<vm>`
-opens the details card of that VM.
+details card. The URL `/experiment/<name>?vm=<vm>` opens the details card of
+that VM.
 
 ![VM details for the running hmi-01, with its Windows OS box, power buttons, its screen, resource tiles, storage, a capturing interface, labels, annotations, snapshots and port forwards.](images/vm_details_card.png){: width=800 .center}
 
-#### The Header
+Available commands
 
-The header is colored by the VM's state and shows:
+* `restore` a snapshot by clicking the play button next to the desired snapshot name.
 
-* the VM name and a state tag: `Running`, `Paused`, `Shut down`, `Building`,
-  `Delayed start`, `Error`, `Busy` or `Not booted`;
-* an OS box naming the guest operating system the topology gives the VM in
-  `hardware.os_type`, with an icon and a color for its family: a yellow penguin
-  for Linux (`linux`, `centos`, `rhel`), a blue window for `windows`, a purple
-  route for routers (`vyos`, `vyatta`, `minirouter`) and a gray screen for
-  `other`. It is left out when the topology gives none;
-* a `do not boot` tag, when the VM is flagged not to boot;
-* the host the VM is scheduled on, and how long it has been up, or
-  `starts after <delay>` for a VM with a delayed start;
-* the VM's description from the topology, if it has one, in a box between the
-  name and the buttons; a long description shows its first three lines, and
-  hovering it shows the rest;
-* buttons that open the experiment's
-  [State of Health](state-of-health.md) page, its
-  [SCORCH](scorch.md) page, and this documentation page. The first two only
-  appear if your role may view the experiment.
-
-#### Screenshot and Console
-
-A running VM's screenshot sits at the top left of the card. Click it to open
-the VM's console in a new browser tab. When the VM is not running, the tile
-reads `No screen: the VM is shut down`, naming whichever state the VM is in.
-
-#### Power
-
-The `Power` section holds the VM's power operations as labeled buttons:
-
-* `Start` — start the VM. On a paused VM the button reads `Resume` and resumes
-  the VM where it left off.
-* `Pause` — pause the VM, keeping its memory, until it is resumed.
-* `Restart` — restart the running VM; grayed out while the VM is not running.
-* `Shut down` — power off the VM; it can be started again later.
-* `Kill` — kill the VM and remove it from the running experiment.
-
-`Start`, `Pause`, `Restart` and `Shut down` act as soon as you click them;
-`Kill` asks you to confirm first. A power action runs as a
-[background job](jobs.md), which the
-[jobs menu](web-ui.md#background-jobs-menu) shows. Actions leave the card open.
-The button or interface shows a spinner until the server answers, and the card
-then shows the VM as the action left it. A killed VM's card closes.
-
-#### More Actions
-
-`More actions`, under the screenshot, holds everything else:
-
-| Button | What it does |
-| ------ | ------------ |
-| `Redeploy` | Kill the VM and deploy it again, optionally with new CPUs, memory or disk |
-| `Reset disk` | Reset the VM's disk to how it was when the experiment started, discarding changes |
-| `Snapshot` | Save the VM's current disk and memory as a snapshot that can be restored later |
-| `Backing image` | Create a new backing image from the current VM disk |
-| `Memory snapshot` | Save a dump of the VM's memory for forensics tools such as Volatility |
-| `Port forward` | Forward a port to a port on the VM through its miniccc agent |
-| `Insert CD-ROM` | Insert an ISO image into the VM's CD-ROM drive; reads `Change CD-ROM` when one is already inserted |
-| `Mount disk` | Mount the VM's filesystem to browse, upload and download files |
-
-`Reset disk` and `Snapshot` ask you to confirm first, and `Backing image` asks
-once you have named the new image; the other buttons open a dialog of their
-own. `Mount disk` is only present when the `vm-mount` feature is enabled; see
-[Mount a VM](#mount-a-vm).
-
-An action your role may not take is not shown at all. An action the VM's
-current state rules out stays visible but disabled, with the reason in its
-tooltip, such as `Cannot pause: the VM is not running`.
-
-![VM details for the shut-down historian, with Start enabled and Restart and the other actions a stopped VM cannot take grayed out.](images/vm_details_disabled.png){: width=800 .center}
-
-#### Tiles
-
-Four tiles beside the screenshot summarize the VM: `miniccc agent` (`Active` or
-`None`), `vCPUs`, `Memory` and `Interfaces`.
-
-#### Storage
-
-`Storage` names the VM's disk and tags it `snapshot on` or `snapshot off`. With
-`snapshot on`, disk writes go to a temporary overlay and the disk image itself
-is left unchanged; with `snapshot off`, writes go straight to the disk image.
-The disk is named as the [Disks](disks.md) page names it: by its path within the
-minimega files directory, or by its full path, with a warning icon, when it is
-[outside that directory](disks.md#images-outside-the-files-directory). A disk
-the list does not hold, or any disk for a role that may not list disks, is named
-by its file name. Hovering over the name shows the full path. When the disk is
-built on other images, that backing image chain is listed beneath it, nearest
-image first. A disk or ISO image whose
-[backing chain is broken](disks.md#broken-backing-chains) shows a red icon with
-a cross. A `CD-ROM` row appears only while an ISO image is inserted, and names
-the image the same way. A button in the section heading opens the
-[Disks](disks.md) page, if your role may list disks. For such a role, the disk,
-each backing image, and the ISO image are links. A link opens the
-[details card](disks.md#the-details-card) of the image on the Disks page.
-
-#### Network
-
-`Network` lists one row per interface: the interface index, the VLAN alias, a
-`VLAN <id>` tag, the IP address and the tap name. Click the alias to move the
-interface onto a different VLAN, if your role may do so; phēnix asks you to
-confirm the change first. While the VM is
-running, every connected interface also has a shark-fin button that starts a
-packet capture on it; while a capture is running, the row is highlighted, the
-button becomes a red stop button, and an `Open in WebShark` button appears
-beside it. The section heading counts the captures running on the VM. See
-[Packet Capture](#packet-capture) and [WebShark](webshark.md).
-
-Three buttons sit at the right of the section heading:
-
-* a green play button, `Capture all interfaces`, which starts a capture on every
-  connected interface that is not already being captured (see
-  [Capture All Interfaces](#capture-all-interfaces));
-* a red stop button, `Stop all packet captures`, which stops every capture
-  running on the VM;
-* a search button that opens the [WebShark](webshark.md) tab: on the VM's
-  running capture (the lowest interface's, when several are running), or on the
-  experiment's saved captures when none is.
-
-The play button is grayed out when every connected interface is already being
-captured, and the stop button when no capture is running; hover either one to
-see why. The first two only appear if your role may start or stop captures, and
-the third only when WebShark is installed and your role may list captures.
-
-#### Labels, Snapshots and Port Forwards
-
-`Labels` lists the VM's labels as key and value pairs; `view/edit` opens the
-label editor. `Snapshots` lists the VM's snapshots; click the play button next
-to a snapshot name, and confirm, to restore it. `Port forwards` lists each forward as
-`<source port> → <destination host>:<destination port>`, along with the
-user who created it; `add` creates one, and you can delete the forwards you
-own. Each of these three sections only appears if your role may list what it
-holds.
-
-#### Annotations
-
-`Annotations` lists the VM's own node annotations, which apps read for per-VM
-settings, from the experiment's copy of the topology, one key and value per row. Values that are not text, such as the
-list `phenix/startup-autotunnel` takes, are shown as JSON, and the
-`vrouter/vyos-password` value is hidden behind an eye button that shows it.
-
-If your role may update the VM, `edit` turns the list into the same editor the
-create experiment card uses (see
-[Adding Annotations](experiments.md#adding-annotations)): change or remove a
-row, or add one of the annotations phēnix knows or a custom one. `Save`
-replaces the VM's annotations with the list and `Cancel` discards the changes.
-The server refuses a value of the wrong type for an annotation the default apps
-read and names the key. Setting `phenix/startup-autotunnel` to a new value
-requires a role that may create port forwards to the VM. Annotations are saved
-to the experiment, not to the Topology config, and can be changed while the
-experiment runs, but apps read most of them when the experiment starts, so most
-changes take effect the next time it starts.
-
-#### VM State Unknown
-
-When minimega does not answer for every VM of a running experiment (for
-example, a cluster node is down), the experiment's VMs tab says
-`minimega did not answer. Showing the VMs as configured` above the table. The
-VMs minimega did not report are then listed as the topology configures them,
-with no state, rather than left out. The next list replaces them once minimega
-answers.
-
-#### Busy VMs
-
-While an action is running on the VM, the card shows `Busy with another action`
-and a progress bar above the `Power` section, and every action is disabled.
-Clicking a busy VM's name in the table opens a `VM Busy` alert instead of the
-card.
+The `Power` section holds the `Start` (or `Resume`), `Pause`, `Restart`,
+`Shut down` and `Kill` buttons. `More actions`, under the screenshot, holds
+the other actions.
 
 ### From the Command Line Binary
 
@@ -197,102 +35,13 @@ Or, run the following to see the information for a specific VM in an experiment.
 phenix vm info <experiment name> [vm name] [--label <label>] [--host <host>]
 ```
 
-`--host` lists only the VMs running on the named cluster host, named exactly
-as minimega reports it. Repeat it to list the VMs on any of several hosts. It
-combines with the VM name or `--label`, and with `--filter`: a VM must match
-each of them, as with the `Hosts` and `Labels` filters below. A host filter
-matching no VM is an error. Press Tab after `--host` to complete host names.
-
-```shell
-phenix vm info my-exp --host compute1 --host compute2
-phenix vm info my-exp --host compute1 --label role-web
-```
-
-## Filtering and Sorting the VM Table
-
-On the running experiment's `VMs` tab, the `Hosts`, `Labels` and `Paginate`
-controls sit in the toolbar to the left of the `Find a VM` search box. When
-the window is too narrow for one row, they move to a row of their own above
-the search box.
-
-The `Hosts` button lists every cluster host running one of the experiment's
-VMs. Check hosts to list only the VMs running on any of them. `Clear hosts` unchecks them
-all, the button shows how many hosts are checked, and it is grayed out when no
-VM is running on a host. On the CLI, repeat `--host` on `phenix vm info` to
-do the same.
-
-The `Labels` button lists every `key=value` label on the experiment's VMs.
-Check labels to list only the VMs that carry any of them, as repeating
-`--label` does on the `phenix vm` commands. `Clear labels` unchecks them all. The button shows how
-many labels are checked, and is grayed out when no VM has a label.
-
-The host and label filters combine with each other and with the search box:
-a VM must match the search, run on a checked host and carry a checked label.
-The table goes back to its first page whenever the checked hosts or labels
-change. The request for the list must fit in 2 KiB, so once the checked hosts
-and labels fill it, the rest are grayed out until you uncheck one.
-
-Click the `Labels` heading to sort the VMs by how many labels they have, the
-number beside each VM's tag icon, which counts their notes too; a VM with none
-shows no number. VMs with as many labels are listed by name from A to Z
-whichever way the column is sorted.
-
-Click the `Network` heading to sort the VMs by the VLAN IDs of their
-interfaces, compared as numbers, or the `Taps` heading to sort them by their
-tap names, compared as text. A VM with several interfaces compares its first
-interface, then its second, and so on; VMs with no VLAN ID or tap, such as
-those that are not running, come last either way. VMs that tie are listed by
-name from A to Z.
-
-The `Uptime` column shows a dash for a VM that is not running and `unknown`
-for an external node.
-
-From the API, `GET /api/v1/experiments/{name}` takes a repeated
-`label=key=value` query parameter and a repeated `host=<host>` query parameter
-with the same meanings, and the VM lists' `hosts` and `labels` hold every host
-and label to filter by. Both it and
-`GET /api/v1/experiments/{name}/vms` take `sortCol=labels`, `sortCol=network`
-and `sortCol=taps`.
-
-## VM Actions Column
-
-The running experiment's VM table has an `Actions` column of compact icon
-buttons that act on that row's VM without opening its details card:
-
-* `Shut down`, which becomes `Start` (or `Resume` for a paused VM) while the
-  VM is not running
-* `Restart`, grayed out while the VM is not running
-* `Port forward`
-* `Snapshot`
-* `Backing image`
-* `Capture all interfaces`, which becomes `Stop all packet captures` while the
-  VM is capturing (see [Capture All Interfaces](#capture-all-interfaces))
-
-![VM table with an external node that has no buttons, a shut-down historian whose Actions column shows Start with Restart grayed out and whose Uptime is a dash, and a tooltip explaining that a VM without snapshots enabled cannot be snapshotted.](images/vm_row_actions.png){: width=800 .center}
-
-`Shut down`, `Start` and `Restart` act as soon as you click them, as on the
-details card, and so do the capture buttons; a button spins until its action
-has finished, while the page stays usable. `Snapshot` asks you to confirm
-first, and `Port forward` and `Backing image` open their dialogs. A button is
-disabled, with the reason in its tooltip, when your role may not use it
-(`Cannot snapshot: you do not have permission`) or when the VM's state rules it
-out, as on the details card. Three buttons fit on
-a row and the rest wrap below, so the column never widens. External nodes have
-no buttons, and the whole column is hidden if your role may not take any of
-these actions. `Actions` is one of the columns you can turn off from the column
-picker above the table.
-
 ## Create a Backing Image
 
 ### From the Web-UI
 
 Click on the name of a running VM in a started experiment to open its details
-card, then click `Backing image` in `More actions`; its tooltip reads
-`Create a new backing image from the current VM disk`. The same action is also
-in the VM table's [Actions column](#vm-actions-column).
-
-The VM must be running and have snapshots enabled. On a VM that does not, the
-button is disabled and its tooltip says why.
+card, then click `Backing image` in `More actions`. The button is disabled
+when the VM is not running or does not have snapshots enabled.
 
 ### From the Command Line Binary
 
@@ -319,13 +68,8 @@ phenix vm memory-snapshot <experiment name> <vm name> <snapshot file path>
 ### From the Web-UI
 
 Click on a running VM in a started experiment to open its details card, then
-click `Snapshot` in `More actions` and confirm. The same action is also in the VM table's
-[Actions column](#vm-actions-column). The VM must be running and have snapshots
-enabled; on a VM that does not, the button is disabled with
-`Cannot snapshot: the VM does not have snapshots enabled`.
-
-Once a snapshot exists, the card's `Snapshots` section lists it, and the play
-button next to its name restores it.
+click `Snapshot` in `More actions` and confirm. The button is disabled when
+the VM is not running or does not have snapshots enabled.
 
 ### From the Command Line Binary
 
@@ -337,40 +81,6 @@ While ELF memory dumps can be created via `phenix vm memory-snapshot`, there is 
 
 The experiment must be started; click on the VM screenshot to open a new browser
 tab that provides VNC access to the VM.
-
-#### VNC Banners
-
-The VNC tab shows a banner above and below the VM's screen. Both read
-`EXP: <experiment> - VM: <vm>` unless the VM has a `vncBanner` annotation:
-
-* **A string** is the text of both banners, and each newline in it starts a new
-  line.
-* **A map** sets each banner apart. `topBanner` and `bottomBanner` each take a
-  `banner` list of lines, a `backgroundColor` and a `textColor`. A banner the
-  map leaves out is not shown, and `disabled: true` turns both off.
-
-```yaml
-annotations:
-  vncBanner:
-    topBanner:
-      banner:
-        - Training range
-        - Lab use only
-      backgroundColor: "#007a33"
-      textColor: white
-    bottomBanner:
-      banner:
-        - Training range
-      backgroundColor: "#007a33"
-      textColor: white
-```
-
-Colors are CSS color names, such as `green`, or hex colors, such as `#007a33`.
-For any other color, phēnix logs a warning and uses the default white
-background or black text. It also logs and ignores map keys it does not know.
-
-Banner text is shown exactly as written, so HTML in it appears as text rather
-than as markup.
 
 ### From the Command Line Binary
 
@@ -418,16 +128,6 @@ The mount browser modal presents two panes:
   into the VM. This option is only available when the
   [experiment file server](settings.md#settings-reference) is enabled (see
   below).
-
-Every path stays inside the VM's file system: a symbolic link in the VM that
-points outside it, to an absolute path or up past its root, cannot be browsed,
-downloaded, or written through.
-
-Several users can have the same VM mounted; it is unmounted when the last of
-them closes the modal. That unmount waits up to 30 seconds for downloads from
-the VM to finish, and otherwise leaves the VM mounted and fails with
-`409 mount busy`. Opening the modal for a VM still being unmounted fails with
-`409 unmount in progress`; try again a moment later.
 
 ### Uploading Experiment Files from the phēnix Server { #uploading-experiment-files-from-the-phenix-server }
 
@@ -506,18 +206,10 @@ phenix vm unmount <experiment name> <vm name>
 Click on the name of the network tap, or on the IP address, of a running VM in a
 started experiment to start a packet capture on that interface. The name of the
 network tap will turn green once a packet capture has started. Each interface in
-the VM's details card has its own shark-fin button that does the same thing.
+the VM's details card has its own shark-fin button that does the same thing. It
+is possible to start captures on multiple network taps.
 
-Either way, phēnix first asks the server which captures are already running on
-the VM. minimega lists them across the cluster, so this takes a moment. phēnix
-then starts the interface's capture, or stops it if one is already running,
-without asking you to confirm; the button or tap name shows a spinner until the
-server has done so. Captures started from the Web-UI are written to the
-experiment's files as `<vm>_<interface>_<time>_<random>.pcap`. `<time>` is the
-local time to the second and `<random>` is four random hexadecimal digits, so a
-restarted capture does not replace the file of an earlier capture.
-
-It is possible to start captures on multiple network taps. Stopping the capture
+To stop a capture, click the name of a green network tap. Stopping the capture
 on one interface leaves the VM's other captures running; use
 `Stop all packet captures` to stop them all.
 
@@ -540,8 +232,9 @@ To stop all packet captures on a running VM, use the following command.
 phenix vm capture stop <experiment name> <vm name>
 ```
 
-Pass an interface name or index to stop only that interface's capture, leaving
-the VM's other captures running.
+To stop the packet capture running on a single interface, without affecting
+any other captures running on the same VM, provide the interface name or
+index.
 
 ```shell
 phenix vm capture stop <experiment name> <vm name> [iface name/index]
@@ -550,29 +243,6 @@ phenix vm capture stop <experiment name> <vm name> [iface name/index]
 !!! note
     Stopping the capture on a single interface, from the Web-UI or the command
     line, requires minimega 3.3.0 or later.
-
-To view a capture's packets in the browser, or stream a running capture into a
-local Wireshark (`phenix vm capture stream`), see [WebShark](webshark.md).
-
-## Capture All Interfaces
-
-`Capture all interfaces`, in the VM table's
-[Actions column](#vm-actions-column) and as the play button on the details
-card's [Network](#network) section, starts a packet capture on every connected
-interface of a VM that does not already have one. phēnix asks the server which captures are already
-running, then starts the rest without asking you to confirm, writing
-`<vm>_<interface>_<time>_<random>.pcap` for each to the experiment's files. The button
-spins until the captures have started.
-
-The button is disabled, with the reason in its tooltip, when the VM is not
-running, has no interfaces, has all of its interfaces disconnected, or is
-already capturing every connected interface. A role that may not create packet
-captures sees `Cannot capture all interfaces: you do not have permission`
-instead.
-
-While captures are running on the VM, a red `Stop all packet captures` button
-takes its place. It stops them without asking, spins while the server stops the
-captures, and turns back into `Capture all interfaces` once they have stopped.
 
 ## Kill a VM
 
@@ -643,9 +313,7 @@ phenix vm resume <experiment name> [vm name] [--label <label>]
 Click on the name of a running VM in a started experiment to open its details
 card, then click `Redeploy` in `More actions`. The dialog that opens lets you
 change the VM's CPUs, memory and disk, and whether the original injections are
-replicated, before it is deployed again. Its `Disk` menu starts on the VM's
-current disk and works as described in [Disk Menu](#disk-menu). The dialog sends
-a disk only when you pick a different one.
+replicated, before it is deployed again.
 
 ### From the Command Line Binary
 
@@ -661,9 +329,7 @@ phenix vm redeploy <experiment name> [vm name] [--label <label>]
 
 Click on the name of a running VM in a started experiment to open its details
 card, then click `Reset disk` in `More actions` and confirm. The button is
-disabled with `Cannot reset disk: the VM does not have snapshots enabled` on a
-VM whose snapshot flag is off, and with `Cannot reset disk: the VM is paused. Resume
-paused VMs first` on a paused VM.
+disabled when the VM is paused or does not have snapshots enabled.
 
 ### From the Command Line Binary
 
@@ -678,12 +344,8 @@ phenix vm reset-disk <experiment name> [vm name] [--label <label>]
 ### From the Web-UI
 
 Click on the name of a running VM in a started experiment to open its details
-card, then click `Restart` in the `Power` section. `Restart` is also in the VM
-table's [Actions column](#vm-actions-column). On a paused VM it is disabled with
-`Cannot restart: the VM is paused. Resume paused VMs first`, and on any other VM
-that is not running with `Cannot restart: the VM is not running. Start it
-instead`. Restarting a selection of VMs from the table's toolbar skips the ones
-that are not running.
+card, then click `Restart` in the `Power` section. The button is disabled
+when the VM is not running.
 
 ### From the Command Line Binary
 
@@ -700,6 +362,10 @@ phenix vm restart <experiment name> [vm name] [--label <label>]
 Click on the name of the paused VM in a started experiment to open its details
 card, then click `Resume` in the `Power` section.
 
+phēnix refuses to start a VM that the topology sets to not boot
+(`general.do_not_boot`), because minimega did not launch it. To launch the VM,
+redeploy it.
+
 ### From the Command Line Binary
 
 To resume a paused VM, run the following command.
@@ -714,7 +380,7 @@ phenix vm resume <experiment name> [vm name] [--label <label>]
 
 Click on the name of a running VM in a started experiment to open its details
 card, then click `Shut down` in the `Power` section. `Shut down` is also in the
-VM table's [Actions column](#vm-actions-column).
+VM table's `Actions` column.
 
 ### From the Command Line Binary
 
@@ -730,73 +396,19 @@ phenix vm shutdown <experiment name> [vm name] [--label <label>]
 
 There are two ways to modify VM settings:
 
-1. Click on a stopped experiment to access the Stopped Component. Its VM table
-shows each VM's host and IP address, and lets you edit the following:
-    * Host — the cluster host the VM is scheduled on
+1. Click on a stopped experiment to access the Stopped Component. You are able to edit the
+following:
+    * Host
     * CPUs
     * Memory
-    * Disk — the image the VM boots from; see [Disk Menu](#disk-menu)
-    * Partition — the disk partition files are injected into
-    * Labels
-    * Boot — the do-not-boot flag
-    * Persistence — `Non-Persistent` (snapshots on) or `Persistent`
+    * Disk
+    * Do not boot flag
 1. From a running experiment, click on the VM name and then `Redeploy` in
 `More actions` on its details card. You are able to edit the following:
     * CPUs
     * Memory
     * Disk
     * Replicate Original Injection(s)
-
-### Disk Menu
-
-The stopped experiment's `Disk` column and the `Redeploy` dialog pick a VM's
-disk from the images on the [Disks](disks.md) page that the experiment can use.
-The menu lists the images in the minimega files directory and its folders by
-their path within it, such as `win/win10.qcow2`, sorted by that path. Below
-them, a group headed `Outside the standard images directory` lists, by full
-path, the images outside that directory that this experiment's topology names,
-or that back an image in the menu. Picking an image asks for confirmation on a
-stopped experiment, then writes the image's full path into the topology.
-
-* An image whose path minimega cannot use as a VM disk, such as one with a
-  space, a quote, `#`, `$`, or `,` in it, is shown disabled and marked
-  `(minimega cannot use this name)`. The server refuses such a disk too.
-* A warning icon beside the menu marks a disk
-  [outside the minimega files directory](disks.md#images-outside-the-files-directory);
-  hovering over or focusing it explains that minimega does not copy the image to
-  other cluster nodes.
-* A red icon with a cross marks a disk whose
-  [backing chain is broken](disks.md#broken-backing-chains). Its tooltip names
-  the problem and tells that the start may fail. For a disk with more than one
-  problem, the one icon gives all of them.
-* A disk the list does not hold, such as a missing image, shows as
-  `<full path> (not listed)`, with a warning icon whose tooltip reads
-  `This image is not in your disk list: it may be missing, unreadable, or hidden from your role.`
-* A VM with no disk shows `No disk`.
-
-The menu needs `list` on `disks` to offer other images. Without it, the menu
-shows only the VM's current disk, with no warning. A role that may not `patch` the VM sees its disk as
-text, named as on the Disks page, with the same warning icons.
-
-### CD-ROM
-
-`Insert CD-ROM` in the details card's `More actions` opens the CD-ROM picker for
-a running VM. The button reads `Change CD-ROM`, and the picker is titled
-`Change the CD-ROM for <vm name>`, when an ISO image is already inserted; the
-picker then also names the inserted image. A spinner shows while the picker
-lists the ISO images it can insert. If there are none it says so and links to
-the Disks page, where an `.iso` file can be uploaded; if they cannot be listed,
-or your role may not list disk images, it says that instead.
-
-The picker names ISO images as the [Disks](disks.md) page does, with the ones
-outside the minimega files directory in a group of their own, and disables an
-image whose path minimega cannot use. It starts on the image that is already
-inserted, so `Change` only becomes available once you pick a different one.
-`Insert` (or `Change`) inserts the selected image, and `Eject` removes the
-inserted one; `Eject` is only offered while an image is inserted. The action is
-disabled when the VM is not running.
-
-![Change the CD-ROM dialog for site-1-hmi showing the inserted ISO and an ISO image drop-down, with Cancel, Eject and Change buttons.](images/vm_cdrom_picker.png){: width=500 .center}
 
 ### From the Command Line Binary
 
@@ -821,12 +433,6 @@ flag is omitted is left unchanged. The following flags are supported:
 | `-L, --label-changes key=value` | VM label to set, in `key=value` form. May be repeated to set multiple labels.                                         |
 | `--append-labels`      | Append the provided labels to the VM's existing labels instead of replacing them.                                     |
 | `-l, --label`         | Apply the change to every VM whose label matches the provided label (supports glob patterns). Use `all` to select every VM in the experiment. May be repeated. |
-
-A label key or value may not hold a double quote, a backslash, `$`, or a
-control character other than a newline or tab, or start with `file:`,
-`http:`, `https:` or `tar:`, since minimega would read it as something else.
-With `--append-labels`, the VM's existing labels must follow the same rules.
-A VLAN an interface connects to also may not hold white space, `'` or `#`.
 
 For example, to set the CPU count to 4 and memory to 2048 MB for a VM named
 `my-vm` in an experiment named `my-exp`:

@@ -108,7 +108,7 @@ Without the `-k` (or `--jwt-signing-key`), authentication is disabled.
 
 From the `Users` tab, click the key icon next to the given user's name. The
 icon shows for your own user, and for another user only when your role has
-[`users/tokens`](#resource-userstokens) `create` on them. A dialog
+`users/tokens` `create` on them. A dialog
 box will pop up where you can enter in a description for the token to be created
 and an expiration date. This expiration date should be entered in Golang time
 duration. For example, `4320h` is valid and represents 4320 hours or about 6
@@ -132,16 +132,6 @@ An administrator is able to click on the username on the table in the Users tab
 to update a user. They can update `First Name` or `Last Name`, `Role`,
 `Experiment Names`, and `Resource Name(s)`.
 
-The table has a `Find a User` search box above it, which matches user names,
-first and last names, and role names, and it can be sorted by `User`,
-`First Name`, `Last Name`, or `Role`.
-
-Level with the search box, the page counts the users it lists (and how many
-have no role), and as `Roles`, how many different roles they have. The counts
-ignore the search.
-
-![Users page with its Users and Roles totals, a Find a User box, and a table of five example users with first and last names, roles, and change password, delete and edit actions.](images/users_search.png){: width=800 .center}
-
 ### Roles
 
 `Global Admin` is the administrator level account and has access to all
@@ -163,11 +153,6 @@ Key: E - experiment resource, V - VM resource, U - user resource
 
 E\* in the Experiment Admin row means the role can delete an experiment's
 files, but not the experiment itself.
-
-The web UI hides or disables what your role cannot do, using the same permission
-names the server checks. If you open a page your role cannot use, phēnix sends
-you to the first page your role can use: `Experiments`, or the VM tiles page for
-a role that cannot list experiments.
 
 ### Resources
 
@@ -269,20 +254,6 @@ a role that cannot list experiments.
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 
-|      |      |
-|------|------|
-| Verb | create |
-| Desc | upload one or more files to an experiment |
-| Exp. Scoped | yes |
-| Res. Scoped | no |
-
-|      |      |
-|------|------|
-| Verb | delete |
-| Desc | delete one or more experiment files |
-| Exp. Scoped | yes |
-| Res. Scoped | no |
-
 #### Resource: `vms`
 
 |      |      |
@@ -381,22 +352,6 @@ a role that cannot list experiments.
 | Exp. Scoped | yes |
 | Res. Scoped | yes |
 
-#### Resource: `exp/captureSubnet`
-
-|      |      |
-|------|------|
-| Verb | create |
-| Desc | start packet captures on every VM interface in a subnet of an experiment |
-| Exp. Scoped | yes |
-| Res. Scoped | no |
-
-|      |      |
-|------|------|
-| Verb | delete |
-| Desc | stop the packet captures of a subnet of an experiment (roles that may start them gain it on startup) |
-| Exp. Scoped | yes |
-| Res. Scoped | no |
-
 #### Resource: `vms/snapshots`
 
 |      |      |
@@ -449,51 +404,12 @@ a role that cannot list experiments.
 
 #### Resource: `disks`
 
-A `disks` resource name is a disk image's file name, such as `win10.qcow2`,
-and matches the files of that name in every folder of the minimega files
-directory. See [Disks](disks.md#permissions).
-
 |      |      |
 |------|------|
 | Verb | list |
 | Desc | get list of disk images |
 | Exp. Scoped | no (listing one experiment's images also needs `get` on that experiment) |
 | Res. Scoped | yes (list is filtered to only include images in scope; an image outside the minimega files directory also needs `get` on an experiment using it, unless it backs a listed image) |
-
-|      |      |
-|------|------|
-| Verb | get |
-| Desc | download a disk image |
-| Exp. Scoped | no |
-| Res. Scoped | yes |
-
-|      |      |
-|------|------|
-| Verb | create |
-| Desc | snapshot or clone a disk image |
-| Exp. Scoped | no |
-| Res. Scoped | yes (the new image's file name; the image copied also needs `get`) |
-
-|      |      |
-|------|------|
-| Verb | update |
-| Desc | commit, rebase, resize, or rename a disk image |
-| Exp. Scoped | no |
-| Res. Scoped | yes (commit also needs it for the backing image) |
-
-|      |      |
-|------|------|
-| Verb | delete |
-| Desc | delete a disk image |
-| Exp. Scoped | no |
-| Res. Scoped | yes |
-
-|      |      |
-|------|------|
-| Verb | upload |
-| Desc | upload a disk image |
-| Exp. Scoped | no |
-| Res. Scoped | no |
 
 #### Resource: `hosts`
 
@@ -541,18 +457,6 @@ directory. See [Disks](disks.md#permissions).
 | Exp. Scoped | no |
 | Res. Scoped | yes |
 
-#### Resource: `users/tokens`
-
-|      |      |
-|------|------|
-| Verb | create |
-| Desc | create an API token for another user (also needs `users` `patch` on them) |
-| Exp. Scoped | no |
-| Res. Scoped | yes |
-
-By default only `Global Admin` has this permission. A user with `users`
-`patch` on themselves creates their own tokens without it.
-
 #### Resource: `users/roles`
 
 |      |      |
@@ -571,25 +475,11 @@ By default only `Global Admin` has this permission. A user with `users`
 | Exp. Scoped | no |
 | Res. Scoped | yes |
 
-Config permissions are matched against the config's `Kind/name`, not its name
-alone, so write `resourceNames` that way: `Topology/my-topo` rather than
-`my-topo`. A `*` in a resource name never crosses the `/`, so use `*/*` or
-`Topology/*` to cover every config or every topology. The web UI checks config
-permissions the same way the server does.
-
-`create` is checked against the new config's `Kind/name`, through the Configs
-page, `POST /configs` and `POST /workflow/configs/{branch}` alike, and `update`
-against the `Kind/name` in the request body as well as the one in the path. So
-a role scoped to `Topology/*` cannot create or overwrite a `User` or `Role`
-config. An update that renames a config or changes its kind also needs
-`create` for the new `Kind/name`.
-
-The configs API never returns a `User` config's password hash or API tokens,
-and an update of a `User` config through it keeps the stored ones, so an
-edited config sent back without them leaves them as they were. If the
-password or tokens change while such an update runs, it fails with `412`
-instead of writing back the old ones. Change a password or a token from the
-`Users` tab or the users API.
+Resource names are `<Kind>/<name>`, such as `Topology/riverside-water`.
+`Topology/*` covers every topology, and `*/*` covers every config, User and
+Role configs included. phēnix also checks create and update against the kind
+and name of the config in the request body. So a role scoped to `Topology/*`
+cannot create or overwrite a User or Role config.
 
 #### Resource: `settings`
 
@@ -639,24 +529,6 @@ the VM.
 | Desc | create ELF memory dumps of experiment VMs |
 | Exp. Scoped | yes |
 | Res. Scoped | yes |
-
-#### Resource: `jobs`
-
-|      |      |
-|------|------|
-| Verb | list, get, update, delete |
-| Desc | list, read (and download the artifact of), cancel, and dismiss [background jobs](jobs.md) other users started; a user always may for their own |
-| Exp. Scoped | yes (the job's experiment; a job of no experiment needs `jobs/global` instead) |
-| Res. Scoped | no |
-
-#### Resource: `jobs/global`
-
-|      |      |
-|------|------|
-| Verb | list, get, update, delete |
-| Desc | as for `jobs`, for the background jobs of no experiment, such as disk clones, that other users started |
-| Exp. Scoped | no |
-| Res. Scoped | no |
 
 ### Built-In Roles
 
@@ -764,18 +636,6 @@ spec:
     - list
 ```
 
-!!! note
-    On startup the UI server adds `experiments/files delete` to any stored
-    `Experiment Admin` role and to the role of every user assigned it.
-    `Experiment User` can upload but not delete experiment files;
-    `Experiment Viewer` and `VM Admin` can do neither.
-
-!!! note
-    On startup the UI server adds the `jobs` policy to stored
-    `Experiment Admin` roles, scoped to each user's experiments, so an
-    Experiment Admin sees and cancels the [background jobs](jobs.md) other
-    users started in those experiments.
-
 #### Experiment User (`experiment-user`)
 
 ```yaml
@@ -856,11 +716,6 @@ spec:
     - post
     - delete
 ```
-
-!!! note
-    On startup the UI server gives the `vms/mount` policy in the role of every
-    user assigned `Experiment Viewer` the resource names of the user's `vms`
-    policy.
 
 #### VM Admin (`vm-admin`)
 

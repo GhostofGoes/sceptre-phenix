@@ -41,9 +41,7 @@ To build the phēnix container image from source (does not require installing lo
 make docker
 ```
 
-The compose file checks the `phenix` container's health with `phenix healthcheck`, which probes the server's `/healthz` endpoint; `docker exec phenix phenix healthcheck --ready` also checks minimega, the store and free disk space. See [Health Checks](https://phenix.sceptre.dev/latest/health/).
-
-`docker exec phenix phenix doctor` checks the configuration without the server: it prints the phēnix and minimega versions and the environment, each setting with where its value came from (secrets redacted), then the checks of config file syntax and keys, the config files found and the one `phenix settings set` writes, environment variables, the settings every command reads, the store, log and base directories, the store file's format and owner, what `phenix ui` reads at startup (sign-in, users, TLS, listen endpoints and the unix socket), the version and modes of a running `phenix ui`, minimega with its files directory, base directory and mesh, the host tools phēnix runs, free disk space, and the optional features, and a summary with a hint per failure. `--skip` leaves out a check or group, `--strict` fails on warnings, `-x` leaves out the settings, and `--report` prints it all in a block to paste into a bug report. `-p` shows only the checks that warn or fail. `--report` replaces host names, addresses, user names and secrets with tokens. See [Checking the Configuration](https://phenix.sceptre.dev/latest/settings/#checking-the-configuration).
+The compose file checks the `phenix` container's health with `phenix healthcheck`, which probes the server's `/healthz` endpoint; `docker exec phenix phenix healthcheck --ready` also checks minimega, the store and free disk space.
 
 ### Native Installation (.deb)
 
@@ -186,12 +184,6 @@ git clone https://github.com/sandialabs/sceptre-phenix.git
 cd sceptre-phenix
 make build
 ```
-
-`make build` also renders the API reference that `bin/phenix` serves at
-`/docs/`, with the Redocly CLI version pinned in `scripts/api-docs.sh`. That
-step runs `npx` and needs network access the first time; pass
-`SKIP_API_DOCS=1` to build offline without it, and `SKIP_UI=1` to reuse an
-existing UI build in `src/js/dist`.
 
 ## Logging & Configuration
 
