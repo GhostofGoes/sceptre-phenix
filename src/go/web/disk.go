@@ -804,7 +804,7 @@ func UploadDisk(w http.ResponseWriter, r *http.Request) error {
 
 	localFile, err := os.OpenFile( //nolint:gosec // G703 multipart keeps only the base of the file name
 		target,
-		os.O_WRONLY|os.O_CREATE,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
 		0o600,
 	)
 	if err != nil {

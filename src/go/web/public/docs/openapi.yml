@@ -5520,8 +5520,8 @@ paths:
       summary: Upload a disk image
       description: >-
         Writes the uploaded file to the top level of the minimega files
-        directory, under the file's own name. Needs the `disks` `upload`
-        permission.
+        directory, under the file's own name. It replaces all of an image
+        of that name. Needs the `disks` `upload` permission.
       operationId: postDisks
       requestBody:
         required: true

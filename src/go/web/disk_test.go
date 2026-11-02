@@ -1389,6 +1389,25 @@ func TestUploadDiskRefusesWhatItCannotSave(t *testing.T) {
 	}
 }
 
+// An upload under the name of an image that exists replaces all of the image,
+// also when the upload is shorter than the image.
+func TestUploadDiskReplacesAnImage(t *testing.T) {
+	dir := useDiskFilesDir(t).dir
+
+	writeDisks(t, dir+"/old.qc2") // writeDisks writes the image's path, longer than the upload
+
+	body, contentType := formUpload(t, "file", "old.qc2", "new")
+	server := serveAs(t, "alice", testRole("disks", "upload")).URL + "/api/v1/disks"
+
+	if resp := do(t, http.MethodPost, server, string(body), "Content-Type", contentType); resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/v1/disks of old.qc2 = %d, want %d: %s", resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	if diff := cmp.Diff(map[string]string{dir + "/old.qc2": "new"}, tree(t, dir)); diff != "" {
+		t.Errorf("POST /api/v1/disks of old.qc2 files mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // Redeploy reads its request before it locks or inspects the VM, so it
 // refuses a missing or malformed request having touched nothing.
 func TestRedeployRefusesABadRequestFirst(t *testing.T) {
