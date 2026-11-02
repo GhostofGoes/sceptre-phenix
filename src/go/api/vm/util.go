@@ -204,8 +204,10 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 	go func() {
 		defer close(progressDone)
 
-		info, _ := in.Stat()
-		size := info.Size()
+		var size int64
+		if info, err := in.Stat(); err == nil {
+			size = info.Size()
+		}
 
 		ticker := time.NewTicker(c.interval)
 		defer ticker.Stop()
@@ -216,7 +218,7 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 			// a subscriber that stops reading does not hold up the copy's end
 			for _, s := range c.subs {
 				select {
-				case s <- float64(n) / float64(size):
+				case s <- copyFraction(n, size):
 				case <-done:
 					return
 				}
@@ -242,6 +244,16 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 	}
 
 	return out.Close()
+}
+
+// copyFraction is the fraction of size that n bytes are. An empty source has
+// nothing left to copy, so its fraction is 1.
+func copyFraction(n, size int64) float64 {
+	if size <= 0 {
+		return 1
+	}
+
+	return float64(n) / float64(size)
 }
 
 type progressWriter struct {

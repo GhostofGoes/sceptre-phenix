@@ -442,10 +442,12 @@ func TestCopy(t *testing.T) {
 	tests := map[string]struct {
 		ctx      context.Context //nolint:containedctx // the context of the copy
 		noSource bool
+		empty    bool   // the source has no bytes
 		dst      string // relative to the test's folder
 		wantErr  error
 	}{
 		"copies the source":          {ctx: context.Background(), dst: "dst"},
+		"copies an empty source":     {ctx: context.Background(), empty: true, dst: "dst"},
 		"missing source":             {ctx: context.Background(), noSource: true, dst: "dst", wantErr: os.ErrNotExist},
 		"destination folder missing": {ctx: context.Background(), dst: "missing/dst", wantErr: os.ErrNotExist},
 		"canceled":                   {ctx: canceled, dst: "dst", wantErr: context.Canceled},
@@ -458,9 +460,14 @@ func TestCopy(t *testing.T) {
 			dir := t.TempDir()
 			dst := filepath.Join(dir, tc.dst)
 
+			want := data
+			if tc.empty {
+				want = []byte{}
+			}
+
 			src := filepath.Join(dir, "src")
 			if !tc.noSource {
-				src = utilWriteFile(t, dir, data)
+				src = utilWriteFile(t, dir, want)
 			}
 
 			c := newCopier(time.Nanosecond)
@@ -502,8 +509,34 @@ func TestCopy(t *testing.T) {
 				return
 			}
 
-			if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, data) {
-				t.Errorf("copier.copy(%s, %s) wrote %d bytes (read error %v), want the %d source bytes", src, dst, len(got), err, len(data))
+			if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, want) {
+				t.Errorf("copier.copy(%s, %s) wrote %d bytes (read error %v), want the %d source bytes", src, dst, len(got), err, len(want))
+			}
+		})
+	}
+}
+
+// copyFraction is the copied share of the source, and 1 for an empty source, never NaN.
+func TestCopyFraction(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		n, size int64
+		want    float64
+	}{
+		"nothing copied": {n: 0, size: 4, want: 0},
+		"half copied":    {n: 2, size: 4, want: 0.5},
+		"all copied":     {n: 4, size: 4, want: 1},
+		"empty source":   {n: 0, size: 0, want: 1},
+		"unknown size":   {n: 3, size: -1, want: 1},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := copyFraction(tc.n, tc.size); got != tc.want {
+				t.Errorf("copyFraction(%d, %d) = %v, want %v", tc.n, tc.size, got, tc.want)
 			}
 		})
 	}
