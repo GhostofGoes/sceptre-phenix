@@ -5745,8 +5745,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          description: the image has no backing image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
-          description: the image has no backing image, or the commit failed
+          description: the commit failed
           content:
             application/json:
               schema:

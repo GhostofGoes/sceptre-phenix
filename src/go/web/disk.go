@@ -368,7 +368,7 @@ func CommitDisk(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if len(info.BackingImages) == 0 {
-		return weberror.New(http.StatusInternalServerError, fmt.Sprintf("image %s has no backing image to commit to", path))
+		return weberror.New(http.StatusConflict, fmt.Sprintf("image %s has no backing image to commit to", path))
 	}
 
 	backing, err := disk.Resolve(info.BackingImages[0])

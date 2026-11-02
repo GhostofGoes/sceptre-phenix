@@ -1728,7 +1728,7 @@ func TestDiskChangesRefuseAndFail(t *testing.T) {
 		wantFields  map[string]any
 	}{
 		"commit an image with no backing image": {
-			target: "/commit?disk=base.qc2", role: all, wantCode: http.StatusInternalServerError,
+			target: "/commit?disk=base.qc2", role: all, wantCode: http.StatusConflict,
 			wantMessage: "has no backing image to commit to",
 		},
 		"commit into a backing image the role may not update": {
