@@ -585,15 +585,23 @@ func TestGetRolesErrors(t *testing.T) {
 		}
 	})
 
-	// RoleFromConfig wraps a nil error with %w (a defect). This pins the
-	// message it gives now; when that is fixed, want a message with no "%!".
 	t.Run("a missing role", func(t *testing.T) {
 		storetest.UseBolt(t)
+		userStoreRaw(t, "role/present", map[string]any{"roleName": "Present"})
 
-		const want = "could not find role in store: %!w(<nil>)"
+		tests := []string{"nobody", "", "present-not", "PRESENT"}
 
-		if role, err := RoleFromConfig("nobody"); role != nil || err == nil || err.Error() != want {
-			t.Errorf("RoleFromConfig(nobody) = %v, %v, want nil and %q", role, err, want)
+		for _, name := range tests {
+			role, err := RoleFromConfig(name)
+			if role != nil || !errors.Is(err, ErrRoleNotFound) {
+				t.Errorf("RoleFromConfig(%q) = %v, %v, want nil, %v", name, role, err, ErrRoleNotFound)
+
+				continue
+			}
+
+			if diff := cmp.Diff("could not find role in store", err.Error()); diff != "" {
+				t.Errorf("RoleFromConfig(%q) error message mismatch (-want +got):\n%s", name, diff)
+			}
 		}
 	})
 }

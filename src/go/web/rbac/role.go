@@ -17,6 +17,7 @@ import (
 var (
 	ErrResourceNameExists  = errors.New("resource name for role exists")
 	ErrResourceNameInvalid = errors.New("invalid resource name for role")
+	ErrRoleNotFound        = errors.New("could not find role in store")
 )
 
 type Role struct {
@@ -50,6 +51,7 @@ func GetRoles() ([]*Role, error) {
 
 // RoleFromConfig gets a role based on its name from config.
 // Works for both the roleName (e.g., "Global Admin") and metadata name (e.g., "global-admin").
+// It returns ErrRoleNotFound when no role has the name.
 func RoleFromConfig(name string) (*Role, error) {
 	roles, err := config.List("role")
 	if err != nil {
@@ -69,7 +71,7 @@ func RoleFromConfig(name string) (*Role, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("could not find role in store: %w", err)
+	return nil, ErrRoleNotFound
 }
 
 // newRole builds a Role and indexes its policies once, so value copies of the
