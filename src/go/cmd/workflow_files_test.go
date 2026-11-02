@@ -374,7 +374,8 @@ func TestParseConfigFileWithoutKind(t *testing.T) {
 }
 
 // TestParseConfigFileAccepts checks files that the local syntax check must
-// pass: placeholders the raw YAML can't hold, and what only the server checks.
+// pass, and the kind as written: placeholders the raw YAML cannot hold, and
+// what only the server checks.
 func TestParseConfigFileAccepts(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -400,7 +401,13 @@ func TestParseConfigFileAccepts(t *testing.T) {
 			content:  "kind: Topology\nspec:\n  image: ${IMG: ubuntu.qc2}\n",
 			wantKind: kindTopology,
 		},
-		{name: "placeholder kind is left to the server", file: "topology.yml", content: "kind: ${KIND}\n"},
+		{name: "placeholder kind is left to the server", file: "topology.yml", content: "kind: ${KIND}\n", wantKind: "${KIND}"},
+		{
+			name:     "quoted placeholder kind beside a JSON number placeholder",
+			file:     "image.json",
+			content:  `{"kind": "${KIND:Image}", "spec": {"size": ${SIZE}}}`,
+			wantKind: "${KIND:Image}",
+		},
 		{name: "kind in another case", file: "topology.yml", content: "kind: topology\n", wantKind: "topology"},
 		{name: "a kind the server does not store is left to it", file: workflowConfigName, content: wfWorkflowYAML, wantKind: "Workflow"},
 		{
@@ -425,7 +432,7 @@ func TestParseConfigFileAccepts(t *testing.T) {
 				t.Errorf("parseConfigFile() = type %q body %q, want the file as read", got.ContentType, got.Body)
 			}
 
-			if tt.wantKind != "" && got.Kind != tt.wantKind {
+			if got.Kind != tt.wantKind {
 				t.Errorf("parseConfigFile() kind = %q, want %q", got.Kind, tt.wantKind)
 			}
 		})
@@ -497,6 +504,44 @@ func TestNeutralizePlaceholdersProperties(t *testing.T) {
 			if out[i] != want {
 				t.Fatalf("neutralizePlaceholders(%q) = %q, has %q at rune %d, want %q", body, got, out[i], i, want)
 			}
+		}
+	})
+}
+
+// TestParseConfigFileKindProperties checks that a one-line kind of letters
+// and placeholders, plain or quoted, comes back as the file writes it.
+func TestParseConfigFileKindProperties(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	part := rapid.OneOf(
+		rapid.StringMatching(`[A-Za-z]{1,4}`),
+		rapid.StringMatching(`\$\{[A-Za-z_]{1,4}\}`),
+		rapid.StringMatching(`\$\{[A-Za-z_]{1,4}:[a-z. ]{0,4}\}`),
+	)
+
+	rapid.Check(t, func(t *rapid.T) {
+		kind := strings.Join(rapid.SliceOfN(part, 1, 3).Draw(t, "parts"), "")
+		name, content := "topology.yml", "kind: '"+kind+"'\n"
+
+		if !strings.Contains(kind, " ") && rapid.Bool().Draw(t, "plain") {
+			content = "kind: " + kind + "\n"
+		} else if rapid.Bool().Draw(t, "json") {
+			name, content = "topology.json", `{"kind": "`+kind+`"}`
+		}
+
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+
+		got, err := parseConfigFile(path, true)
+		if err != nil {
+			t.Fatalf("parseConfigFile(%q) error = %v", content, err)
+		}
+
+		if got.Kind != kind {
+			t.Fatalf("parseConfigFile(%q) kind = %q, want %q", content, got.Kind, kind)
 		}
 	})
 }
