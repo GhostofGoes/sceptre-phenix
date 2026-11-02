@@ -441,29 +441,52 @@ func TestVMCopy(t *testing.T) {
 	newVM := func() VM {
 		return VM{
 			ID: 7, Name: "vm1", Host: "head", CPUs: 2, RAM: 1024, Uptime: 3.5, UUID: "uuid-1",
-			IPv4:       []string{"10.0.0.1"},
-			Networks:   []string{"EXP_1"},
-			IfaceNames: []string{"eth0"},
-			Taps:       []string{"mega_tap1"},
-			Captures:   []Capture{{VM: "vm1", Interface: 0, Filepath: "/a.pcap"}},
-			Tags:       map[string]string{"k": "v"},
+			IPv4:        []string{"10.0.0.1"},
+			Networks:    []string{"EXP_1"},
+			IfaceNames:  []string{"eth0"},
+			Taps:        []string{"mega_tap1"},
+			Captures:    []Capture{{VM: "vm1", Interface: 0, Filepath: "/a.pcap"}},
+			Tags:        map[string]string{"k": "v"},
+			Labels:      map[string]string{"k": "v"},
+			Interfaces:  map[string]string{"EXP_1": "10.0.0.1"},
+			Metadata:    map[string]any{"k": "v"},
+			Annotations: map[string]any{"k": "v"},
 		}
 	}
 
 	original := newVM()
-	cp := original.Copy()
 
-	if diff := gocmp.Diff(original, cp); diff != "" {
+	if diff := gocmp.Diff(original, original.Copy()); diff != "" {
 		t.Fatalf("VM.Copy() mismatch (-want +got):\n%s", diff)
 	}
 
-	cp.IPv4[0], cp.Networks[0], cp.IfaceNames[0], cp.Taps[0] = "x", "x", "x", "x"
-	cp.Captures[0].Filepath = "x"
-	cp.Tags["k"] = "x"
-	cp.Tags["new"] = "x"
+	tests := []struct {
+		field  string
+		change func(cp VM)
+	}{
+		{field: "IPv4", change: func(cp VM) { cp.IPv4[0] = "x" }},
+		{field: "Networks", change: func(cp VM) { cp.Networks[0] = "x" }},
+		{field: "IfaceNames", change: func(cp VM) { cp.IfaceNames[0] = "x" }},
+		{field: "Taps", change: func(cp VM) { cp.Taps[0] = "x" }},
+		{field: "Captures", change: func(cp VM) { cp.Captures[0].Filepath = "x" }},
+		{field: "Tags", change: func(cp VM) { cp.Tags["k"], cp.Tags["new"] = "x", "x" }},
+		{field: "Labels", change: func(cp VM) { cp.Labels["k"], cp.Labels["new"] = "x", "x" }},
+		{field: "Interfaces", change: func(cp VM) { cp.Interfaces["EXP_1"], cp.Interfaces["new"] = "x", "x" }},
+		{field: "Metadata", change: func(cp VM) { cp.Metadata["k"], cp.Metadata["new"] = "x", "x" }},
+		{field: "Annotations", change: func(cp VM) { cp.Annotations["k"], cp.Annotations["new"] = "x", "x" }},
+	}
 
-	if diff := gocmp.Diff(newVM(), original); diff != "" {
-		t.Errorf("VM after changing its Copy() mismatch (-want +got):\n%s", diff)
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			t.Parallel()
+
+			vm := newVM()
+			tt.change(vm.Copy())
+
+			if diff := gocmp.Diff(newVM(), vm); diff != "" {
+				t.Errorf("VM after changing %s of its Copy() mismatch (-want +got):\n%s", tt.field, diff)
+			}
+		})
 	}
 
 	t.Run("empty", func(t *testing.T) {
@@ -478,18 +501,6 @@ func TestVMCopy(t *testing.T) {
 
 		if diff := gocmp.Diff(want, got); diff != "" {
 			t.Errorf("VM{}.Copy() mismatch (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run("labels", func(t *testing.T) {
-		t.Parallel()
-		t.Skip("bug: VM.Copy shares Labels, a JSON field its doc says it deep copies")
-
-		vm := VM{Labels: map[string]string{"k": "v"}}
-		vm.Copy().Labels["k"] = "x"
-
-		if got := vm.Labels["k"]; got != "v" {
-			t.Errorf("VM label k after changing its Copy() = %q, want %q", got, "v")
 		}
 	})
 }

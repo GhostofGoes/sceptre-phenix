@@ -260,8 +260,9 @@ func (v VM) OnAnyHost(hosts []string) bool {
 	return v.Host != "" && slices.Contains(hosts, v.Host)
 }
 
-// Copy returns a deep copy of the VM. It only makes deep copies of fields that
-// are exported as JSON.
+// Copy returns a deep copy of the VM. No slice or map field of the copy
+// shares memory with v. Copy makes shallow copies of the values in Metadata
+// and Annotations.
 func (v VM) Copy() VM {
 	vm := v
 
@@ -283,6 +284,11 @@ func (v VM) Copy() VM {
 
 	vm.Tags = make(map[string]string, len(v.Tags))
 	maps.Copy(vm.Tags, v.Tags)
+
+	vm.Labels = maps.Clone(v.Labels)
+	vm.Interfaces = maps.Clone(v.Interfaces)
+	vm.Metadata = maps.Clone(v.Metadata)
+	vm.Annotations = maps.Clone(v.Annotations)
 
 	return vm
 }
