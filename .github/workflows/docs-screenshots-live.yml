@@ -96,6 +96,8 @@ jobs:
           set -euo pipefail
           # The Makefile injects ./miniccc from the working directory.
           cp /usr/local/bin/miniccc /usr/local/bin/minirouter /usr/local/bin/protonuke .
+          # phenix creates the store file but not its directory.
+          sudo mkdir -p /etc/phenix
           start=$(date +%s)
           make "$IMAGE" PHENIX="sudo /usr/local/bin/phenix --store.endpoint bolt:///etc/phenix/store.bdb"
           echo "built $IMAGE in $(( $(date +%s) - start )) s"

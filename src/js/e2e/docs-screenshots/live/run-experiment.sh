@@ -25,6 +25,11 @@ phenix() {
 }
 
 start() {
+  # phenix creates the store file but not its directory.
+  case "$store" in
+    bolt://*) sudo mkdir -p "$(dirname "${store#bolt://}")" ;;
+  esac
+
   # One root shell starts the server detached from this step's shell, with
   # its output in the log; the arguments reach it as a vector, not as text.
   sudo bash -c 'out=$1; shift; setsid nohup "$@" >"$out" 2>&1 &' bash "$log" \
