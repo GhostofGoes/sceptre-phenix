@@ -132,13 +132,10 @@ An administrator is able to click on the username on the table in the Users tab
 to update a user. They can update `First Name` or `Last Name`, `Role`,
 `Experiment Names`, and `Resource Name(s)`.
 
-The table has a `Find a User` search box above it, which matches user names,
-first and last names, and role names, and it can be sorted by `User`,
-`First Name`, `Last Name`, or `Role`.
-
-Level with the search box, the page counts the users it lists (and how many
-have no role), and as `Roles`, how many different roles they have. The counts
-ignore the search.
+The `Find a User` search box above the table matches user names, first and
+last names, and role names. The table can be sorted by `User`, `First Name`,
+`Last Name` or `Role`, and the counts above it give how many users and roles
+it lists.
 
 ![Users page with its Users and Roles totals, a Find a User box, and a table of five example users with first and last names, roles, and change password, delete and edit actions.](images/users_search.png){: width=800 .center}
 
@@ -164,10 +161,9 @@ Key: E - experiment resource, V - VM resource, U - user resource
 E\* in the Experiment Admin row means the role can delete an experiment's
 files, but not the experiment itself.
 
-The web UI hides or disables what your role cannot do, using the same permission
-names the server checks. If you open a page your role cannot use, phēnix sends
-you to the first page your role can use: `Experiments`, or the VM tiles page for
-a role that cannot list experiments.
+The web UI hides or disables what your role cannot do, using the same
+permissions the server checks. If you open a page your role cannot use, phēnix
+sends you to the first page your role can use.
 
 ### Resources
 
@@ -574,22 +570,15 @@ By default only `Global Admin` has this permission. A user with `users`
 Config permissions are matched against the config's `Kind/name`, not its name
 alone, so write `resourceNames` that way: `Topology/my-topo` rather than
 `my-topo`. A `*` in a resource name never crosses the `/`, so use `*/*` or
-`Topology/*` to cover every config or every topology. The web UI checks config
-permissions the same way the server does.
-
-`create` is checked against the new config's `Kind/name`, through the Configs
-page, `POST /configs` and `POST /workflow/configs/{branch}` alike, and `update`
-against the `Kind/name` in the request body as well as the one in the path. So
+`Topology/*` to cover every config or every topology. `create` and `update`
+are also checked against the `Kind/name` of the config in the request body, so
 a role scoped to `Topology/*` cannot create or overwrite a `User` or `Role`
 config. An update that renames a config or changes its kind also needs
 `create` for the new `Kind/name`.
 
-The configs API never returns a `User` config's password hash or API tokens,
-and an update of a `User` config through it keeps the stored ones, so an
-edited config sent back without them leaves them as they were. If the
-password or tokens change while such an update runs, it fails with `412`
-instead of writing back the old ones. Change a password or a token from the
-`Users` tab or the users API.
+A `User` config read or written through the configs API never carries the
+user's password hash or API tokens, and an update keeps the stored ones.
+Change a password or a token from the `Users` tab or the users API.
 
 #### Resource: `settings`
 
@@ -765,16 +754,9 @@ spec:
 ```
 
 !!! note
-    On startup the UI server adds `experiments/files delete` to any stored
-    `Experiment Admin` role and to the role of every user assigned it.
-    `Experiment User` can upload but not delete experiment files;
-    `Experiment Viewer` and `VM Admin` can do neither.
-
-!!! note
-    On startup the UI server adds the `jobs` policy to stored
-    `Experiment Admin` roles, scoped to each user's experiments, so an
-    Experiment Admin sees and cancels the [background jobs](jobs.md) other
-    users started in those experiments.
+    On startup the UI server adds `experiments/files` `delete` to stored
+    `Experiment Admin` roles, and a `jobs` policy scoped to each user's
+    experiments. `Experiment User` can upload but not delete experiment files.
 
 #### Experiment User (`experiment-user`)
 
@@ -858,9 +840,9 @@ spec:
 ```
 
 !!! note
-    On startup the UI server gives the `vms/mount` policy in the role of every
-    user assigned `Experiment Viewer` the resource names of the user's `vms`
-    policy.
+    On startup the UI server scopes the `vms/mount` policy of every user
+    assigned `Experiment Viewer` to the same resource names as the user's
+    `vms` policy.
 
 #### VM Admin (`vm-admin`)
 

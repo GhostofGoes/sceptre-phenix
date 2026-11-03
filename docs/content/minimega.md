@@ -97,25 +97,15 @@ To exit the attached console session, type `disconnect` or press `Ctrl+D`.
 ### From the Web-UI
 
 When the phēnix server is started with `phenix ui --minimega-console` (or
-`PHENIX_UI_MINIMEGA_CONSOLE=true`), the `Console` tab in the banner near the top
-of the UI opens a minimega console, running `phenix mm --attach`, in the
-browser. The tab is shown to roles with `post` on `miniconsole`; without
-`--minimega-console`, it says that console access is not configured.
+`PHENIX_UI_MINIMEGA_CONSOLE=true`), the `Console` tab in the banner opens a
+minimega console in the browser. The tab is shown to roles with `post` on
+`miniconsole`.
 
-The console belongs to the user who started it; no other user can see, use, or
-end it. It keeps running while you use other pages, reload the page, or open
-phēnix in another tab of the same browser: coming back to the `Console` tab
-shows the same console and its earlier output instead of starting a new one.
-The console ends when:
-
-* you press `Ctrl+D` or type `disconnect` in it
-* you log out
-* 15 seconds pass after the last tab that has it open closes
-
-Once it has ended, `Start a new console` starts another one. If the connection
-to it is lost, including when the server drops a tab that falls too far behind
-the console's output, `Reconnect` attaches to it again, or starts a new one if
-it has ended in the meantime.
+The console belongs to the user who started it, and keeps running while you
+use other pages or reload. It ends when you press `Ctrl+D` or type
+`disconnect` in it, when you log out, or shortly after the last tab that has
+it open closes. `Start a new console` then starts another one, and
+`Reconnect` attaches to a console whose connection was lost.
 
 ![minimega console in the bennu namespace showing the output of vm info with each VM's host, name, state and IP addresses.](images/console_tab.png){: width=800 .center}
 

@@ -78,9 +78,11 @@ nav:
   - Configuration:
     - Files: configuration.md
     - Settings: settings.md
+    - Checking the Configuration: doctor.md
     - Logging: logging.md
   - Experiments:
     - Overview: experiments.md
+    - Files: experiment-files.md
     - VMs: vms.md
     - VM Actions: vm-multi-action.md
     - Images: image.md

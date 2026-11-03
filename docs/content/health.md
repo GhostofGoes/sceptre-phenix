@@ -4,13 +4,13 @@ A running `phenix ui` server answers two health endpoints, following the
 Kubernetes `livez`/`readyz` convention:
 
 * **`/healthz` (liveness)**: is the phēnix process up and working? It checks
-  the server's uptime and that the store can be read. A failing liveness check
-  means restarting phēnix may help, so this is what the Docker and Podman
-  health checks run.
+  the server's uptime and that the store can be read. A failing liveness
+  check means restarting phēnix may help, so the Docker and Podman health
+  checks run it.
 * **`/readyz` (readiness)**: can phēnix run experiments right now? It checks
-  minimega, the mesh, the store, `qemu-img`, WebShark, free disk space and the
-  websocket broker. A failing readiness check usually means something phēnix
-  depends on is down, which restarting phēnix will not fix.
+  minimega, the mesh, the store, `qemu-img`, WebShark, free disk space and
+  the websocket broker. A failing readiness check usually means something
+  phēnix depends on is down, which restarting phēnix will not fix.
 
 Both answer `GET` and `HEAD`, need no credentials, and are served from the
 server root rather than under `/api/v1`:
@@ -22,7 +22,7 @@ http://<phenix-host>:3000/readyz
 
 Behind a reverse proxy that serves phēnix under a base path (`--base-path`),
 they are at `<base-path>/healthz` and `<base-path>/readyz`. A proxy that
-requires its own sign-in on every path must exempt them, or monitors should
+requires its own sign-in on every path must exempt them, or monitors must
 probe the phēnix port directly.
 
 !!! note
@@ -75,35 +75,28 @@ the results keyed `component:measurement`. A trimmed `/readyz` answer:
 }
 ```
 
-Each check key keeps one JSON type for its `observedValue` across runs: a
-check that could not observe a value (minimega down, the store unreadable)
-leaves `observedValue` out rather than reporting a string. Fractional values,
-such as milliseconds and percentages, always carry a decimal point, even when
-they happen to be whole (`42.0`, not `42`).
+A check that could not observe a value, such as when minimega is down, leaves
+`observedValue` out.
 
 ## Checks
 
 The **Check** column is the name `?exclude=` takes.
 
-| Key | Check | Endpoints | Unit | Warns when | Fails when |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `uptime` | `uptime` | both | `s` | never | never |
-| `store:responseTime` | `store` | both | `ms` | listing configs takes over a second | the store cannot be read |
-| `minimega:responseTime` | `minimega` | `/readyz` | `ms` | minimega takes over a second to give its version | minimega does not answer |
-| `minimega:version` | `minimega` | `/readyz` | (version) | never | minimega does not answer |
-| `minimega:namespaces` | `minimega` | `/readyz` | `namespaces` | the namespaces cannot be listed | minimega does not answer |
-| `mesh:nodes` | `minimega` | `/readyz` | `nodes` | the mesh has fewer nodes than it has had since phēnix started | minimega does not answer |
-| `qemu-img:version` | `qemu-img` | `/readyz` | (version) | `qemu-img` is missing or broken (phēnix then inspects disks through minimega) | never |
-| `webshark:files` | `webshark` | `/readyz`, only when WebShark is installed | | the WebShark build is gone | never |
-| `disk:utilization` | `disk` | `/readyz` | `percent` | a filesystem is at least 90% full | a filesystem is at least 98% full |
-| `websocket:clients` | `websocket` | `/readyz` | `clients` | never | never |
-| `websocket:queue` | `websocket` | `/readyz` | `percent` | the broker's broadcast queue is at least 75% full | never |
-| `go:goroutines`, `go:heapObjectsBytes`, `go:gcPauseP99` | `go` | `/readyz` | `goroutines`, `bytes`, `ms` | never | never |
+| Key | Check | Endpoints | Warns when | Fails when |
+| :--- | :--- | :--- | :--- | :--- |
+| `uptime` | `uptime` | both | never | never |
+| `store:responseTime` | `store` | both | listing configs takes over a second | the store cannot be read |
+| `minimega:responseTime`, `minimega:version`, `minimega:namespaces` | `minimega` | `/readyz` | minimega takes over a second to answer, or the namespaces cannot be listed | minimega does not answer |
+| `mesh:nodes` | `minimega` | `/readyz` | the mesh has fewer nodes than it has had since phēnix started | minimega does not answer |
+| `qemu-img:version` | `qemu-img` | `/readyz` | `qemu-img` is missing or broken | never |
+| `webshark:files` | `webshark` | `/readyz`, only when WebShark is installed | the WebShark build is gone | never |
+| `disk:utilization` | `disk` | `/readyz` | a filesystem is at least 90% full | a filesystem is at least 98% full |
+| `websocket:clients`, `websocket:queue` | `websocket` | `/readyz` | the broadcast queue is at least 75% full | never |
+| `go:goroutines`, `go:heapObjectsBytes`, `go:gcPauseP99` | `go` | `/readyz` | never | never |
 
-`disk:utilization` has one result per filesystem, for the minimega files
+`disk:utilization` has one result per filesystem: the minimega files
 directory (`files-dir`), the phēnix base directory (`phenix-base`) and the
-directory holding the BoltDB store (`store`, such as `/etc/phenix`); two
-directories on one filesystem are reported once, as the first.
+directory holding the store (`store`).
 
 `?exclude=` leaves checks out, by the names above. Repeat it or separate the
 names with commas, for example to ignore disks phēnix does not own:
@@ -114,39 +107,23 @@ curl -s 'http://localhost:3000/readyz?exclude=disk&exclude=qemu-img' | jq .statu
 
 ## Caching and Timeouts
 
-Each check reuses its last result for a short time and has its own timeout,
-so probing often is cheap and a hung dependency cannot hold a probe:
-
-| Check | Reused for | Timeout |
-| :--- | :--- | :--- |
-| `minimega` | 5 seconds | 3 seconds |
-| `store` | 2 seconds | 3 seconds |
-| `disk` | 10 seconds | 2 seconds |
-| `webshark` | 30 seconds | 1 second |
-| `qemu-img` | 1 minute | 2 seconds |
-| `uptime`, `go`, `websocket` | measured on every request | |
-
-However often and however many monitors probe, phēnix sends minimega at most
-three commands (`version`, `namespace` and `mesh status`) every 5 seconds, each
-on a connection of its own, so probes never wait behind experiment work. A
-check that times out is reported as failed (`timed out after 3s`) until it
-finally answers.
+Each check reuses its last result for a few seconds and has its own timeout,
+so probing often is cheap and a hung dependency cannot hold up a probe. A
+check that times out is reported as failed until it answers again.
 
 ## Who Sees What
 
 Anyone who can reach the server sees each check's status, observed value,
 version and timing. The `output` fields, which name paths, hosts and errors,
-are only in answers to authenticated requests: with auth enabled, pass a token
-in the `X-Phenix-Auth-Token: Bearer <token>` header or as `?token=<token>`
-(see [API Authentication](api.md#authentication)). Without one, the answer
-carries the note `output fields omitted: request not authenticated`. With auth
-disabled, every request sees `output`. Probes without a token are not logged;
-an invalid token is logged as the API logs it.
+are only in answers to authenticated requests: pass a token in the
+`X-Phenix-Auth-Token: Bearer <token>` header or as `?token=<token>` (see
+[Authentication](api.md#authentication)). With authentication disabled,
+every request sees `output`.
 
 ## The `phenix healthcheck` Command
 
 `phenix healthcheck` asks the local server for its health and exits `0` when
-it answers `200`, and `1` otherwise (including when nothing answers):
+it answers `200`, and `1` otherwise:
 
 ```bash
 phenix healthcheck                 # liveness, prints e.g. "pass (200)"
@@ -155,24 +132,19 @@ phenix healthcheck --ready -o json # the whole response body
 phenix healthcheck --url https://phenix.example.com/readyz --timeout 10s
 ```
 
-It builds the URL from the `ui.listen-endpoint`, `ui.tls-key` and `ui.tls-cert`
-settings (the config file or `PHENIX_UI_*` environment variables), probing
-`127.0.0.1` (or `::1`) when the server listens on every address, and `https`
-when TLS is configured; it does not verify a loopback server's certificate. A
-`--listen-endpoint`, `--tls-key` or `--tls-cert` given only on the `phenix ui`
-command line is not visible to it, so pass `--url` or set
-`PHENIX_UI_LISTEN_ENDPOINT`, `PHENIX_UI_TLS_KEY` and `PHENIX_UI_TLS_CERT`
-then. Unlike other
-subcommands it opens no store, unix socket or log file, so it is cheap to run
-often.
+It builds the URL from the `ui.listen-endpoint`, `ui.tls-key` and
+`ui.tls-cert` settings, so a value given only as a flag on the `phenix ui`
+command line is not visible to it. Pass `--url` then, or set the matching
+`PHENIX_UI_*` environment variables. It opens no store, socket or log file,
+so it is cheap to run often.
 
 ## Docker and Podman
 
 The `phenix` service in `docker/docker-compose.yml` runs `phenix healthcheck`
-as its health check every 30 seconds (10 second timeout, 3 retries, after a 60
-second start period). It starts only once the `minimega` service is healthy,
-which its own check, `minimega -e version` every 10 seconds, reports, so
-`phenix ui` never starts without minimega:
+as its health check every 30 seconds. It starts only once the `minimega`
+service is healthy, so `phenix ui` never starts without minimega.
+`podman/pod.yml` gives the phenix container the same check as a liveness
+probe.
 
 ```bash
 docker compose ps                              # the STATUS column shows (healthy)
@@ -181,9 +153,8 @@ docker exec phenix phenix healthcheck --ready  # minimega, store, disks, ...
 ```
 
 The images themselves set no `HEALTHCHECK`, since most commands run from
-them (one-off CLI commands, image builds, workflows) serve no UI and would turn
-unhealthy. A container you start yourself to run `phenix ui` needs the check
-added, for example in a compose file:
+them serve no UI. A container you start yourself to run `phenix ui` needs the
+check added, for example in a compose file:
 
 ```yaml
 services:
@@ -198,12 +169,9 @@ services:
       start_period: 60s
 ```
 
-`podman/pod.yml` gives the phenix container the same check as a liveness
-probe, which `podman kube play` runs as its health check.
-
 ## Monitoring Examples
 
-The examples use `PHENIX_TOKEN` for a token from the Users page; leave the
+The examples use `PHENIX_TOKEN` for a token from the `Users` page. Leave the
 header out to monitor without `output` details.
 
 ### Elastic Heartbeat
@@ -235,25 +203,6 @@ heartbeat.monitors:
 Heartbeat releases without `expression` take a condition instead:
 `condition: {not: {equals: {status: fail}}}`.
 
-### Metricbeat
-
-The `http` module's `json` metricset stores each `/readyz` answer, so check
-values can be graphed in Kibana:
-
-```yaml
-metricbeat.modules:
-  - module: http
-    metricsets: ["json"]
-    period: 30s
-    hosts: ["http://phenix.example.com:3000"]
-    path: "/readyz"
-    namespace: "phenix_health"
-    headers:
-      X-Phenix-Auth-Token: "Bearer ${PHENIX_TOKEN}"
-```
-
-The answers land under `http.phenix_health`.
-
 ### Kubernetes and Podman Probes
 
 ```yaml
@@ -272,5 +221,5 @@ readinessProbe:
   timeoutSeconds: 10
 ```
 
-With TLS, add `scheme: HTTPS`. To probe from inside the container instead, use
-`exec: {command: [phenix, healthcheck]}`, as `podman/pod.yml` does.
+With TLS, add `scheme: HTTPS`. To probe from inside the container instead,
+use `exec: {command: [phenix, healthcheck]}`, as `podman/pod.yml` does.

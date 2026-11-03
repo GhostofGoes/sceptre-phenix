@@ -14,84 +14,47 @@ left of the `Hosts` and `Labels` filters, before the search text box.
 
 ![Running experiment page with two VMs checked and the bulk start, pause, memory snapshot, backing image, VM snapshot and modify state buttons beside the Hosts, Labels and Paginate controls above the VM table.](images/vms_multi_select.png)
 
-Every button on the toolbar acts on all of the selected VMs at once, and a
-button is only shown if your role allows its action on every one of them.
-The buttons, named by their tooltips, are:
+Every button on the toolbar acts on all of the selected VMs at once. A button
+is only shown if your role allows its action on every one of them. The
+buttons, named by their tooltips, are:
 
-* `start` - starts the selected VMs that are not already running; a paused
-  VM resumes where it left off
-
-* `pause` - pauses the selected VMs, keeping their memory, until they are
-  resumed
-
-* `create memory snapshot` - opens the `Create memory snapshot` dialog,
-  which offers a file name for each selected VM, and dumps each VM's
-  memory to the file it is given
-
-* `create backing image` - opens the `Create a Disk Image` dialog, which
-  offers a file name for each selected VM, and creates a new backing image
-  from each VM's current disk
-
-* `create VM snapshot` - saves each selected VM's disk and memory as a
-  snapshot that can be restored later
-
+* `start` - starts the selected VMs, and resumes the paused ones
+* `pause` - pauses the selected VMs
+* `create memory snapshot` - dumps each VM's memory to the file named for it
+  in the dialog
+* `create backing image` - creates a new backing image from each VM's disk
+* `create VM snapshot` - saves each VM's disk and memory as a snapshot
 * `modify state` - replaces these buttons with the modify state toolbar
   described below
 
-A button, here or on the modify state toolbar below, skips the selected VMs its
-action cannot be applied to rather than failing on them, by the same rules that
-disable the action's button in a VM's details card (see [VMs](vms.md)). Every
-button skips VMs that are busy with another action, such as a redeploy or a
-snapshot. `start` skips VMs that are already running; `pause`, `restart`,
-`create memory snapshot`, `shutdown` and `kill` skip VMs that are not running;
-`create VM snapshot` and `create backing image` skip VMs that are not running or
-do not have snapshots enabled; and `reset disk state` skips VMs that are paused
-or do not have snapshots enabled. A
-selected VM the table no longer shows, because it is on another page, a search
-filtered it out, or it was killed, is skipped as well, since its state is
-unknown. One dialog asks before anything happens: it lists the VMs the action
-will act on and, below, names the skipped VMs with the reason, such as
-`The VMs web and db are not running.` Only when every selected VM is skipped
-does a `No Action` dialog say why instead. Clicking an action's button clears
-the selection, whether or not its dialog is then confirmed.
+A button skips the selected VMs its action cannot be applied to, by the same
+rules that disable the action in a VM's details card (see [VMs](vms.md)). For
+example, `start` skips VMs that are already running, and every button skips a
+VM that is busy with another action. One dialog asks before anything happens.
+It lists the VMs the action will act on, and names the skipped VMs with the
+reason, such as `The VMs web and db are not running.`
 
 `start`, `pause`, `restart`, `shutdown`, `kill` and `reset disk state` run as
 one [background job](jobs.md) for all the VMs, which the
-[jobs menu](web-ui.md#background-jobs-menu) shows and can cancel; canceling
-stops after the VMs in progress finish, and a VM still waiting its turn for
-minimega is left untouched. The page stays usable while the job runs, and the
-VMs' own buttons in the table and the details card spin until it ends; the page
-then shows each VM as the job left it. When every VM succeeded, a short message
-says so (`Restarted 3 VMs`); otherwise one lasting notification sums up the
-outcome (`Restarted 2 of 3 VMs: 1 failed`), names up to eight VMs that failed or
-were skipped with the reason, and offers `Retry failed` for the VMs that may
-work if tried again, such as one that was busy with another action.
-`create VM snapshot`, `create backing image`, `create memory snapshot`, and
-capturing all of a VM's interfaces send one request for each VM or interface
-and sum up how they went the same way, rather than showing one error for each
-failure.
+[jobs menu](web-ui.md#background-jobs-menu) shows and can cancel. The page
+stays usable while the job runs. When it ends, one message sums up the
+outcome, names the VMs that failed or were skipped, and offers `Retry failed`
+for the VMs that may work if tried again.
 
 #### Modify State Toolbar
 
 The `modify state` button replaces the toolbar with the actions that change
 a VM's state. These buttons, again named by their tooltips, are:
 
-* `redeploy` - opens the `Redeploy the VMs` dialog, where `CPUs`, `Memory`,
-  `Disk` and `Replicate Original Injection(s)` can be set for each VM, and
-  then kills and deploys each VM again
-
+* `redeploy` - sets `CPUs`, `Memory`, `Disk` and
+  `Replicate Original Injection(s)` for each VM, then kills and deploys it
+  again
 * `reset disk state` - resets each selected VM's disk to how it was when the
-  experiment started, discarding changes; only VMs with snapshots enabled
-  can be reset, and a paused VM cannot be
-
+  experiment started
 * `restart` - restarts the selected VMs that are running
-
-* `shutdown` - powers off the selected VMs that are running; they can be
-  started again later
-
+* `shutdown` - powers off the selected VMs that are running
 * `kill` - kills the selected VMs and removes them from the running
-  experiment; they cannot be restored until the experiment is restarted
-
+  experiment
 * `close toolbar` - returns to the toolbar above
 
 Per-VM actions, including the ones this toolbar has no equivalent for, are
@@ -99,8 +62,9 @@ described in [VMs](vms.md).
 
 ### From the API
 
-`POST /api/v1/experiments/<name>/vms/actions` takes one power action on
-several VMs in a [background job](jobs.md):
+`POST /api/v1/experiments/<name>/vms/actions` runs one power action (`start`,
+`pause`, `restart`, `shutdown`, `kill` or `resetDisk`) on several VMs as a
+[background job](jobs.md):
 
 ```bash
 curl -X POST -H "X-Phenix-Auth-Token: Bearer $TOKEN" \
@@ -108,24 +72,10 @@ curl -X POST -H "X-Phenix-Auth-Token: Bearer $TOKEN" \
   http://localhost:3000/api/v1/experiments/exp1/vms/actions
 ```
 
-`action` is one of `start`, `pause`, `restart`, `shutdown`, `kill` or
-`resetDisk`, and `vms` names up to 1000 VMs. The job acts on four VMs at a
-time, each exactly as the VM's own route would, and records each VM's outcome:
-a VM your role may not act on is skipped, and a VM busy with another action
-fails and is marked retryable. When your role may act on none of the VMs, the
-request is refused with `403` and no job starts. Canceling the job starts no
-more VMs; the ones in progress finish, except those whose minimega commands
-were still waiting for the minimega connection, which end `canceled`
-untouched. For such a VM, websocket clients that were told it was starting,
-stopping or restarting get a `canceled` `experiment/vm` message, not a failure.
-
+The job records each VM's outcome. A VM your role may not act on is skipped,
+and a VM busy with another action fails and is marked retryable.
 `PATCH /api/v1/experiments/<name>/vms` changes the settings of several VMs at
-once, as each VM's own `PATCH` route would, one after another. It answers with
-the VMs it changed in `vms` and with each VM it left unchanged in `errors`:
-`skipped` when your role may not change it, and `failed`, with the reason,
-when its change did not take, while the other VMs are still changed. When your
-role may change none of the VMs the request is refused with `403`, and when
-every change fails with `500`.
+once in the same way. See the [API](api.md) documentation for both.
 
 ### From the Command Line Binary
 

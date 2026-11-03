@@ -799,11 +799,10 @@ phēnix centralized logging system.
     before killin the process with a `SIGKILL`.
 
 !!! note
-    While an app runs a stage, phēnix marks it running in the experiment's
-    `status.appRunningStageStatus`, and refuses to start that app's `running`
+    While an app runs a stage, phēnix refuses to start that app's `running`
     stage, such as a Scorch run, again until it finishes. If phēnix stops in
-    the middle, `phenix ui` clears these marks for every running experiment
-    when it starts again, so the app can run without restarting the experiment.
+    the middle, `phenix ui` clears these marks when it starts again, so the
+    app can run without restarting the experiment.
 
 ### Available User Apps
 
