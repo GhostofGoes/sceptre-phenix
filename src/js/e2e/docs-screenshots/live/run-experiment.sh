@@ -56,7 +56,7 @@ start() {
   phenix experiment list
   phenix vm info "$exp"
   echo "::group::state of health"
-  curl -sf "http://$ui_addr/api/v1/experiments/$exp/soh" | python3 -m json.tool | head -120
+  curl -sf "http://$ui_addr/api/v1/experiments/$exp/soh" | python3 -m json.tool || true
   echo "::endgroup::"
 }
 

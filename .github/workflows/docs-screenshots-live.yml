@@ -45,11 +45,12 @@ jobs:
           path: phenix
           persist-credentials: false
 
+      # A push has no inputs, so the dispatch defaults are repeated here.
       - name: Check out the image recipes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ inputs.images-repository }}
-          ref: ${{ inputs.images-ref }}
+          repository: ${{ inputs.images-repository || 'GhostofGoes/sceptre-phenix-images' }}
+          ref: ${{ inputs.images-ref || 'ci-e2e-minimega' }}
           path: images
           persist-credentials: false
 

@@ -5,8 +5,9 @@
 # ringed orange and its details dialog has a failing Listeners row, while
 # client2 reports only its CPU load. The SCORCH components are built-in pause
 # and break components named after the apps the documentation's example
-# scenario uses: the baseline run pauses at a break point in its stop stage
-# with hoststats still running in the background, and the failing run fails
+# scenario uses: the baseline run pauses at a break point at the end of its
+# stop stage, after its stop-stage hoststats entry has ended the hoststats
+# that ran in the background since the start stage, and the failing run fails
 # in its configure stage.
 apiVersion: phenix.sandia.gov/v2
 kind: Scenario

@@ -91,7 +91,13 @@ test('stages, read-write, read-only, output and loop', async ({
   );
   await terminal.locator('.xterm').click();
   await page.waitForTimeout(2000);
-  await page.keyboard.type('ls /phenix\n');
+  // The shell starts in a temporary directory with the runner's host name in
+  // its prompt; the image should show neither.
+  await page.keyboard.type(
+    "export PS1='root@phenix:\\w# '; cd /phenix; clear\n",
+  );
+  await page.waitForTimeout(1000);
+  await page.keyboard.type('ls\n');
   await page.waitForTimeout(1000);
   await page.keyboard.type('pwd\n');
   await page.waitForTimeout(2000);
