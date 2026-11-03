@@ -1,8 +1,11 @@
 name: Examples
 
 on:
+  # Branches other than main run through pull_request only, so a push to an
+  # open pull request starts one run, not two. workflow_dispatch runs a
+  # branch that has no pull request.
   push:
-    branches: ['**']
+    branches: [main]
     paths:
       - 'examples/**'
       - '.github/workflows/examples.yml'
@@ -14,6 +17,7 @@ on:
       - '.github/workflows/examples.yml'
   repository_dispatch:
     types: [apps-update]
+  workflow_dispatch:
 
 permissions:
   contents: read
