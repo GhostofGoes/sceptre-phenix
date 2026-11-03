@@ -16,8 +16,11 @@ async function shoot(locator, name) {
   });
 }
 
-// Captures the smallest rectangle holding every locator, with pad pixels around it.
+// Captures the smallest rectangle holding every locator, with pad pixels
+// around it. The region must fit in the viewport: the boxes are measured
+// against it, so the first locator is scrolled into view first.
 async function shootRegion(page, locators, name, pad = 8) {
+  await locators[0].scrollIntoViewIfNeeded();
   const boxes = await Promise.all(locators.map((l) => l.boundingBox()));
   const left = Math.max(0, Math.min(...boxes.map((b) => b.x)) - pad);
   const top = Math.max(0, Math.min(...boxes.map((b) => b.y)) - pad);
