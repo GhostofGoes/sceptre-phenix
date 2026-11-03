@@ -314,7 +314,7 @@ The Scorch pipeline provides a graphical representation of the Scorch app, inclu
 
 A user can access the terminal if a break point is reached by clicking on the component. As with the terminal access described above, a dialog will be presented with a terminal running on the phēnix host system.
 
-![Scorch Pipeline](images/pipeline.png)
+![The baseline run's header, with its stopped tag and its Clear, Download and start buttons, above a pipeline whose components are all uninitialized.](images/pipeline.png)
 
 ### Runs Page
 
@@ -356,7 +356,7 @@ A Scorch component may implement any or all of the various stages, and Scorch wi
 
 It's completely up to the component developer if and how an execution stage is implemented and handled by the component. If a component is configured in the Scorch app to be executed as part of a stage, but the component does not implement said stage, then the Scorch app will happily continue on to the next component in the stage (unless the component errors out if the current stage is not implemented, in which case the Scorch run will fail).
 
-![Pipeline Stages](images/stages.png)
+![The baseline run stopped at the break point in its stop stage: the components before it succeeded, and cleanup and done are not reached yet.](images/stages.png)
 
 The `cleanup` stage can also be executed on its own, and a run's status can be cleared, with the `Cleanup`, `Clear` and `Clear all` buttons on the [runs page](#runs-page) or through the [API](api.md). Both need permission to create `experiments/trigger`.
 
@@ -369,7 +369,7 @@ The following indicators are presented for each component of the Scorch app:
 - Backgrounded: a component is running in the background
 - Failure: a component has failed for some reason &mdash; reporting on the failure may be accessible by click on the component
 
-![Legend](images/legend.png)
+![Legend of the component indicators: Uninitialized, Running, Success, Break Point, Backgrounded and Failure.](images/legend.png)
 
 Loops are also available within a Scorch app and are included in the configuration file. A loop supports _looping_ within a given component through additional components. Once a loop is completed, the next component is executed. There is no limit on the number of loops or depth of them. The Scorch pipeline UI supports access to each loop and will report the depth in the pipeline's title. The first loop in the `scorch-demo` app is presented in the following example; clicking the return button will return the display one level up in the loop chain (or ending at the parent Scorch app).
 
@@ -391,7 +391,7 @@ A terminal modal is available from the Scorch table when a break point component
 
 If a component fails, the Scorch app will skip the remaining components involved in the current execution stage and jump to the next appropriate stage to complete the Scorch run. For example, if a component fails in the `Configure` stage the Scorch app will jump to the `Cleanup` stage, and if a component fails in the `Start` stage Scorch will jump to the `Stop` stage (skipping execution of any configured loops in either case).
 
-![Failed component &mdash; `trafficgen` in the Configure stage](images/failed.png){: width=300 .center}
+![A failed run: the configure stage and its trafficgen component show failure, and snort and the start stage are not reached.](images/failed.png){: width=300 .center}
 
 ## Example Configuration
 
