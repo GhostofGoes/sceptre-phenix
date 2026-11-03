@@ -373,7 +373,7 @@ The following indicators are presented for each component of the Scorch app:
 
 Loops are also available within a Scorch app and are included in the configuration file. A loop supports _looping_ within a given component through additional components. Once a loop is completed, the next component is executed. There is no limit on the number of loops or depth of them. The Scorch pipeline UI supports access to each loop and will report the depth in the pipeline's title. The first loop in the `scorch-demo` app is presented in the following example; clicking the return button will return the display one level up in the loop chain (or ending at the parent Scorch app).
 
-![Example Loop within Scorch app](images/loop.png)
+![The baseline run's first loop, titled Run: baseline (loop 1), with every component of its start and stop stages succeeded and the return button at its top left.](images/loop.png)
 
 In addition to loops, multi-run is supported within a Scorch app. Unlike loops, multi-run allows for individual Scorch runs containing four separate stages. They are not nested in each other but are independent runs. A use case for multi-run could be executing multiple independent portions of an experiment against a topology, in any order or executing a run multiple times. There are two runs depicted in the [configuration](#example-configuration) below.
 
@@ -381,13 +381,13 @@ As described above, each component will provide a modal for output reporting. Th
 
 The output window names the component, and shows the `Experiment`, the `Run`, the `Stage` and the component's `Status`, which keeps up with the component while the window is open.
 
-![Output of Snort component](images/output.png)
+![Output window of the snort component, showing the scorch-demo experiment, the baseline run, the configure stage, a completed status and the component's output.](images/output.png)
 
 A terminal modal is available from the Scorch table when a break point component is reached; it is also available in the Scorch pipeline. There are two types of terminal modals: read-write and read-only. If another user opens a terminal modal for a given component, it will be read-only the next time a terminal is open. The following are examples of each. In the first example, a read-only terminal, the user viewing this modal is only observing what another using is executing. In the second example, a read-write terminal, the user ran two simple commands on the phenix host system.
 
-![Read-only Terminal](images/read-only.png){: width=300 .center}
+![Terminal (scorch-demo) (read-only) showing the ls and pwd commands that another user ran.](images/read-only.png){: width=600 .center}
 
-![Read-write Terminal](images/read-write.png){: width=300 .center}
+![Terminal (scorch-demo) after the ls and pwd commands, with the cursor at the prompt.](images/read-write.png){: width=600 .center}
 
 If a component fails, the Scorch app will skip the remaining components involved in the current execution stage and jump to the next appropriate stage to complete the Scorch run. For example, if a component fails in the `Configure` stage the Scorch app will jump to the `Cleanup` stage, and if a component fails in the `Start` stage Scorch will jump to the `Stop` stage (skipping execution of any configured loops in either case).
 
