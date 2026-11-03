@@ -1,0 +1,101 @@
+name: Set up a phenix E2E runner
+description: >-
+  Builds phenix from the checkout at ./phenix, builds and starts the pinned
+  minimega, and optionally installs the phenix image builder. Every E2E job
+  (image builds and test shards) starts with this action, so a runner always
+  has the same tools in the same places. phenix must be checked out at
+  ./phenix: composite actions can only reference other local actions by a
+  fixed path.
+
+inputs:
+  image-builder:
+    description: Also install vmdb2 and the packages phenix image build needs (true/false)
+    required: false
+    default: 'false'
+  kali-keyring:
+    description: Also install the Kali archive keyring, which only Kali releases need (true/false)
+    required: false
+    default: 'false'
+  go-version:
+    description: Go version used to build phenix, the E2E tests and the apps' Go binaries
+    required: false
+    default: '1.24'
+
+outputs:
+  minimega-python:
+    description: Directory containing the generated minimega Python package
+    value: ${{ steps.mm.outputs.python }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read pins
+      id: pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "minimega=$(tr -d '[:space:]' < phenix/.github/e2e/minimega.ref)" >> "$GITHUB_OUTPUT"
+        echo "vmdb2=$(tr -d '[:space:]' < phenix/.github/e2e/vmdb2.ref)" >> "$GITHUB_OUTPUT"
+
+    - name: Build and start minimega
+      id: mm
+      uses: ./phenix/.github/actions/minimega
+      with:
+        ref: ${{ steps.pins.outputs.minimega }}
+        # The job's one Go cache, restored before anything builds.
+        go-cache-dependency-path: |
+          minimega/go.sum
+          phenix/src/go/go.sum
+
+    # After the minimega action, whose own setup-go would otherwise stay first
+    # on PATH: phenix, the E2E tests and the apps' Go binaries build with
+    # phenix's Go, not with the version minimega's go.mod names.
+    - name: Set up Go for phenix
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        # The minimega action restored the cache.
+        cache: false
+
+    - name: Build phenix
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        sudo apt-get update -q
+        sudo apt-get install -y -q protobuf-compiler
+        make -C phenix/src/go phenix
+        sudo install -m 0755 phenix/src/go/bin/phenix /usr/local/bin/phenix
+        sudo mkdir -p /phenix/images /phenix/experiments
+        phenix version
+
+    - name: Install the phenix image builder
+      if: inputs.image-builder == 'true'
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        VMDB2_REF: ${{ steps.pins.outputs.vmdb2 }}
+      run: |
+        set -euo pipefail
+        # The same packages the phenix container installs for image builds,
+        # plus the Debian archive keyring that debootstrap needs for Debian
+        # releases on an Ubuntu runner.
+        sudo apt-get install -y -q --no-install-recommends \
+          cmdtest cpio debootstrap debian-archive-keyring git kpartx parted \
+          psmisc python3 python3-jinja2 python3-yaml qemu-utils xz-utils zerofree
+        sudo git init -q /opt/vmdb2
+        sudo git -C /opt/vmdb2 fetch -q --depth 1 https://gitlab.com/glattercj/vmdb2.git "$VMDB2_REF"
+        sudo git -C /opt/vmdb2 checkout -q FETCH_HEAD
+        sudo ln -sf /opt/vmdb2/vmdb2 /usr/bin/vmdb2
+        sudo git -C /opt/vmdb2 log -1 --format='vmdb2 %H %cd'
+
+    # Kali releases: debootstrap ships the kali scripts but not the keyring;
+    # the phenix container fetches it the same way. Other recipes do not
+    # depend on archive.kali.org being reachable.
+    - name: Install the Kali archive keyring
+      if: inputs.kali-keyring == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo wget -q -O /usr/share/keyrings/kali-archive-keyring.gpg https://archive.kali.org/archive-keyring.gpg

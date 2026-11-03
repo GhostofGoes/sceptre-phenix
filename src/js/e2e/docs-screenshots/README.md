@@ -45,6 +45,18 @@ sample data.
 Pages render at 1600 by 900 pixels at twice the pixel density. Review the new
 images, and the alt text of each one in the docs, before committing them.
 
+## Images of a running experiment
+
+`live.spec.js` retakes the SCORCH runs page and State of Health graph images,
+which need a real experiment. It runs only when `DOCS_LIVE_EXPERIMENT` names
+the experiment, so `npm run docs-screenshots` skips it. The temporary
+`Docs screenshots (live)` workflow (`.github/workflows/docs-screenshots-live.yml`)
+runs it on a GitHub runner: it builds the `ntp` guest image, starts minimega
+and `phenix ui`, creates and starts the `scorch-demo` experiment from
+`live/topology.yaml` and `live/scenario.yaml` with `live/run-experiment.sh`,
+and uploads the images as the `docs-screenshots-live` artifact. Copy them into
+`docs/content/images` after looking at them.
+
 ## Adding an image
 
 Add a test named after the image file, without `.png`. Put the responses the

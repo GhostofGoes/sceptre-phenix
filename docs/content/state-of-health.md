@@ -146,12 +146,12 @@ firewall).
 Clicking on the node with an orange border will produce a details modal with the
 current error reporting.
 
-![server VM Details dialog reporting a CPU load of 0.26 and a listener on port 465 that is not listening.](images/soh_log_details.png){: width=800 .center}
+![server Details dialog reporting its CPU load and a listener on port 465 that is not listening.](images/soh_log_details.png){: width=800 .center}
 
 If there are no errors to report and command and control is enabled, the details
 modal will only show the current CPU load.
 
-![client2 VM Details dialog reporting only a CPU load of 0.18.](images/soh_details.png){: width=800 .center}
+![client2 Details dialog reporting only its CPU load.](images/soh_details.png){: width=800 .center}
 
 Note the green button in the lower right corner of the modal; this will provide
 access to the VNC for any running VM. When the VM is not running, access to the
@@ -159,7 +159,7 @@ VNC will be disabled. Finally, if there is no SoH information to report on a
 given VM, it will be noted in the details modal. The following screenshot is an
 example of no SoH information with the VNC button disabled.
 
-![VM Details dialog saying there is no state of health data available for the VM.](images/soh_no_details.png){: width=800 .center}
+![spare Details dialog saying there is no state of health data available for the VM, with its VNC button disabled.](images/soh_no_details.png){: width=800 .center}
 
 ## Graph Layouts
 

@@ -1,0 +1,62 @@
+# The topology of the scorch-demo experiment the live documentation
+# screenshots are taken from (see ../README.md). Two real guests on one VLAN,
+# built from the ntp recipe of sceptre-phenix-images, and one VM that never
+# boots, for the "no state of health data" dialog.
+apiVersion: phenix.sandia.gov/v1
+kind: Topology
+metadata:
+  name: scorch-demo
+spec:
+  nodes:
+    - type: VirtualMachine
+      general:
+        hostname: server
+      hardware:
+        vcpus: 1
+        memory: 1024
+        os_type: linux
+        drives:
+          - image: ntp.qc2
+      network:
+        interfaces:
+          - name: eth0
+            type: ethernet
+            proto: static
+            vlan: EXP
+            address: 10.10.0.1
+            mask: 24
+    - type: VirtualMachine
+      general:
+        hostname: client2
+      hardware:
+        vcpus: 1
+        memory: 1024
+        os_type: linux
+        drives:
+          - image: ntp.qc2
+      network:
+        interfaces:
+          - name: eth0
+            type: ethernet
+            proto: static
+            vlan: EXP
+            address: 10.10.0.2
+            mask: 24
+    - type: VirtualMachine
+      general:
+        hostname: spare
+        do_not_boot: true
+      hardware:
+        vcpus: 1
+        memory: 1024
+        os_type: linux
+        drives:
+          - image: ntp.qc2
+      network:
+        interfaces:
+          - name: eth0
+            type: ethernet
+            proto: static
+            vlan: EXP
+            address: 10.10.0.3
+            mask: 24

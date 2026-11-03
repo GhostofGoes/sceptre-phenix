@@ -1,0 +1,84 @@
+# The scenario of the scorch-demo experiment the live documentation
+# screenshots are taken from (see ../README.md).
+#
+# The soh app checks a port the server does not listen on, so its node is
+# ringed orange and its details dialog has a failing Listeners row, while
+# client2 reports only its CPU load. The SCORCH components are built-in pause
+# and break components named after the apps the documentation's example
+# scenario uses: the baseline run pauses at a break point in its stop stage
+# with hoststats still running in the background, and the failing run fails
+# in its configure stage.
+apiVersion: phenix.sandia.gov/v2
+kind: Scenario
+metadata:
+  name: scorch-demo
+  annotations:
+    topology: scorch-demo
+spec:
+  apps:
+    - name: soh
+      metadata:
+        c2Timeout: 4m
+        skipInitialNetworkConfigTests: true
+        testReachability: 'off'
+        hostListeners:
+          server:
+            - ':465'
+    - name: scorch
+      metadata:
+        runs:
+          - name: baseline
+            configure:
+              - snort
+            start:
+              - hoststats
+              - vmstats
+            loop:
+              count: 1
+              start:
+                - tcpdump
+                - snort
+                - trafficgen
+              stop:
+                - trafficgen
+                - snort
+                - tcpdump
+            stop:
+              - vmstats
+              - hoststats
+              - break
+          - name: failing
+            configure:
+              - trafficgen
+              - snort
+            start:
+              - vmstats
+            stop:
+              - vmstats
+        components:
+          - name: trafficgen
+            type: pause
+            metadata:
+              duration: 2s
+              failStages:
+                - configure
+          - name: snort
+            type: pause
+            metadata:
+              duration: 4s
+          - name: tcpdump
+            type: pause
+            metadata:
+              duration: 2s
+          - name: vmstats
+            type: pause
+            metadata:
+              duration: 2s
+          - name: hoststats
+            type: pause
+            background: true
+            metadata:
+              duration: 10m
+          - name: break
+            type: break
+            metadata: {}

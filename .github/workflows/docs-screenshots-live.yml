@@ -1,0 +1,229 @@
+# Temporary: retakes the documentation screenshots that need a running
+# experiment (the SCORCH runs page and the State of Health graph) on a
+# runner with a real minimega, and uploads them as an artifact. Run it by
+# hand from the Actions tab; nothing triggers it on its own. It reuses the
+# E2E runner setup (.github/actions/e2e-setup) and builds the ntp guest image
+# from the sceptre-phenix-images recipes, which it caches between runs.
+name: Docs screenshots (live)
+
+on:
+  workflow_dispatch:
+    inputs:
+      images-repository:
+        description: Repository of the image recipes (owner/name)
+        type: string
+        default: GhostofGoes/sceptre-phenix-images
+      images-ref:
+        description: Ref of the image recipes
+        type: string
+        default: ci-e2e-minimega
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-screenshots-live-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  IMAGE: ntp
+
+jobs:
+  image:
+    name: Image ntp
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Check out phenix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: phenix
+          persist-credentials: false
+
+      - name: Check out the image recipes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.images-repository }}
+          ref: ${{ inputs.images-ref }}
+          path: images
+          persist-credentials: false
+
+      # The same inputs as the E2E workflow's image cache, under a key of its
+      # own, since caches are only shared within a branch and its base.
+      - name: Compute the cache key
+        id: key
+        env:
+          BUILDER: ${{ hashFiles('phenix/src/go/api/image/**', 'phenix/src/go/cmd/image.go', 'phenix/src/go/types/version/v1/image.go', 'phenix/src/go/tmpl/templates/vmdb.tmpl', 'phenix/src/go/tmpl/templates/miniccc/**', 'phenix/src/go/tmpl/templates/minirouter/**', 'phenix/src/go/tmpl/templates/protonuke/**', 'phenix/src/go/tmpl/tmpl.go', 'phenix/src/go/util/mm/mmcli/**', 'phenix/src/go/util/shell/**', 'phenix/.github/e2e/minimega.ref', 'phenix/.github/e2e/vmdb2.ref', 'phenix/.github/actions/minimega/action.yml', 'phenix/.github/actions/e2e-setup/action.yml', '!phenix/src/go/**/*_test.go') }}
+          ALL_RECIPES: ${{ hashFiles('images/Makefile', 'images/overlays/**', 'images/scripts/**') }}
+        run: |
+          set -euo pipefail
+          if [ -f images/.github/scripts/changed_recipes.py ]; then
+            recipe=$(cd images && python3 .github/scripts/changed_recipes.py --inputs "$IMAGE" | sha256sum | cut -c1-32)
+          else
+            recipe="$ALL_RECIPES"
+          fi
+          echo "key=docs-screenshots-image-$IMAGE-$(date -u +%Y-%m)-$recipe-${BUILDER:0:32}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Restore the image
+        id: cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: e2e-images/${{ env.IMAGE }}.qc2
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Set up phenix and minimega, and the image builder
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./phenix/.github/actions/e2e-setup
+        with:
+          image-builder: 'true'
+
+      - name: Free disk space for the build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
+          df -h /
+
+      - name: Build the image with the images Makefile
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: images
+        run: |
+          set -euo pipefail
+          # The Makefile injects ./miniccc from the working directory.
+          cp /usr/local/bin/miniccc /usr/local/bin/minirouter /usr/local/bin/protonuke .
+          start=$(date +%s)
+          make "$IMAGE" PHENIX="sudo /usr/local/bin/phenix --store.endpoint bolt:///etc/phenix/store.bdb"
+          echo "built $IMAGE in $(( $(date +%s) - start )) s"
+          mkdir -p ../e2e-images
+          sudo mv "$IMAGE.qc2" "../e2e-images/$IMAGE.qc2"
+          sudo chown "$(id -u):$(id -g)" "../e2e-images/$IMAGE.qc2"
+          qemu-img info "../e2e-images/$IMAGE.qc2"
+
+      - name: Save the image
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: e2e-images/${{ env.IMAGE }}.qc2
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Hand the image to the capture job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-screenshots-image-${{ env.IMAGE }}
+          path: e2e-images/${{ env.IMAGE }}.qc2
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload the build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-screenshots-buildlog-${{ env.IMAGE }}
+          path: images/*.log
+          if-no-files-found: ignore
+          overwrite: true
+
+  capture:
+    name: Capture
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DOCS_LIVE_EXPERIMENT: scorch-demo
+      DOCS_LIVE_UI_ADDR: 127.0.0.1:3080
+      DOCS_LIVE_LOG: /tmp/phenix-ui.log
+    steps:
+      - name: Check out phenix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: phenix
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            phenix/src/js/package-lock.json
+            phenix/src/js/e2e/package-lock.json
+
+      # Before e2e-setup builds the Go binary, which embeds whatever
+      # src/go/web/public holds: the UI the screenshots show.
+      - name: Build the web UI
+        working-directory: phenix/src/js
+        env:
+          VITE_AUTH: disabled
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          cp -a dist/* ../go/web/public/
+
+      - name: Set up phenix and minimega
+        uses: ./phenix/.github/actions/e2e-setup
+
+      - name: Download the image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-screenshots-image-${{ env.IMAGE }}
+          path: e2e-images
+
+      - name: Install the image
+        run: |
+          set -euo pipefail
+          sudo mv "e2e-images/$IMAGE.qc2" "/phenix/images/$IMAGE.qc2"
+          ls -lh /phenix/images
+
+      - name: Install Playwright
+        working-directory: phenix/src/js/e2e
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Start phenix ui and the experiment
+        run: phenix/src/js/e2e/docs-screenshots/live/run-experiment.sh start
+
+      - name: Capture the screenshots
+        working-directory: phenix/src/js/e2e
+        env:
+          E2E_BASE_URL: http://${{ env.DOCS_LIVE_UI_ADDR }}
+          DOCS_IMAGES_DIR: ${{ runner.temp }}/live-images
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCS_IMAGES_DIR"
+          npx playwright test -c docs-screenshots.config.js live.spec.js
+
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-screenshots-live
+          path: ${{ runner.temp }}/live-images
+          if-no-files-found: warn
+          overwrite: true
+
+      - name: Stop the experiment
+        if: always()
+        run: phenix/src/js/e2e/docs-screenshots/live/run-experiment.sh stop
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          sudo cp "$DOCS_LIVE_LOG" /tmp/minimega/minimega.log /tmp/minimega/minimega.stdout "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo cp -r /var/log/phenix "$RUNNER_TEMP/logs/phenix" 2>/dev/null || true
+          cp -r phenix/src/js/e2e/test-results "$RUNNER_TEMP/logs/test-results" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/logs"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-screenshots-live-logs
+          path: ${{ runner.temp }}/logs
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
