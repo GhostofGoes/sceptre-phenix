@@ -285,11 +285,18 @@ func TestBuilderExportTopologyRefusesAsPublishDoes(t *testing.T) {
 			refusal: "phenix cannot publish topology no-vlan: ",
 		},
 		{
-			// phenix's schema requires the key.
-			name:     "missing VLAN",
-			document: exportVLANDocument(map[string]any{"name": "eth0"}),
-			exports:  false,
-			refusal:  "phenix cannot publish topology no-vlan: ",
+			// phenix's schema requires the key. The export fills in the empty
+			// VLAN, as the editor leaves it, and lists the interfaces.
+			name: "missing VLAN",
+			document: exportVLANDocument(
+				map[string]any{"name": "eth0"},
+				map[string]any{"name": "eth1", "vlan": nil},
+				map[string]any{"name": "eth2"},
+				map[string]any{"name": "eth3", "vlan": nil},
+				map[string]any{"name": "eth4", "vlan": "EXP"},
+			),
+			exports: true,
+			refusal: "phenix cannot publish topology no-vlan: ",
 		},
 		{
 			name:     "invalid MAC address",
@@ -322,14 +329,17 @@ func TestBuilderExportTopologyRefusesAsPublishDoes(t *testing.T) {
 			exportCause:   `Error at "/mac"`,
 		},
 		{
-			// The schema refuses the missing VLAN too, so its error is why.
+			// The export fills in the missing VLAN, so the MAC address is
+			// why the schema refuses, as for an empty VLAN.
 			name: "missing VLAN and invalid MAC address",
 			document: exportVLANDocument(
 				map[string]any{"name": "eth0"},
 				map[string]any{"name": "eth1", "vlan": "EXP", "mac": "not-a-mac"},
 			),
-			exports: false,
-			refusal: "phenix cannot publish topology no-vlan: ",
+			exports:       false,
+			refusal:       "phenix cannot publish topology no-vlan: ",
+			exportRefusal: "Builder document cannot be published as topology no-vlan",
+			exportCause:   `Error at "/mac"`,
 		},
 	}
 
@@ -388,8 +398,44 @@ func TestBuilderExportTopologyRefusesAsPublishDoes(t *testing.T) {
 			if hostnames := topologySpecHostnames(exported.Spec); !slices.Equal(hostnames, []string{"host"}) {
 				t.Errorf("exported spec hostnames = %q, want [host]", hostnames)
 			}
+
+			// Every exported interface has a vlan key, as the schema requires.
+			for index, iface := range exportedInterfaces(t, exported.Spec) {
+				if vlan, ok := iface["vlan"].(string); !ok {
+					t.Errorf("exported interface %d vlan = %v, want a string", index, iface["vlan"])
+				} else if index < 4 && strings.TrimSpace(vlan) != "" {
+					t.Errorf("exported interface %d vlan = %q, want an empty VLAN", index, vlan)
+				}
+			}
 		})
 	}
+}
+
+// exportedInterfaces returns the interfaces of the first node of an exported topology spec.
+func exportedInterfaces(t *testing.T, spec map[string]any) []map[string]any {
+	t.Helper()
+
+	nodes, _ := spec["nodes"].([]any)
+	if len(nodes) == 0 {
+		t.Fatalf("exported spec has no nodes: %v", spec)
+	}
+
+	node, _ := nodes[0].(map[string]any)
+	network, _ := node["network"].(map[string]any)
+	entries, _ := network["interfaces"].([]any)
+
+	ifaces := make([]map[string]any, 0, len(entries))
+
+	for _, entry := range entries {
+		iface, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("exported interface is not an object: %v", entry)
+		}
+
+		ifaces = append(ifaces, iface)
+	}
+
+	return ifaces
 }
 
 // TestBuilderExportTopologyNamesSharedAddresses exports interfaces that share

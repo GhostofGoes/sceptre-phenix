@@ -334,8 +334,6 @@ func (d *Document) ExportTopologyConfig(name string) (*TopologyExport, error) {
 
 	if projection.schema != nil {
 		switch {
-		case projection.absentVLANs != nil:
-			return nil, projection.absentVLANs
 		case projection.shortHostnames != nil:
 			return nil, projection.shortHostnames
 		case projection.noDrives != nil:
@@ -374,10 +372,6 @@ type topologyProjection struct {
 	// blockers are the checks only publishing makes that config fails, in the
 	// order publishing makes them (see [Document.projectTopology]).
 	blockers []error
-	// absentVLANs is the blocker naming the interfaces without a VLAN when
-	// one of them has no vlan key, or a null one, which phenix's schema
-	// refuses too, and nil otherwise.
-	absentVLANs error
 	// shortHostnames is the blocker naming the hostnames phenix refuses when
 	// one of them is a single character, which phenix's schema refuses too,
 	// and nil otherwise.
@@ -405,18 +399,15 @@ func (d *Document) projectTopology(name string) (*topologyProjection, error) {
 
 	projection := &topologyProjection{
 		config: config, topology: topology, warnings: slices.Clone(topology.Warnings),
-		blockers: nil, absentVLANs: nil, shortHostnames: nil, noDrives: nil, schema: nil,
+		blockers: nil, shortHostnames: nil, noDrives: nil, schema: nil,
 	}
 
 	nodes := d.projectedNodes()
 
-	if vlans, absent := checkInterfaceVLANs(config.Spec, nodes); vlans != nil {
-		blocker := fmt.Errorf("validating topology projection: %w", vlans)
-		projection.blockers = append(projection.blockers, blocker)
+	fillAbsentVLANs(config.Spec)
 
-		if absent {
-			projection.absentVLANs = blocker
-		}
+	if vlans := checkInterfaceVLANs(config.Spec, nodes); vlans != nil {
+		projection.blockers = append(projection.blockers, fmt.Errorf("validating topology projection: %w", vlans))
 	}
 
 	if addresses := d.checkInterfaceAddresses(); addresses != nil {
@@ -454,14 +445,13 @@ func (d *Document) projectTopology(name string) (*topologyProjection, error) {
 
 // checkInterfaceVLANs refuses a spec in which an interface of a node that phenix starts has no VLAN or an empty one.
 // phenix stores such a topology, but minimega refuses the interface at experiment start.
-// It also reports whether a vlan key is missing or null, which the phenix schema refuses too.
-func checkInterfaceVLANs(spec map[string]any, nodes []specNode) (*InterfaceVLANError, bool) {
+// The projection gives an interface without a vlan key the empty VLAN first (see [fillAbsentVLANs]).
+func checkInterfaceVLANs(spec map[string]any, nodes []specNode) *InterfaceVLANError {
 	entries, _ := spec[keyNodes].([]any)
 
 	var (
 		problems []string
 		issues   []Issue
-		absent   bool
 	)
 
 	for position, entry := range entries {
@@ -475,12 +465,9 @@ func checkInterfaceVLANs(spec map[string]any, nodes []specNode) (*InterfaceVLANE
 		labels := interfaceLabels(ifaces)
 
 		for index, iface := range ifaces {
-			named, missing := specInterfaceVLAN(iface)
-			if named {
+			if specInterfaceVLAN(iface) {
 				continue
 			}
-
-			absent = absent || missing
 
 			problem := fmt.Sprintf(
 				"interface %s of device %q has no VLAN: connect it to a network, or type a VLAN for it",
@@ -496,10 +483,10 @@ func checkInterfaceVLANs(spec map[string]any, nodes []specNode) (*InterfaceVLANE
 	}
 
 	if len(problems) == 0 {
-		return nil, false
+		return nil
 	}
 
-	return &InterfaceVLANError{Problems: problems, issues: issues}, absent
+	return &InterfaceVLANError{Problems: problems, issues: issues}
 }
 
 // checkHostnames refuses a spec with a hostname phenix refuses (see [checkHostname]), skipping external nodes.
@@ -890,23 +877,44 @@ func trimASCIISpace(text string) string {
 	return strings.Trim(text, " \t\n\v\f\r")
 }
 
-// specInterfaceVLAN reports whether a spec interface entry names a VLAN and, when
-// it does not, whether its vlan is missing or null rather than blank. An entry
-// of the wrong shape, or a VLAN that is not a string, is left to the schema.
-func specInterfaceVLAN(iface any) (bool, bool) {
+// specInterfaceVLAN reports whether iface, an interface of a node spec, names a VLAN.
+// An interface that is not an object counts as named: the schema refuses it for its own reason.
+func specInterfaceVLAN(iface any) bool {
 	asMap, ok := iface.(map[string]any)
 	if !ok {
-		return true, false
+		return true
 	}
 
 	value := asMap["vlan"]
 	if value == nil {
-		return false, true
+		return false
 	}
 
 	vlan, ok := value.(string)
 
-	return !ok || strings.TrimSpace(vlan) != "", false
+	return !ok || strings.TrimSpace(vlan) != ""
+}
+
+// fillAbsentVLANs gives each interface of a node that phenix starts that has
+// no vlan key, or a null one, the empty VLAN, which the editor leaves on an
+// interface that it disconnects. The phenix schema requires the key, so the
+// projection still exports, and the publish checks name the interface either
+// way (see [checkInterfaceVLANs]). An external node keeps its spec.
+func fillAbsentVLANs(spec map[string]any) {
+	entries, _ := spec[keyNodes].([]any)
+
+	for _, entry := range entries {
+		node, ok := entry.(map[string]any)
+		if !ok || node["external"] != nil {
+			continue
+		}
+
+		for _, iface := range specNodeInterfaces(node) {
+			if asMap, ok := iface.(map[string]any); ok && asMap["vlan"] == nil {
+				asMap["vlan"] = ""
+			}
+		}
+	}
 }
 
 // SpecV1 decodes the mapped topology spec into the versioned phenix topology spec.

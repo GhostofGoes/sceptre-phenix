@@ -457,16 +457,18 @@ func unconnectedHost(t *testing.T) (*builder.Document, map[string]any) {
 }
 
 // Publishing refuses an interface with an empty VLAN, naming the device and interface, before
-// minimega would. An export returns it as a blocker and refuses what phenix's schema refuses.
+// minimega would. An export returns it as a blocker, and gives an interface with no vlan key, or a
+// null one, the empty VLAN, as the editor leaves a disconnected interface.
 func TestPublishTopologyRefusesInterfaceWithoutVLAN(t *testing.T) {
 	for name, tt := range map[string]struct {
-		set     func(map[string]any)
-		exports bool
+		set func(map[string]any)
+		// want is the VLAN the exported interface has.
+		want string
 	}{
-		"empty":   {set: func(iface map[string]any) { iface["vlan"] = "" }, exports: true},
-		"blank":   {set: func(iface map[string]any) { iface["vlan"] = "  " }, exports: true},
-		"null":    {set: func(iface map[string]any) { iface["vlan"] = nil }, exports: false},
-		"missing": {set: func(iface map[string]any) { delete(iface, "vlan") }, exports: false},
+		"empty":   {set: func(iface map[string]any) { iface["vlan"] = "" }, want: ""},
+		"blank":   {set: func(iface map[string]any) { iface["vlan"] = "  " }, want: "  "},
+		"null":    {set: func(iface map[string]any) { iface["vlan"] = nil }, want: ""},
+		"missing": {set: func(iface map[string]any) { delete(iface, "vlan") }, want: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			doc, eth0 := unconnectedHost(t)
@@ -494,18 +496,6 @@ func TestPublishTopologyRefusesInterfaceWithoutVLAN(t *testing.T) {
 			}
 
 			export, exportErr := doc.ExportTopologyConfig("no-vlan")
-			if !tt.exports {
-				if export != nil {
-					t.Errorf("ExportTopologyConfig(no-vlan) = %v, want nil", export)
-				}
-
-				if exportErr == nil || exportErr.Error() != err.Error() {
-					t.Errorf("ExportTopologyConfig(no-vlan) error = %v, want the publish error %v", exportErr, err)
-				}
-
-				return
-			}
-
 			if exportErr != nil {
 				t.Fatalf("ExportTopologyConfig returned error: %v", exportErr)
 			}
@@ -514,35 +504,33 @@ func TestPublishTopologyRefusesInterfaceWithoutVLAN(t *testing.T) {
 				t.Errorf("ExportTopologyConfig(no-vlan) PublishBlockers mismatch, want the publish error (-want +got):\n%s", diff)
 			}
 
-			if vlan := specInterface(t, storedNode(t, export.Config.Spec, "host-a"), "eth0")["vlan"]; vlan != eth0["vlan"] {
-				t.Errorf("ExportTopologyConfig(no-vlan) host-a eth0 vlan = %q, want %q", vlan, eth0["vlan"])
+			if vlan := specInterface(t, storedNode(t, export.Config.Spec, "host-a"), "eth0")["vlan"]; vlan != tt.want {
+				t.Errorf("ExportTopologyConfig(no-vlan) host-a eth0 vlan = %q, want %q", vlan, tt.want)
 			}
 		})
 	}
 }
 
 // Publishing refuses a projection the schema refuses for its VLAN-less interface or shared address
-// first. An export names the VLAN only when its key is missing or null, else the schema's reason.
+// first. An export names the schema's reason, whatever the VLAN of the interface is.
 func TestExportTopologyConfigRefusesForTheSchemaReason(t *testing.T) {
 	for name, tt := range map[string]struct {
 		set func(map[string]any)
 		// address is whether publishing refuses the shared address rather
 		// than the VLAN.
 		address bool
-		// vlan is whether the export is refused for the VLAN.
-		vlan bool
 	}{
-		"blank":   {set: func(iface map[string]any) { iface["vlan"] = " " }, address: false, vlan: false},
-		"empty":   {set: func(iface map[string]any) { iface["vlan"] = "" }, address: false, vlan: false},
-		"null":    {set: func(iface map[string]any) { iface["vlan"] = nil }, address: false, vlan: true},
-		"missing": {set: func(iface map[string]any) { delete(iface, "vlan") }, address: false, vlan: true},
+		"blank":   {set: func(iface map[string]any) { iface["vlan"] = " " }, address: false},
+		"empty":   {set: func(iface map[string]any) { iface["vlan"] = "" }, address: false},
+		"null":    {set: func(iface map[string]any) { iface["vlan"] = nil }, address: false},
+		"missing": {set: func(iface map[string]any) { delete(iface, "vlan") }, address: false},
 		// The router's eth0 has this address too, on network EXP.
 		"shared address": {
 			set: func(iface map[string]any) {
 				iface["address"] = "10.0.0.1"
 				iface["vlan"] = "EXP"
 			},
-			address: true, vlan: false,
+			address: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -581,14 +569,6 @@ func TestExportTopologyConfigRefusesForTheSchemaReason(t *testing.T) {
 
 			if err == nil {
 				t.Fatal("ExportTopologyConfig(mixed) error = nil, want a refusal")
-			}
-
-			if tt.vlan {
-				if err.Error() != publishRefusal.Error() {
-					t.Errorf("ExportTopologyConfig(mixed) error = %v, want the publish error %v", err, publishRefusal)
-				}
-
-				return
 			}
 
 			if errors.As(err, &vlanErr) || errors.As(err, &addressErr) {
