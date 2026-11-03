@@ -63,15 +63,19 @@ test.describe('scorch', () => {
 
   test('legend', async ({ page }) => {
     await runsPage(page);
+    // Each legend row spans the page, so the region runs from the first
+    // row's first symbol to the second row's last label.
     const rows = page.locator('.columns.is-vcentered');
     await shootRegion(
       page,
       [
-        rows.filter({ hasText: 'Uninitialized' }),
-        rows.filter({ hasText: 'Break Point' }),
+        rows.filter({ hasText: 'Uninitialized' }).locator('svg').first(),
+        rows
+          .filter({ hasText: 'Break Point' })
+          .getByText('Failure', { exact: true }),
       ],
       'legend',
-      12,
+      20,
     );
   });
 
@@ -109,7 +113,8 @@ test.describe('scorch', () => {
     await expect(terminal.locator('h2.modal-card-title')).toHaveText(
       `Terminal (${exp})`,
     );
-    await terminal.locator('.xterm').click();
+    // xterm.js's own element; the component's wrapper is also .xterm.
+    await terminal.locator('.xterm.terminal').click();
     await page.waitForTimeout(2000);
     // The shell starts in a temporary directory with the runner's host name in
     // its prompt and no TERM; the image should show neither.
