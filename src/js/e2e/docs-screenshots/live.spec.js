@@ -33,6 +33,19 @@ const runCard = (page, name) =>
 const node = (scope, label, status) =>
   scope.getByRole('button', { name: `${label}, status ${status}` });
 
+// A terminal's title and its first lines: the rest of the window is empty.
+async function shootTerminal(page, dialog, name) {
+  await shootRegion(
+    page,
+    [
+      dialog.locator('h2.modal-card-title'),
+      dialog.locator('.xterm-rows > div').nth(5),
+    ],
+    name,
+    20,
+  );
+}
+
 // Both run cards and the legend fit in a tall window, so no capture needs
 // to scroll.
 async function runsPage(page) {
@@ -126,7 +139,7 @@ test.describe('scorch', () => {
     await page.waitForTimeout(1000);
     await page.keyboard.type('pwd\n');
     await page.waitForTimeout(2000);
-    await shoot(terminal, 'read-write');
+    await shootTerminal(page, terminal, 'read-write');
 
     // Every later client, here a second browser context, only watches.
     const { baseURL, viewport, deviceScaleFactor } = test.info().project.use;
@@ -146,7 +159,7 @@ test.describe('scorch', () => {
       `Terminal (${exp}) (read-only)`,
     );
     await watcherPage.waitForTimeout(2000);
-    await shoot(readOnly, 'read-only');
+    await shootTerminal(watcherPage, readOnly, 'read-only');
     await watcher.close();
 
     // Exiting the terminal lets the run finish its cleanup.
@@ -163,6 +176,10 @@ test.describe('scorch', () => {
     await expect(output.locator('textarea')).not.toHaveValue('', {
       timeout: 30000,
     });
+    // The output box fills the window; a few lines show what it holds.
+    await output
+      .locator('textarea')
+      .evaluate((el) => el.style.setProperty('height', '10em', 'important'));
     await shoot(output, 'output');
     await output.getByRole('button', { name: 'Exit' }).click();
     await expect(output).toBeHidden();
@@ -171,6 +188,8 @@ test.describe('scorch', () => {
     await node(card, 'loop', 'success').click();
     await expect(card.locator('h2.run-title')).toHaveText(/\(loop 1\)/);
     await expect(node(card, 'done', 'success')).toBeVisible();
+    // Clicking the parent's node left its focus ring on the loop's node.
+    await page.evaluate(() => document.activeElement?.blur());
     await shoot(card, 'loop');
     await card
       .getByRole('button', { name: 'Return to the previous loop' })
