@@ -15,7 +15,7 @@ removed the legacy Builder.
 | A line between two devices | A direct connection | A switch for each network. Converting adds the missing switch |
 | Experiment variables | Placeholders such as `$DEFAULT_MEMORY` | The values, in each node |
 | Tag on the **Configs** page | `builder legacy` | `builder` |
-| REST routes | `POST /builder/save`, `/api/v1/builder/topologies`, `/api/v1/experiments/builder` | Removed (see [REST API](administration.md#rest-api)) |
+| REST routes | `POST /builder/save`, `/api/v1/builder/topologies`, `/api/v1/experiments/builder` | Removed (see [REST API](details/administration.md#rest-api)) |
 
 Topologies from the legacy Builder still run, because phenix never read the
 diagram to run an experiment. Convert a diagram only to edit it as a
@@ -57,9 +57,9 @@ annotations. The topology then has the tag `builder`.
 On the **Configs** page, the `builder legacy` tag and the **Import into
 Builder** button of the viewer open the same **Import** dialog, set to that
 topology (see
-[Import, Upload and Download](import-upload-download.md#from-the-configs-page)).
+[Import, Upload and Download](details/import-upload-download.md#from-the-configs-page)).
 
-With the [import options](import-upload-download.md#import-options), a
+With the [import options](details/import-upload-download.md#import-options), a
 copy, or a draft that combines the included topologies, publishes a new
 topology. The legacy topology then keeps its `builder-xml`.
 
@@ -70,7 +70,7 @@ a different name.
 
 If the topology or its legacy diagram changes after the import, Publish
 refuses (see
-[When the source config changed](publishing.md#when-the-source-config-changed)).
+[When the source config changed](details/publishing.md#when-the-source-config-changed)).
 
 When the import cannot read the diagram, the draft has no layout from it
 (see [Warnings](#warnings)). Publishing then deletes `builder-xml` too, with
@@ -118,7 +118,7 @@ cannot update a stored topology, even one with the same name.
 
 Converting a file needs `configs` `get` and `create`. phenix keeps each
 `${NAME}` in a Topology config file as written (see
-[Importing a config file](import-upload-download.md#importing-a-config-file)).
+[Importing a config file](details/import-upload-download.md#importing-a-config-file)).
 If you close the dialog during the conversion, the conversion stops.
 
 ## What is converted

@@ -48,13 +48,13 @@ begin with a capital letter.
     `phenix config create` also takes a directory, and creates every
     configuration file below it. It skips a [Builder](builder/index.md)
     document in a directory, and refuses one named on the command line (see
-    [Builder documents and phenix config create](builder/import-upload-download.md#builder-documents-and-phenix-config-create)).
+    [Builder documents and phenix config create](builder/details/import-upload-download.md#builder-documents-and-phenix-config-create)).
 
 The `metadata` section can also hold `annotations`: text values by key, such
 as the `topology` and `scenario` annotations of an [Experiment](#experiment).
 The exception is `builder-doc`, a map of `digest`, `id` and `path` that names
 the Builder diagram of a Topology (see
-[The builder-doc annotation](builder/administration.md#the-builder-doc-annotation)).
+[The builder-doc annotation](builder/details/administration.md#the-builder-doc-annotation)).
 
 ## Topology
 
@@ -709,7 +709,7 @@ There are two ways to view a specific config:
 
 A topology with a [Builder](builder/index.md) diagram has the tag `builder`,
 and its `Edit` button opens the Builder, not the editor window (see
-[From the Configs page](builder/import-upload-download.md#from-the-configs-page)).
+[From the Configs page](builder/details/import-upload-download.md#from-the-configs-page)).
 
 ### Create a Config
 

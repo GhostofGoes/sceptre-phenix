@@ -38,7 +38,7 @@ and lists the files in `builder-assets.json` beside `index.html`.
 - `PHENIX_BROTLI_QUALITY` (0 to 11, default 9) sets the Brotli quality.
   The Docker and Podman images use 11. On the 7 Builder files (3.1 MB),
   quality 11 saves 74 kB over 9 and adds about 3 s to each build. User docs:
-  [Compressed files](https://phenix.sceptre.dev/latest/builder/administration/#compressed-files).
+  [Compressed files](https://phenix.sceptre.dev/latest/builder/details/administration/#compressed-files).
 
 ### The chunk the rest of the UI loads
 

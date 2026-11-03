@@ -75,7 +75,7 @@ remove one, because annotation maps merge.
 `config create` takes files and directories, and walks directories
 recursively. It skips a Builder document, template file or package in a
 directory, and refuses one named on the command line (see
-[Builder documents and phenix config create](https://phenix.sceptre.dev/latest/builder/import-upload-download/#builder-documents-and-phenix-config-create)).
+[Builder documents and phenix config create](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#builder-documents-and-phenix-config-create)).
 
 ## `phenix experiment` — experiment lifecycle
 

@@ -147,7 +147,7 @@ drafts, templates, layer sets and icons. It also controls Topology, Scenario
 and Experiment configs, and can list, get, create and update experiments.
 Global Viewer does not have `builder` `use`. See the policies in
 [Builder (`builder`)](#builder-builder) and
-[The Builder role](builder/administration.md#the-builder-role).
+[The Builder role](builder/details/administration.md#the-builder-role).
 
 ### Resources
 
@@ -481,7 +481,7 @@ cannot create or overwrite a User or Role config.
 |      |      |
 |------|------|
 | Verb | use |
-| Desc | use the Builder: read and change every Builder draft, template, layer set and icon (see [Builder permissions](builder/administration.md#permissions)) |
+| Desc | use the Builder: read and change every Builder draft, template, layer set and icon (see [Builder permissions](builder/details/administration.md#permissions)) |
 | Exp. Scoped | no |
 | Res. Scoped | no |
 
@@ -587,7 +587,7 @@ spec:
 
 phenix creates this role at start if the store does not have it. If a stored
 `builder` role does not have the `builder` `use` policy, phenix adds it (see
-[The Builder role](builder/administration.md#the-builder-role)).
+[The Builder role](builder/details/administration.md#the-builder-role)).
 
 ```yaml
 apiVersion: phenix.sandia.gov/v1

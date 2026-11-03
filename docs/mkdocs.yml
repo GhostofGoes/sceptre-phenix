@@ -84,17 +84,26 @@ nav:
     - Images: image.md
   - Builder:
     - Overview: builder/index.md
-    - Examples: builder/builder-examples.md
+    - Tutorial: builder/tutorial.md
     - Drafts: builder/drafts.md
     - The Editor: builder/editor.md
-    - Building a Diagram: builder/diagrams.md
-    - Node Templates: builder/templates.md
+    - Diagrams: builder/diagrams.md
+    - Templates and Icons: builder/templates.md
     - Import, Upload and Download: builder/import-upload-download.md
     - Publishing: builder/publishing.md
-    - Administration: builder/administration.md
     - Troubleshooting: builder/troubleshooting.md
-    - Error Codes: builder/error-codes.md
-    - Legacy Builder: builder/legacy.md
+    - Reference: builder/reference.md
+    - Advanced:
+      - Administration: builder/administration.md
+      - Legacy Builder: builder/legacy.md
+      - Details:
+        - Drafts: builder/details/drafts.md
+        - The Editor: builder/details/editor.md
+        - Diagrams: builder/details/diagrams.md
+        - Templates and Icons: builder/details/templates.md
+        - Import, Upload and Download: builder/details/import-upload-download.md
+        - Publishing: builder/details/publishing.md
+        - Administration: builder/details/administration.md
   - Apps:
     - Overview: apps.md
     - Examples: examples.md

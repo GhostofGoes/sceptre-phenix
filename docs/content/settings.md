@@ -81,7 +81,7 @@ The following global flags are supported by all `phenix` subcommands:
 
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--base-dir.builder-templates` | `string` | `<base-dir.phenix>/builder/templates` | Directory of Builder node template files that `phenix ui` reads at start. See [Template files on the server](builder/administration.md#template-files-on-the-server). |
+| `--base-dir.builder-templates` | `string` | `<base-dir.phenix>/builder/templates` | Directory of Builder node template files that `phenix ui` reads at start. See [Template files on the server](builder/details/administration.md#template-files-on-the-server). |
 | `--base-dir.injects` | `string` | `<base-dir.phenix>/injects` | Directory that `phenix workflow apply` stages topology injects into. The `phenix ui` server reports its value to the CLI, and the flag on the `phenix workflow apply` command line overrides it. See [Workflow](workflow.md). |
 | `--base-dir.minimega` | `string` | `/tmp/minimega` | Base minimega directory. |
 | `--base-dir.phenix` | `string` | `/phenix` | Base phēnix directory. |
@@ -120,7 +120,7 @@ The following global flags are supported by all `phenix` subcommands:
 | `mount-dir` | `PHENIX_MOUNT_DIR` | `<base-dir.phenix>/mounts` | Base directory used for VM filesystem mounts created via `phenix vm mount`. See [Mount a VM](vms.md#mount-a-vm). |
 | `base-dir.injects` | `PHENIX_BASE_DIR_INJECTS` | `<base-dir.phenix>/injects` | Directory that `phenix workflow apply` stages a topology directory's `phenix-injects/` into, as `<base-dir.injects>/<name>`. The phēnix server's value is used unless `--base-dir.injects` is given; see [Workflow](workflow.md#settings). Use an absolute path. **(Restart Required)** |
 | `base-dir.topologies` | `PHENIX_BASE_DIR_TOPOLOGIES` | `<base-dir.phenix>/topologies` | Directory where `phenix workflow apply NAME` looks for `NAME` when `NAME` isn't an existing path. Use an absolute path. See [Workflow](workflow.md). |
-| `base-dir.builder-templates` | `PHENIX_BASE_DIR_BUILDER_TEMPLATES` | `<base-dir.phenix>/builder/templates` | Directory of Builder node template files (`*.yaml`, `*.yml`, `*.json`) that `phenix ui` reads at start as read-only server collections. Use an absolute path. See [Template files on the server](builder/administration.md#template-files-on-the-server). **(Restart Required)** |
+| `base-dir.builder-templates` | `PHENIX_BASE_DIR_BUILDER_TEMPLATES` | `<base-dir.phenix>/builder/templates` | Directory of Builder node template files (`*.yaml`, `*.yml`, `*.json`) that `phenix ui` reads at start as read-only server collections. Use an absolute path. See [Template files on the server](builder/details/administration.md#template-files-on-the-server). **(Restart Required)** |
 
 ## Web UI Session Timeout
 

@@ -1,10 +1,10 @@
 # Node templates, layer sets and icons
 
 Part of the [Builder references](../builder.md). User docs:
-[Node Templates](https://phenix.sceptre.dev/latest/builder/templates/)
-(with its limits), [Layers](https://phenix.sceptre.dev/latest/builder/diagrams/#layers),
-[Custom icons](https://phenix.sceptre.dev/latest/builder/diagrams/#custom-icons),
-[Template files on the server](https://phenix.sceptre.dev/latest/builder/administration/#template-files-on-the-server).
+[Node Templates](https://phenix.sceptre.dev/latest/builder/details/templates/)
+(with its limits), [Layers](https://phenix.sceptre.dev/latest/builder/details/diagrams/#layers),
+[Custom icons](https://phenix.sceptre.dev/latest/builder/details/diagrams/#custom-icons),
+[Template files on the server](https://phenix.sceptre.dev/latest/builder/details/administration/#template-files-on-the-server).
 
 ## Template library
 

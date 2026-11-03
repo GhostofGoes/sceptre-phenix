@@ -1,6 +1,289 @@
-# Error Codes
+# Reference
 
-Each problem that Builder reports has a code: a stable, machine-readable
+This page holds the tables that the other pages point to, from the save
+states to the error codes. For the rules behind them, see the details
+page of each feature.
+
+## Save states
+
+The save state follows **Draft History** in the editor toolbar (see
+[How drafts save](details/drafts.md#how-drafts-save)).
+
+| Save state | What it means | What to do |
+|---|---|---|
+| All changes saved | The server has all changes. | Nothing. |
+| Saving changes, Saving 2 changes | Builder sends changes. | Wait. |
+| 2 unsaved changes | Changes wait. | Wait, or press <kbd>Ctrl</kbd>+<kbd>S</kbd> (<kbd>⌘</kbd>+<kbd>S</kbd> on macOS) to run **Save now**. |
+| Offline: 1 change kept on this device. Saving retries automatically. | The server cannot be reached, or did not answer in time. This browser keeps the changes. | Continue to work. See [Working offline](details/drafts.md#working-offline). |
+| Offline: 2 changes not stored anywhere yet. Keep this tab open. Saving retries automatically. | The server cannot be reached, and the browser cannot store the changes. | Keep the tab open until the save state says All changes saved. |
+| Offline: no unsaved changes | The server cannot be reached, and no changes wait. | Nothing. |
+| 1 change not saved yet. Choose which changes to save. | Another tab of this browser has changes to this draft. | See [Same draft in multiple tabs](details/drafts.md#same-draft-in-multiple-tabs). |
+| Merging your changes with the server version… | Someone saved a newer version first. Builder merges it with your changes. | Wait. See [Draft merging](details/drafts.md#draft-merging). |
+| This draft changed on the server | Someone saved a newer version first. Some changes clash, or merging is not available. | See [Draft merging](details/drafts.md#draft-merging). |
+| Not saved: you chose another tab's changes | You chose the changes of another tab. | Nothing. Builder keeps the changes of this tab as a new draft. |
+| Could not save: someone deleted this draft from the server. Select Download to keep a copy of the diagram. | Another user deleted the draft. | Click **Download** (see [Downloading](details/import-upload-download.md#downloading)). Upload the file to make a new draft. |
+| You cannot save changes to this draft | Your role no longer includes Builder. | Ask an administrator for the Builder permission (see [Permissions](details/administration.md#permissions)). Click **Download** to keep a copy. |
+| Could not save your last change. … When you fix the diagram, the Builder saves it again. | The server refused the diagram, for example for two devices with one hostname. The message names the error. | Fix it (see [Checks and warnings](details/editor.md#checks-and-warnings)). The next change saves the diagram. |
+| Could not save your changes. … Saving retries automatically. | The server refused the save for a different reason, which the message names. | Wait, or click **Retry saving**. |
+
+**Retry saving** shows when the browser is offline, or when a new try can
+fix a failed save. It sends the waiting changes immediately.
+
+![The toolbar with the save state Offline: 1 change kept on this device. Saving retries automatically., and the Retry saving button.](../images/builder/save-state-offline.png)
+
+## Keyboard shortcuts
+
+To see the shortcuts of your platform, click **Shortcuts** in the header,
+or press <kbd>?</kbd> outside a text field. "Not in text fields" means
+that the keys do nothing while focus is in a text field, or in a field of
+the Inspector. You can give any command other keys (see
+[Customizing shortcuts](details/editor.md#customizing-shortcuts)).
+
+| Action | Where it works | Windows and Linux | macOS |
+|---|---|---|---|
+| Command palette | Editor and Drafts page, text fields too | <kbd>Ctrl</kbd>+<kbd>K</kbd> | <kbd>⌘</kbd>+<kbd>K</kbd> |
+| Keyboard shortcuts | Editor and Drafts page, not in text fields | <kbd>?</kbd> | <kbd>?</kbd> |
+| Settings… | Editor and Drafts page, not in text fields | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | <kbd>⌥</kbd>+<kbd>⇧</kbd>+<kbd>S</kbd> |
+| Undo | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | <kbd>⌘</kbd>+<kbd>Z</kbd> |
+| Redo | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd> | <kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>Z</kbd> |
+| Copy | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>C</kbd> | <kbd>⌘</kbd>+<kbd>C</kbd> |
+| Paste | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>V</kbd> | <kbd>⌘</kbd>+<kbd>V</kbd> |
+| Duplicate | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>D</kbd> | <kbd>⌘</kbd>+<kbd>D</kbd> |
+| Delete selection | Canvas | <kbd>Delete</kbd> or <kbd>Backspace</kbd> | <kbd>⌫</kbd> or <kbd>⌦</kbd> |
+| Rename | Canvas | <kbd>F2</kbd> | <kbd>F2</kbd> |
+| Open Node Editor | Editor, not in text fields | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> | <kbd>⌥</kbd>+<kbd>⇧</kbd>+<kbd>E</kbd> |
+| Select all | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>A</kbd> | <kbd>⌘</kbd>+<kbd>A</kbd> |
+| Clear selection | Canvas | <kbd>Esc</kbd> | <kbd>esc</kbd> |
+| Select or deselect the focused item | Canvas | <kbd>Enter</kbd> or <kbd>Space</kbd> | <kbd>↩</kbd> or <kbd>Space</kbd> |
+| Add the focused item to the selection, or remove it from the selection | Canvas | <kbd>Shift</kbd>+<kbd>Enter</kbd> | <kbd>⇧</kbd>+<kbd>↩</kbd> |
+| Move to the nearest node in the direction of the arrow key | Canvas | <kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd> | <kbd>←</kbd> <kbd>↑</kbd> <kbd>→</kbd> <kbd>↓</kbd> |
+| Move through the connections of the focused node | Canvas | <kbd>PgDn</kbd> or <kbd>PgUp</kbd> | <kbd>⇟</kbd> or <kbd>⇞</kbd> |
+| Move the selected nodes 10 pixels | Canvas | <kbd>Shift</kbd> with an arrow key | <kbd>⇧</kbd> with an arrow key |
+| Resize the selected group, note, shape or icon 10 pixels | Canvas | <kbd>Alt</kbd>+<kbd>Shift</kbd> with an arrow key | <kbd>⌥</kbd>+<kbd>⇧</kbd> with an arrow key |
+| Group selection | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>G</kbd> | <kbd>⌘</kbd>+<kbd>G</kbd> |
+| Ungroup | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> | <kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>G</kbd> |
+| Auto-group by network | Editor, not in text fields | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> | <kbd>⌥</kbd>+<kbd>⇧</kbd>+<kbd>G</kbd> |
+| Auto layout | Editor, not in text fields | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | <kbd>⌥</kbd>+<kbd>⇧</kbd>+<kbd>L</kbd> |
+| Add device | Canvas | <kbd>N</kbd> | <kbd>N</kbd> |
+| Go to node | Editor, not in text fields | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> | <kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>O</kbd> |
+| Zoom in | Canvas | <kbd>=</kbd> or <kbd>+</kbd> | <kbd>=</kbd> or <kbd>+</kbd> |
+| Zoom out | Canvas | <kbd>−</kbd> | <kbd>−</kbd> |
+| Fit diagram to view | Canvas | <kbd>Shift</kbd>+<kbd>1</kbd> | <kbd>⇧</kbd>+<kbd>1</kbd> |
+| Show or hide connections | Editor, not in text fields | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | <kbd>⌥</kbd>+<kbd>⇧</kbd>+<kbd>C</kbd> |
+| Focus mode | Editor and Drafts page, text fields too | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> | <kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>F</kbd> |
+| Save now | Editor, text fields too | <kbd>Ctrl</kbd>+<kbd>S</kbd> | <kbd>⌘</kbd>+<kbd>S</kbd> |
+
+The canvas keys of the table work on the canvas, its nodes and its
+connections, but not on the zoom buttons. These details are not in the
+table:
+
+- From the canvas itself, the arrow keys go to the node nearest the middle of
+  the view.
+- When the focused node shows its [info tooltip](details/editor.md#info-tooltips), the first
+  <kbd>Esc</kbd> closes the tooltip, and the second clears the selection.
+- <kbd>Delete</kbd> deletes the focused item, or the full selection when the
+  focused item is in it.
+- With <kbd>Alt</kbd>+<kbd>Shift</kbd> (<kbd>⌥</kbd>+<kbd>⇧</kbd> on macOS),
+  <kbd>→</kbd> and <kbd>↓</kbd> make the item larger, and <kbd>←</kbd> and
+  <kbd>↑</kbd> make it smaller.
+- A second <kbd>Shift</kbd>+<kbd>1</kbd> (<kbd>⇧</kbd>+<kbd>1</kbd> on macOS)
+  restores the view from before the fit.
+- While the connections are hidden, the arrow keys go only to nodes.
+  <kbd>PgDn</kbd> and <kbd>PgUp</kbd> say "Connections are hidden." with the
+  keys that show them.
+
+<kbd>?</kbd>, <kbd>N</kbd>, <kbd>=</kbd>, <kbd>+</kbd>, <kbd>−</kbd> and
+<kbd>Shift</kbd>+<kbd>1</kbd> work without <kbd>Ctrl</kbd> (<kbd>⌘</kbd> on
+macOS). If speech input or your screen reader can press them by mistake,
+disable **Single-key shortcuts** in the sheet or in **Builder settings**.
+
+On a Mac keyboard without these keys, <kbd>⇟</kbd> and <kbd>⇞</kbd> are
+<kbd>Fn</kbd> with <kbd>↓</kbd> and <kbd>↑</kbd>. <kbd>↖</kbd> and
+<kbd>↘</kbd> (Home and End) are <kbd>Fn</kbd> with <kbd>←</kbd> and
+<kbd>→</kbd>. <kbd>⌫</kbd> is Delete and <kbd>⌦</kbd> is Forward Delete.
+
+For the keys that select cards on the drafts page, see
+[Selecting with the keyboard](details/drafts.md#selecting-with-the-keyboard).
+
+## Publish hints and buttons
+
+The hint under **Topology name** in the **Publish diagram** dialog says
+what publishing does with that name, and the button names the action. The
+hint under **Experiment name** works the same way (see
+[Create or update](details/publishing.md#create-or-update)).
+
+| Hint | Button |
+|---|---|
+| "Publishing creates a new topology." | **Create topology** |
+| "A topology with this name exists. Publishing updates it." | **Update topology** |
+| "A topology with this name already exists. This diagram cannot update it. …" | Builder refuses to publish. Enter another name. |
+| "A topology with this name changed after this diagram published it. Publishing would overwrite that change. …" | Builder refuses to publish. See [Publishing again](details/publishing.md#publishing-again). |
+| "… This diagram replaces its legacy Builder diagram." or "… Builder could not read its legacy Builder diagram. Publishing removes it." | **Update topology**. See [Replacing a legacy Builder diagram](details/publishing.md#replacing-a-legacy-builder-diagram). |
+
+## Publish results
+
+After a publish, the dialog lists each stage and its result (see
+[The result](details/publishing.md#the-result)).
+
+![The Publish diagram dialog after publishing: Published. Every stage succeeded., with the document, topology, scenario and draft stages, and Close.](../images/builder/publish-result.png)
+
+| Stage | What it is | Results |
+|---|---|---|
+| `document` | The published copy of the diagram, on the **Published Diagrams** tab | `created`, or `skipped` when you publish again and the publication was already complete |
+| `topology` | The Topology config | `created`, `updated`, or `skipped` when the config already holds this snapshot |
+| `experiment` | The Experiment config, with **Topology and an experiment** | `created`, `updated` or `skipped` |
+| `scenario` | The `topology` annotation of each listed scenario | `updated`, with the changed scenarios, or `skipped` |
+| `draft` | The draft records what it published | `ok`, or `skipped` when you publish again and the publication was already complete |
+
+The headline is one of these:
+
+| Headline | What it means |
+|---|---|
+| "Published. Every stage succeeded." | Every stage succeeded. |
+| "Published with failures. …" | A stage failed after the server wrote earlier stages. Fix the cause. Click **Back**. Publish again with the same names. The stages that succeeded show `skipped`. |
+| "Publish failed. It wrote no configs." | A stage failed before the server wrote any config. The list shows the failed stage. Fix the cause. Click **Back**. Publish again. |
+
+When the server refuses the publish before it writes anything, the form
+stays open, and **Checks** gives the reason after "Could not publish the
+diagram."
+
+## Built-in templates
+
+**Device** under **Nodes & Objects** adds a device with default settings.
+The table lists it with the five built-in templates, which are read only
+(see [Adding devices](details/diagrams.md#adding-devices)).
+
+| Item | Hostname | Type | OS type | Image |
+|---|---|---|---|---|
+| **Device** | node | VirtualMachine | linux | `ubuntu.qc2` |
+| **Server** | server | VirtualMachine | linux | `ubuntu.qc2` |
+| **Workstation** | workstation | VirtualMachine | windows | `windows10.qc2` |
+| **Router** | router | Router | minirouter | `minirouter.qc2` |
+| **Firewall** | firewall | Firewall | vyos | `vyos.qc2` |
+| **External device** | external | HIL (external) | None | None |
+
+## Built-in icons
+
+Devices, groups and icon drawings show a built-in icon, which you select
+under **Icon** in the Inspector. The icon is only a picture: it does not
+change the phēnix settings of a device (see
+[Built-in icons](details/diagrams.md#built-in-icons)).
+
+| Kind | Icons |
+|---|---|
+| Computers | **Server** (any virtual machine, and the default for a device), **Desktop**, **Laptop**, **Smartphone**, **Printer**, **NTP Server** |
+| Networks | **Router**, **Switch**, **Firewall**, **VLAN**, **Container** (the default for a group), **External device** (hardware in the loop) |
+| Industrial control | **PLC**, **RTU**, **RTAC** (an automation controller or a data gateway), **Relay**, **Transmission**, **Distribution**, **Cell Tower** |
+| Operating systems | **Linux**, **CentOS**, **Red Hat**, **Ubuntu**, **Fedora**, **openSUSE**, **Alpine**, **Kali Linux**, **BSD**, **Windows**, **Apple**, **Android** |
+| Tools | **Terminal**, **pfSense**, **Wireshark**, **Zeek** (a network sensor) |
+| People and roles | **Hacker** (an attacker), **Black Hat** (a threat actor), **Human**, **Robot** (a bot or a script) |
+| Other roles | **Lizard** and **Fox**, for a role with no other icon, such as a team mascot |
+| Servers | **phēnix**, **minimega** |
+
+Names and logos of products are trademarks of their owners. phēnix is not
+affiliated with or endorsed by them. The
+[icon notices](https://github.com/sandialabs/sceptre-phenix/blob/main/src/js/src/components/builder/ICON_NOTICES.md)
+give the source and the license of each icon that comes from another work.
+
+## Purdue Model layer set
+
+The built-in layer set **Purdue Model** gives each level of the Purdue
+model a layer (see
+[Example: map layers to the Purdue model](details/diagrams.md#example-map-layers-to-the-purdue-model)).
+Level 3.5 gets ID 4, because a layer ID is an integer. The set has no
+node matchers.
+
+| Layer ID | Label | Icon | Color | Typical devices |
+|---|---|---|---|---|
+| 6 | L5 Enterprise | Server | `#2f6fbf` | Enterprise IT, email and the internet connection |
+| 5 | L4 Business | Laptop | `#8b5cf6` | Site business systems, such as ERP |
+| 4 | L3.5 Industrial DMZ | Firewall | `#b45309` | Jump hosts, patch servers and historian copies |
+| 3 | L3 Operations | Terminal | `#0f766e` | SCADA servers, historians and site operations systems |
+| 2 | L2 Supervisory control | Desktop | `#15803d` | HMIs and engineering workstations |
+| 1 | L1 Basic control | PLC | `#db2777` | PLCs, RTUs and IEDs |
+| 0 | L0 Process | Transmission | `#dc2626` | Pumps, valves and sensors |
+
+## Download formats
+
+**Download** in the editor toolbar saves the open diagram as one file
+(see [Downloading](details/import-upload-download.md#downloading)).
+
+| Button | File for Riverside Water | What it holds | Open it with |
+|---|---|---|---|
+| **Builder JSON** | `riverside-water.json` | The whole Builder document | **Upload** |
+| **Builder YAML** | `riverside-water.yaml` | The same, as YAML | **Upload** |
+| **Topology YAML** | `riverside-water.topology.yaml` | The Topology config that **Publish** would write | `phenix config create`, or **Import** as a config file |
+| **PNG** | `riverside-water.png` | A picture of the whole diagram | An image viewer |
+| **SVG** | `riverside-water.svg` | The same picture, as SVG | A web browser |
+| **draw.io** | `riverside-water.drawio` | The diagram, as a draw.io file | draw.io (diagrams.net) |
+| **Gephi (GEXF)** | `riverside-water.gexf` | The devices, networks and connections, as a GEXF file | Gephi |
+| **Builder package** | `riverside-water.package.json` or `.package.yaml` | The Builder document, the configs and icons that you tick, and the list of what the diagram needs | **Upload** |
+
+The file name is the diagram name in lower case. Each run of characters
+other than letters, digits, `.`, `_` and `-` becomes one hyphen.
+
+## File formats
+
+| File | Starts with | Size limit | Where to use it | JSON Schema |
+|---|---|---|---|---|
+| Builder document (JSON or YAML) | `$schema: https://phenix.sandia.gov/schemas/builder/v1` and `revision: 1` | 5 MiB | **Upload** on the drafts page or in the editor, or the REST API (see [REST API](details/administration.md#rest-api)) | `/api/v1/schemas/builder/v1` |
+| Builder package (`.package.json` or `.package.yaml`) | The package `$schema` | 5 MiB | **Upload** | `/api/v1/schemas/builder/package/v1` |
+| Template file (`.templates.yaml`) | `$schema: https://phenix.sandia.gov/schemas/builder/templates/v1` | 8 MiB, 1 to 200 templates, 50 custom icons | **Import templates** on the **Node Templates** tab, or the template directory of the server | `/api/v1/schemas/builder/templates/v1` |
+| Layer set file (`.layers.yaml`) | `$schema: https://phenix.sandia.gov/schemas/builder/layersets/v1` | 4 MiB | **Upload layer set…** on the **Layers** tab | `/api/v1/schemas/builder/layersets/v1` |
+| Legacy Builder diagram (XML) | The root element `mxGraphModel` (or a bare `root`), or a Topology config with the `builder-xml` annotation | 5 MiB | **Upload** with the source **Legacy Builder diagram or Topology** | None |
+| Topology or Experiment config (JSON or YAML) | `apiVersion` and `kind` | 5 MiB | **Import** with the source **Config file** | See [Schema](../schema.md) |
+
+`phenix config create` refuses the first four files and skips them in a
+directory (see
+[Builder documents and phenix config create](details/import-upload-download.md#builder-documents-and-phenix-config-create)).
+For the fields of each file, see
+[Builder JSON and YAML](details/import-upload-download.md#builder-json-and-yaml),
+[Downloading and importing templates](details/templates.md#downloading-and-importing-templates)
+and [Layer set files](details/import-upload-download.md#layer-set-files).
+
+## Limits
+
+| What | Limit | More |
+|---|---|---|
+| Drafts on the server, damaged drafts included | 2,000 | [Limits](details/drafts.md#limits) |
+| Snapshots of a draft | 50, and 50 MiB of them. Past either limit, phēnix deletes the oldest. | [Limits](details/drafts.md#limits) |
+| A diagram (a Builder document) | 5 MiB | [Storage](details/administration.md#storage) |
+| Custom icons that a diagram holds | 50 | [The diagram and its icons](details/diagrams.md#the-diagram-and-its-icons) |
+| Templates in a diagram | 50 | [Limits](details/templates.md#limits) |
+| Notes of a diagram | 100, each at most 4096 bytes | [With nothing selected](details/editor.md#with-nothing-selected) |
+| Annotations that a draft keeps from an imported config | 100, at most 256 KiB in total | [What an import keeps](details/import-upload-download.md#what-an-import-keeps) |
+| Scenarios that a diagram lists | 20 | [Scenarios](details/diagrams.md#scenarios) |
+| VLAN alias of a network | 1 to 4094 | [Adding switches and networks](details/diagrams.md#adding-switches-and-networks) |
+| Layers of a diagram | 32, IDs from 0 to 99 | [Layers](details/diagrams.md#layers) |
+| Layer label | 1 to 64 bytes, no control characters | [Layers](details/diagrams.md#layers) |
+| Node matchers of a layer | 16. A field has at most 128 bytes, and a pattern at most 256 bytes | [Layers](details/diagrams.md#layers) |
+| Points of a line drawing | 2 to 64 | [Shapes, icons and lines](details/diagrams.md#shapes-icons-and-lines) |
+| Grid size | 4 to 200 pixels | [The grid](details/diagrams.md#the-grid) |
+| Auto-group name pattern | 200 characters. Builder matches the first 255 characters of a name, cuts a group name to 80, and stops a pattern after 2 seconds | [Grouping by a name pattern](details/diagrams.md#grouping-by-a-name-pattern) |
+| Icons on the server | 2,000. An icon is a PNG of at most 96 × 96 pixels and 40,960 bytes, from a file of at most 5 MiB. An icon keeps at most 16 old names | [Custom icons](details/diagrams.md#custom-icons) |
+| Custom icon name | 1 to 64 letters, digits, `_`, `@`, `.` or `-` | [Uploading an icon](details/diagrams.md#uploading-an-icon) |
+| Icons from template files | 1,000 of the 2,000 | [Template files on the server](details/administration.md#template-files-on-the-server) |
+| Templates in the library | 200 | [Limits](details/templates.md#limits) |
+| Collections in the library | 50 | [Limits](details/templates.md#limits) |
+| Templates in a collection | 200 | [Limits](details/templates.md#limits) |
+| Whole template library | 512 KiB | [Limits](details/templates.md#limits) |
+| Template name, collection name | 1 to 128 bytes, one line | [Limits](details/templates.md#limits) |
+| Template description, collection description | 1024 bytes, one line | [Limits](details/templates.md#limits) |
+| A template's device, as JSON | 16 KiB | [Limits](details/templates.md#limits) |
+| Template file | 8 MiB, 1 to 200 templates, 50 custom icons | [Limits](details/templates.md#limits) |
+| Template files the server reads | 50, each at most 8 MiB | [Template files on the server](details/administration.md#template-files-on-the-server) |
+| Layer sets in the library | 200, plus the built-in set. A set has 1 to 32 layers | [The Layers tab](details/drafts.md#the-layers-tab) |
+| A layer set file | 4 MiB. A request that adds or replaces a set, 1 MiB | [Storage](details/administration.md#storage) |
+| Package requirements | 1000 entries of each kind, each at most 4096 bytes | [Downloading a package](details/import-upload-download.md#downloading-a-package) |
+| A Builder file, a config file, an uploaded document or package | 5 MiB | [Which files phenix reads](details/administration.md#which-files-phenix-reads) |
+| PNG and SVG downloads | The longer side at most 4096 pixels | [PNG and SVG](details/import-upload-download.md#png-and-svg) |
+| Diagram name | 512 bytes | [The metadata of a diagram](details/import-upload-download.md#the-metadata-of-a-diagram) |
+| Experiment name | 15 characters, when the server names the bridge of each experiment after the experiment | [Experiment names](details/publishing.md#experiment-names) |
+| Time Builder waits for the server | 60 seconds for a save, 30 for a read, 15 for the version that a merge starts from, and 20 for each preflight check. 10 minutes for publishing, preflight, imports, downloads, packages and cleanup | [Working offline](details/drafts.md#working-offline) |
+
+## Error codes
+
+Each issue that Builder reports has a code: a stable, machine-readable
 name of the rule that it breaks, such as `node.hostname.duplicate`. The
 editor checks and the Builder REST API use the same code for the same rule.
 Thus a script can act on the code and ignore the message.
@@ -9,9 +292,9 @@ A code is lowercase words joined by dots. The first word names the subject
 of the rule, such as `node`, `edge` (a connection) or `layerset` (a layer
 set). A released code keeps its meaning. A new rule gets a new code.
 
-## Issues
+### Issues
 
-Builder reports each problem as an issue:
+Builder reports each warning and error as an issue:
 
 | Field | Value |
 |---|---|
@@ -22,23 +305,23 @@ Builder reports each problem as an issue:
 | `nodeId`, `edgeId`, `networkId` | The ID of the node, connection or network, when the issue is about one |
 | `field` | The device field, such as `spec.network.interfaces.0.vlan`, when the issue is about one |
 
-The table in [Codes](#codes) gives the default severity of each code. The
-editor shows a problem that only publishing refuses, such as an interface
-without a VLAN, as a warning on the canvas, because a draft may keep it.
-The Publish dialog shows it as an error.
+The table in [Codes](#codes) gives the default severity of each code. Some
+issues block only publishing, such as an interface without a VLAN. The
+editor shows them as warnings on the canvas, because a draft may keep them.
+The **Publish diagram** dialog shows them as errors.
 
 An unknown key in an object of the document (`document.field.unknown`) is
 an issue at its path. A value of the wrong type is an issue only where the
 editor also checks the type, such as a number in `createdBy`
-(`metadata.user.not-text`). The decoder refuses other values of the wrong
-type, such as a node position that is text, in its own words.
+(`metadata.user.not-text`). The server refuses other values of the wrong
+type, such as a node position that is text, with a message of its own.
 
-## Errors of the REST API
+### Errors of the REST API
 
 When a Builder route refuses a request, the JSON body gives the code in
 `code`, with `message` and `cause`. For a document that does not pass the
 checks (`document.invalid`), or a draft that only publishing refuses
-(`publish.blocked`), `issues` lists each problem:
+(`publish.blocked`), `issues` lists each warning and error:
 
 ```json
 {
@@ -72,14 +355,13 @@ gets the `request.*` or `server.*` code of its status.
 | 405 | `request.method-not-allowed` |
 | 409 | `request.conflict`, `template.item.read-only` |
 | 412 | `request.stale`, `template.item.stale`, `layerset.stale` |
-| 413 | `request.too-large`, `layerset.library.full`, `package.too-large` |
+| 413 | `request.too-large`, `draft.limit`, `layerset.library.full`, `package.too-large` |
 | 422 | `request.unprocessable`, `layerset.default.unknown`, `layerset.invalid`, `package.invalid` |
 | 500 | `server.error` |
 | 503 | `server.busy` |
 
 `OPTIONS` on a Builder route gets 204 and the same `Allow` header as a 405
-answer for that path, and does nothing else. A `template.item.stale` answer
-gives the current ETag.
+answer for that path, and does nothing else.
 
 More about issues in answers:
 
@@ -89,7 +371,7 @@ More about issues in answers:
   partial publication lists its failures in `errors`.
 - The Topology YAML download (`POST /builder/export/topology`) lists issues
   in `warnings` and `publishBlockers`. `publishBlockers` has one issue for
-  each check that only publishing makes, with the code of its first problem.
+  each check that only publishing makes, with the code of its first issue.
 - `POST /builder/package` lists its `package.*` warnings in `warnings`.
 
 The dependencies of `POST /builder/package/resolve` are data, not issues,
@@ -97,7 +379,7 @@ and have no codes. The warnings of an import or a legacy diagram conversion
 (`POST /builder/generate`, `POST /builder/legacy`, and the
 `source.warnings` of a document) are plain text, without codes.
 
-## Codes
+### Codes
 
 <!-- codes:start -->
 

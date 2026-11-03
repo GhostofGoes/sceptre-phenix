@@ -1,7 +1,7 @@
 # Import, upload and download
 
 Part of the [Builder references](../builder.md). User docs:
-[Import, Upload and Download](https://phenix.sceptre.dev/latest/builder/import-upload-download/)
+[Import, Upload and Download](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/)
 and [Legacy Builder](https://phenix.sceptre.dev/latest/builder/legacy/) (what converts, and the warnings).
 
 ## Generation
@@ -84,7 +84,7 @@ name is blank, when the notes already hold it or are full, or when the note
 breaks a note rule. Neither option works for an Experiment (422). A bad new
 name gives `import.name.invalid` or `import.name.source`. The editor's own
 combine is client side (`combineIncluded` in `model.js`). User docs:
-[Import options](https://phenix.sceptre.dev/latest/builder/import-upload-download/#import-options).
+[Import options](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#import-options).
 
 ## Legacy conversion
 
@@ -117,7 +117,7 @@ The converter is pure Go in `types/builder/`: `legacy_xml.go` reads and
   answers the Topology config that Publish would write, with `warnings` and
   `publishBlockers`. It names, and does not refuse, what only Publish
   refuses. User docs:
-  [Topology YAML](https://phenix.sceptre.dev/latest/builder/import-upload-download/#topology-yaml).
+  [Topology YAML](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#topology-yaml).
 - GEXF is made in the browser (`gexf.js`). The file names gexf.xsd in
   `xsi:schemaLocation`, as Gephi writes it, and the official gexf.rng
   rejects that attribute. To check a file with xmllint, use a grammar that
@@ -160,7 +160,7 @@ The converter is pure Go in `types/builder/`: `legacy_xml.go` reads and
     docs lab against `test/builder/__snapshots__/riverside-water.drawio`.
     After an intended change, run it with `-u` and review the diff.
   User docs:
-  [draw.io](https://phenix.sceptre.dev/latest/builder/import-upload-download/#drawio).
+  [draw.io](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#drawio).
 - A package (`bdoc.Package`, `types/builder/package.go`, `package.js`) is
   one JSON or YAML file: the document, the Scenario and Topology configs it
   carries, and `requirements`. A carried config has no times and no
@@ -189,4 +189,4 @@ The converter is pure Go in `types/builder/`: `legacy_xml.go` reads and
   `api.disks.wait` (`withBuilderDiskWait`) and hold the source
   (`newBuilderHungDisks`).
 
-User docs: [Moving a diagram with a Builder package](https://phenix.sceptre.dev/latest/builder/import-upload-download/#moving-a-diagram-with-a-builder-package).
+User docs: [Moving a diagram with a Builder package](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#moving-a-diagram-with-a-builder-package).

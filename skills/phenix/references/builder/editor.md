@@ -1,9 +1,9 @@
 # Builder editor and drafts page
 
 Part of the [Builder references](../builder.md). User docs:
-[The Editor](https://phenix.sceptre.dev/latest/builder/editor/),
-[Building a Diagram](https://phenix.sceptre.dev/latest/builder/diagrams/)
-and [Drafts](https://phenix.sceptre.dev/latest/builder/drafts/). They hold
+[The Editor](https://phenix.sceptre.dev/latest/builder/details/editor/),
+[Building a Diagram](https://phenix.sceptre.dev/latest/builder/details/diagrams/)
+and [Drafts](https://phenix.sceptre.dev/latest/builder/details/drafts/). They hold
 the UI text, keys and limits.
 
 ## Opening a diagram
@@ -12,7 +12,7 @@ the UI text, keys and limits.
   `builder/configs.js`) go to `/builder?topology=<name>`. `openLinked`
   (`Builder.vue`) picks a draft with
   `draftForPublished(drafts, published, token)` (order:
-  [Editing a published topology](https://phenix.sceptre.dev/latest/builder/publishing/#editing-a-published-topology)), else
+  [Editing a published topology](https://phenix.sceptre.dev/latest/builder/details/publishing/#editing-a-published-topology)), else
   opens the Import dialog with `initial: {kind: 'topology', name}`.
 - The address names the open draft as `?draft=<id>`, so a reload opens it
   again. An unsaved draft's ID stays out of the link. A link with a `/`
@@ -72,7 +72,7 @@ the UI text, keys and limits.
   (1.5, 1e3). A field that phenix takes as a number or text (Memory, VCPUs,
   `numberBranch`) keeps other text, such as `{{ .Memory }}`, until a number
   replaces it. User docs:
-  [Editing a node](https://phenix.sceptre.dev/latest/builder/editor/#editing-a-node).
+  [Editing a node](https://phenix.sceptre.dev/latest/builder/details/editor/#editing-a-node).
 - An interface renamed in the Inspector keeps its handle and connection
   when the spec has as many interfaces as handles and its VLAN still names
   the handle's network (`reconcileDeviceHandles`, `model.js`). A removal
@@ -337,7 +337,7 @@ the UI text, keys and limits.
   - Layouts leave drawings in place and grow groups around them
     (`growAroundDrawings`). The document's `layout` records the last
     layout that ran. User docs:
-    [Layouts](https://phenix.sceptre.dev/latest/builder/diagrams/#layouts).
+    [Layouts](https://phenix.sceptre.dev/latest/builder/details/diagrams/#layouts).
 - The layout contract (`layoutScopes` in `layouts/common.js`):
   `arrange({items, edges, networks})` gets the items of one scope, the
   connections between them, and the networks by id. An item is a node that
@@ -693,7 +693,7 @@ uses `BuilderActionButton.vue` with an `action` from
     half the card gets a shorter label, or its button spans both columns.
 - `test/builder/item-actions.contract.test.js` holds the table above.
   Change it, this table and the user docs table
-  ([Item buttons](https://phenix.sceptre.dev/latest/builder/drafts/#item-buttons))
+  ([Item buttons](https://phenix.sceptre.dev/latest/builder/details/drafts/#item-buttons))
   together.
 
 ## Drafts page and selectable lists
@@ -754,7 +754,7 @@ uses `BuilderActionButton.vue` with an `action` from
   keys through `useCardSelection`. It says "N of M selected." through an
   `announce` callback. `matchesKey` finds Mod+A on a layout without Latin
   letters. User docs:
-  [Selecting with the keyboard](https://phenix.sceptre.dev/latest/builder/drafts/#selecting-with-the-keyboard).
+  [Selecting with the keyboard](https://phenix.sceptre.dev/latest/builder/details/drafts/#selecting-with-the-keyboard).
 
 ## Duplicate draft
 

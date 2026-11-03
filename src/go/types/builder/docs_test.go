@@ -19,7 +19,7 @@ var docsExamples = filepath.Join( //nolint:gochecknoglobals // test fixture path
 
 // docsCodes is the docs page whose table lists every code.
 var docsCodes = filepath.Join( //nolint:gochecknoglobals // test fixture path
-	"..", "..", "..", "..", "docs", "content", "builder", "error-codes.md",
+	"..", "..", "..", "..", "docs", "content", "builder", "reference.md",
 )
 
 // The markers around the table of codes in [docsCodes].

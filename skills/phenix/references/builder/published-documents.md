@@ -1,10 +1,10 @@
 # Published documents and Builder files
 
 Part of the [Builder references](../builder.md). User docs:
-[The builder-doc annotation](https://phenix.sceptre.dev/latest/builder/administration/#the-builder-doc-annotation),
-[Builder documents in files](https://phenix.sceptre.dev/latest/builder/administration/#builder-documents-in-files)
+[The builder-doc annotation](https://phenix.sceptre.dev/latest/builder/details/administration/#the-builder-doc-annotation),
+[Builder documents in files](https://phenix.sceptre.dev/latest/builder/details/administration/#builder-documents-in-files)
 and
-[Publishing to a topology that names a Builder file](https://phenix.sceptre.dev/latest/builder/publishing/#publishing-to-a-topology-that-names-a-builder-file).
+[Publishing to a topology that names a Builder file](https://phenix.sceptre.dev/latest/builder/details/publishing/#publishing-to-a-topology-that-names-a-builder-file).
 
 ## The builder-doc reference
 
@@ -123,4 +123,4 @@ layer set file by `$schema` and no `kind`, with one parse
 (`bdoc.FileKindOf`). It skips each in a directory and refuses each on the
 command line (`builderFileKind`, `skipBuilderFile`, `builderFileRefusal`).
 The user docs quote the messages
-([Builder documents and phenix config create](https://phenix.sceptre.dev/latest/builder/import-upload-download/#builder-documents-and-phenix-config-create)).
+([Builder documents and phenix config create](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#builder-documents-and-phenix-config-create)).

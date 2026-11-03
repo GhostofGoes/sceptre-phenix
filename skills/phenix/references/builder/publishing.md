@@ -1,8 +1,8 @@
 # Publishing and preflight
 
 Part of the [Builder references](../builder.md). User docs:
-[Publishing](https://phenix.sceptre.dev/latest/builder/publishing/) and
-[Preflight](https://phenix.sceptre.dev/latest/builder/editor/#preflight).
+[Publishing](https://phenix.sceptre.dev/latest/builder/details/publishing/) and
+[Preflight](https://phenix.sceptre.dev/latest/builder/details/editor/#preflight).
 
 ## Updating a topology or experiment
 
@@ -155,7 +155,7 @@ the first kind found, in the order above. Design warnings
 ([document.md](document.md#design-warnings)) never block. Publish answers
 409 when an included topology now defines a hostname that the document
 defines (`publish.include.clash`). User docs:
-[What blocks publishing](https://phenix.sceptre.dev/latest/builder/publishing/#what-blocks-publishing).
+[What blocks publishing](https://phenix.sceptre.dev/latest/builder/details/publishing/#what-blocks-publishing).
 
 ## Dry run
 

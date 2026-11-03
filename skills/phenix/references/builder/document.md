@@ -3,9 +3,9 @@
 Part of the [Builder references](../builder.md): the `builder/v1`
 document.
 
-User docs: [Builder JSON and YAML](https://phenix.sceptre.dev/latest/builder/import-upload-download/#builder-json-and-yaml)
-and [Who made and last saved a diagram](https://phenix.sceptre.dev/latest/builder/import-upload-download/#who-made-and-last-saved-a-diagram).
-[Building a Diagram](https://phenix.sceptre.dev/latest/builder/diagrams/)
+User docs: [Builder JSON and YAML](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#builder-json-and-yaml)
+and [Who made and last saved a diagram](https://phenix.sceptre.dev/latest/builder/details/import-upload-download/#who-made-and-last-saved-a-diagram).
+[Building a Diagram](https://phenix.sceptre.dev/latest/builder/details/diagrams/)
 has the fields a user edits, and the limits.
 
 ## Keys and validation
@@ -124,7 +124,7 @@ has the fields a user edits, and the limits.
 
   The editor never applies such a pattern from a saved diagram. The server
   stays the authority. User docs:
-  [Layers](https://phenix.sceptre.dev/latest/builder/diagrams/#layers).
+  [Layers](https://phenix.sceptre.dev/latest/builder/details/diagrams/#layers).
 - Matchers apply to devices only. A path holds dotted keys into the device
   spec, and a key of digits indexes a list. Text, a number or a boolean
   matches as its text. A list at the end of the path matches when one

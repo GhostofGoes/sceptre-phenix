@@ -7,7 +7,7 @@ on:
       - 'src/go/**'
       - 'schemas/**'
       - 'src/js/src/builder/schema/**'
-      - 'docs/content/builder/error-codes.md'
+      - 'docs/content/builder/reference.md'
       # The Go tests read the Builder examples of the docs.
       - 'docs/content/builder/examples/**'
       - 'Makefile'
@@ -17,7 +17,7 @@ on:
       - 'src/go/**'
       - 'schemas/**'
       - 'src/js/src/builder/schema/**'
-      - 'docs/content/builder/error-codes.md'
+      - 'docs/content/builder/reference.md'
       - 'docs/content/builder/examples/**'
       - 'Makefile'
       - '.github/workflows/ci.yml'
@@ -59,7 +59,7 @@ jobs:
           fi
       - name: Check the Builder schema bundle and codes table are current
         run: |
-          generated=(src/js/src/builder/schema docs/content/builder/error-codes.md)
+          generated=(src/js/src/builder/schema docs/content/builder/reference.md)
           if [ -n "$(git status --porcelain -- "${generated[@]}")" ]; then
             git diff -- "${generated[@]}"
             echo "::error::${generated[*]} differ from the Go builder schema and codes: run make generate in src/go and commit the result"

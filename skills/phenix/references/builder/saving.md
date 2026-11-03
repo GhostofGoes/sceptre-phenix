@@ -1,9 +1,9 @@
 # Saving and storage
 
 Part of the [Builder references](../builder.md). User docs:
-[How drafts save](https://phenix.sceptre.dev/latest/builder/drafts/#how-drafts-save),
-[Draft History](https://phenix.sceptre.dev/latest/builder/drafts/#draft-history) and
-[Storage](https://phenix.sceptre.dev/latest/builder/administration/#storage).
+[How drafts save](https://phenix.sceptre.dev/latest/builder/details/drafts/#how-drafts-save),
+[Draft History](https://phenix.sceptre.dev/latest/builder/details/drafts/#draft-history) and
+[Storage](https://phenix.sceptre.dev/latest/builder/details/administration/#storage).
 
 ## Snapshots
 
@@ -171,7 +171,7 @@ Merge rules that code depends on:
   entry and moves the cursor. If a later request fails, it deletes the new
   draft (best effort) and rethrows.
 
-User docs: [Draft merging](https://phenix.sceptre.dev/latest/builder/drafts/#draft-merging).
+User docs: [Draft merging](https://phenix.sceptre.dev/latest/builder/details/drafts/#draft-merging).
 
 ## Storage
 

@@ -6,8 +6,8 @@ ETags, error codes and error bodies.
 `src/go/web/public/docs/openapi.yml` (served at `/docs/`) describes every
 request and response. `TestBuilderRoutesDocumented` in `web/builder_test.go`
 fails when a route or method is not in it. User docs:
-[REST API](https://phenix.sceptre.dev/latest/builder/administration/#rest-api) (the `configs` permission of each
-route) and [Permissions](https://phenix.sceptre.dev/latest/builder/administration/#permissions).
+[REST API](https://phenix.sceptre.dev/latest/builder/details/administration/#rest-api) (the `configs` permission of each
+route) and [Permissions](https://phenix.sceptre.dev/latest/builder/details/administration/#permissions).
 
 ## Routes
 
@@ -132,7 +132,7 @@ default severity and a description.
 
 - `make generate-builder-schema` writes the registry to
   `src/js/src/builder/schema/codes.json` and to the table in
-  `docs/content/builder/error-codes.md`. Go tests fail when either is
+  `docs/content/builder/reference.md`. Go tests fail when either is
   stale. The command writes and checks the docs table only where `docs/`
   exists (`BUILDER_SCHEMA_TESTS` in `src/go/Makefile`), because the Docker
   and Podman builds run `make generate` without `docs/`.
