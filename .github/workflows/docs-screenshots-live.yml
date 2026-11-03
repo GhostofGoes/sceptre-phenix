@@ -1,12 +1,16 @@
 # Temporary: retakes the documentation screenshots that need a running
 # experiment (the SCORCH runs page and the State of Health graph) on a
 # runner with a real minimega, and uploads them as an artifact. Run it by
-# hand from the Actions tab; nothing triggers it on its own. It reuses the
-# E2E runner setup (.github/actions/e2e-setup) and builds the ntp guest image
-# from the sceptre-phenix-images recipes, which it caches between runs.
+# hand from the Actions tab, or push to its branch. It reuses the E2E runner
+# setup (.github/actions/e2e-setup) and builds the ntp guest image from the
+# sceptre-phenix-images recipes, which it caches between runs.
 name: Docs screenshots (live)
 
 on:
+  # workflow_dispatch needs the file on the default branch, which this
+  # temporary workflow stays off, so a push to its own branch runs it.
+  push:
+    branches: ['ci-docs-screenshots']
   workflow_dispatch:
     inputs:
       images-repository:
