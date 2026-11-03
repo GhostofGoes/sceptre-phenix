@@ -116,9 +116,14 @@ check that times out is reported as failed until it answers again.
 Anyone who can reach the server sees each check's status, observed value,
 version and timing. The `output` fields, which name paths, hosts and errors,
 are only in answers to authenticated requests: pass a token in the
-`X-Phenix-Auth-Token: Bearer <token>` header or as `?token=<token>` (see
+`X-Phenix-Auth-Token: Bearer <token>` header (see
 [Authentication](api.md#authentication)). With authentication disabled,
 every request sees `output`.
+
+!!! warning
+    A probe that cannot set a header can pass the token as `?token=<token>`.
+    Use this only as a last resort: proxies, access logs and monitoring tools
+    often record the full URL, token included.
 
 ## The `phenix healthcheck` Command
 
