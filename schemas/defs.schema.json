@@ -1618,10 +1618,11 @@
             },
             "vm_type": {
               "default": "kvm",
-              "description": "How minimega runs the node: kvm for a QEMU/KVM virtual machine, or container. Empty means kvm.",
+              "description": "How minimega runs the node: kvm for a QEMU/KVM virtual machine, container, or firecracker for a Linux guest in a jailed Firecracker microVM. Empty means kvm.",
               "enum": [
                 "kvm",
                 "container",
+                "firecracker",
                 ""
               ],
               "examples": [
@@ -1720,6 +1721,30 @@
               "minItems": 1,
               "title": "Drives",
               "type": "array"
+            },
+            "initrd": {
+              "description": "Path of the guest initrd on the minimega host, used by Firecracker nodes. Empty boots without an initrd.",
+              "examples": [
+                "/phenix/images/initrd-6.1.img"
+              ],
+              "title": "Initrd",
+              "type": "string"
+            },
+            "kernel": {
+              "description": "Path of the guest kernel on the minimega host. Firecracker nodes need it. Other nodes ignore it.",
+              "examples": [
+                "/phenix/images/vmlinux-6.1"
+              ],
+              "title": "Kernel",
+              "type": "string"
+            },
+            "kernel_args": {
+              "description": "Kernel command line for Firecracker nodes. phenix adds root=/dev/vda1 rw when it sets no root=.",
+              "examples": [
+                "console=ttyS0 quiet"
+              ],
+              "title": "Kernel Arguments",
+              "type": "string"
             },
             "memory": {
               "default": 512,
