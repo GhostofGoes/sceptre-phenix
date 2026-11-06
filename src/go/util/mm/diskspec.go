@@ -12,21 +12,29 @@ import (
 // parse.
 var ErrMalformedDiskSpec = errors.New("malformed diskspec")
 
-// diskSpec is one minimega disk spec: <path>[,<interface>][,<cache>]. The
-// interface and the cache mode are empty when the spec does not set them.
+// diskSpec is one minimega disk spec: <path>[,<interface>][,<cache>][,ro]. The
+// interface and the cache mode are empty when the spec does not set them, and
+// ro is set when the spec ends with minimega's read-only option.
 type diskSpec struct {
 	path  string
 	iface string
 	cache string
+	ro    bool
 }
 
 // parseDiskSpec parses spec with the rules of minimega's ParseDiskConfig. A
 // second field is the cache mode when it is one, else the interface. A third
-// field is the cache mode, after an interface.
+// field is the cache mode, after an interface. A last field "ro", after the
+// path, sets ro.
 func parseDiskSpec(spec string) (diskSpec, error) {
 	f := strings.Split(spec, ",")
 
 	var d diskSpec
+
+	if len(f) > 1 && f[len(f)-1] == "ro" {
+		d.ro = true
+		f = f[:len(f)-1]
+	}
 
 	switch {
 	case f[0] == "":
@@ -47,7 +55,7 @@ func parseDiskSpec(spec string) (diskSpec, error) {
 }
 
 // DiskSpecPath returns the path of the minimega disk spec
-// <path>[,<interface>][,<cache>]. It returns an error that wraps
+// <path>[,<interface>][,<cache>][,ro]. It returns an error that wraps
 // ErrMalformedDiskSpec when minimega does not parse spec.
 func DiskSpecPath(spec string) (string, error) {
 	d, err := parseDiskSpec(spec)
@@ -83,6 +91,10 @@ func (d diskSpec) String() string {
 
 	if d.cache != "" {
 		parts = append(parts, d.cache)
+	}
+
+	if d.ro {
+		parts = append(parts, "ro")
 	}
 
 	return strings.Join(parts, ",")
@@ -134,8 +146,9 @@ type redeployDisks struct {
 // planRedeployDisks returns how a redeploy changes the disks of a VM, from
 // the VM's disks column and the new disk spec. Only the first disk changes. It
 // keeps the interface and cache mode of the old first disk that the new spec
-// does not set. With injects, the first disk of a VM deployed with a snapshot
-// keeps its path and gets a new snapshot of the new disk.
+// does not set, and keeps the old first disk read only. With injects, the
+// first disk of a VM deployed with a snapshot keeps its path and gets a new
+// snapshot of the new disk.
 func planRedeployDisks(disks, disk string, injects bool) (redeployDisks, error) {
 	var plan redeployDisks
 
@@ -154,6 +167,7 @@ func planRedeployDisks(disks, disk string, injects bool) (redeployDisks, error) 
 	if len(old) > 0 {
 		first.iface = cmp.Or(newDisk.iface, old[0].iface)
 		first.cache = cmp.Or(newDisk.cache, old[0].cache)
+		first.ro = newDisk.ro || old[0].ro
 	}
 
 	if injects && len(old) > 0 && strings.Contains(filepath.Base(old[0].path), "_snapshot") {

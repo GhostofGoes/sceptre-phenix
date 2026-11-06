@@ -227,7 +227,7 @@ func vmStateError(expName, name string, err error) *weberror.WebError {
 		return experimentError(expName, err)
 	case errors.Is(err, vm.ErrVMNotRunning):
 		return weberror.New(http.StatusConflict, fmt.Sprintf("VM %s is not running", name))
-	case errors.Is(err, vm.ErrSnapshotDisabled), errors.Is(err, vm.ErrMultipleDisks):
+	case errors.Is(err, vm.ErrSnapshotDisabled), errors.Is(err, vm.ErrMultipleDisks), errors.Is(err, vm.ErrReadOnlyRoot):
 		return weberror.New(http.StatusConflict, err.Error())
 	}
 

@@ -28,7 +28,10 @@ vm config append "{{ escapeQuoted .Hardware.FirecrackerAppend }}"
 vm config snapshot true
 {{- if $firecracker }}
 vm config disk {{ .Hardware.DiskConfig "" }}
-{{- if and (ne $firstDrive.GetInjectPartition 0) (gt (len .Injections) 0) }}
+{{- if ne .Hardware.Scratch "" }}
+vm config firecracker-scratch {{ .Hardware.Scratch }}
+{{- end }}
+{{- if and (ne $firstDrive.GetInjectPartition 0) (gt (len .Injections) 0) (not $firstDrive.ReadOnly) }}
 vm config inject {{ $firstDrive.GetInjectPartition }} {{ .FileInjects $.Exp.BaseDir }}
 {{- end }}
 {{- else }}
@@ -69,7 +72,10 @@ vm config append "{{ escapeQuoted .Hardware.FirecrackerAppend }}"
 vm config snapshot true
         {{- if $firecracker }}
 vm config disk {{ .Hardware.DiskConfig "" }}
-            {{- if and (ne $firstDrive.GetInjectPartition 0) (gt (len .Injections) 0) }}
+            {{- if ne .Hardware.Scratch "" }}
+vm config firecracker-scratch {{ .Hardware.Scratch }}
+            {{- end }}
+            {{- if and (ne $firstDrive.GetInjectPartition 0) (gt (len .Injections) 0) (not $firstDrive.ReadOnly) }}
 vm config inject {{ $firstDrive.GetInjectPartition }} {{ .FileInjects $.Exp.BaseDir }}
             {{- end }}
         {{- else }}

@@ -273,12 +273,21 @@ func TestSnapshotMovesFiles(t *testing.T) {
 	)
 
 	tests := []struct {
-		name   string
-		vm     string
-		vmType string
-		exts   []string
+		name    string
+		vm      string
+		vmType  string
+		scratch string
+		exts    []string
 	}{
 		{name: "firecracker", vm: fcVM, vmType: "firecracker", exts: []string{"state", "hdd", "mem", "json"}},
+		{
+			name: "firecracker with a scratch drive", vm: fcVM, vmType: "firecracker", scratch: "64M",
+			exts: []string{"state", "hdd", "mem", "json", "scratch"},
+		},
+		{
+			name: "firecracker with no scratch drive", vm: fcVM, vmType: "firecracker", scratch: "0",
+			exts: []string{"state", "hdd", "mem", "json"},
+		},
 		{name: "kvm", vm: kvmVM, vmType: "kvm", exts: []string{"state", "hdd"}},
 	}
 
@@ -286,6 +295,7 @@ func TestSnapshotMovesFiles(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			useTypedExperiment(t, test.vm, test.vmType, true)
 			fake := useFakeMinimega(t, test.vm, test.vmType, fakeHost)
+			fake.scratch = test.scratch
 
 			if err := vm.Snapshot(
 				t.Context(),
@@ -315,6 +325,25 @@ func TestSnapshotMovesFiles(t *testing.T) {
 				t.Errorf("Snapshot(%q) commands (-want +got):\n%s", test.vm, diff)
 			}
 		})
+	}
+}
+
+// Snapshot refuses a firecracker VM with a read-only drive before it changes anything.
+//
+//nolint:paralleltest // replaces minimega and the store
+func TestSnapshotRefusesReadOnlyRoot(t *testing.T) {
+	useTypedExperiment(t, fcVM, "firecracker", true)
+	fake := useFakeMinimega(t, fcVM, "firecracker", fakeHost)
+	fake.disks = "/phenix/images/root.squashfs,ro"
+	fake.scratch = "64M"
+
+	err := vm.Snapshot(t.Context(), testExp, fcVM, "snap1", nil, vm.WithSaveTiming(time.Millisecond, time.Minute))
+	if !errors.Is(err, vm.ErrReadOnlyRoot) {
+		t.Fatalf("Snapshot(%q) = %v, want %v", fcVM, err, vm.ErrReadOnlyRoot)
+	}
+
+	if changes := fake.changes(); len(changes) != 0 {
+		t.Errorf("Snapshot(%q) sent %q, want no changes", fcVM, changes)
 	}
 }
 

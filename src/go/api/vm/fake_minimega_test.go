@@ -36,6 +36,9 @@ type fakeMinimega struct {
 	vmType string
 	vmHost string
 	state  string
+	// disks and scratch are the VM's disks and firecracker-scratch columns.
+	disks   string
+	scratch string
 
 	polled   map[string]bool
 	received func() []mmtest.Command
@@ -67,8 +70,8 @@ func (f *fakeMinimega) handle(cmd mmtest.Command) []*minicli.Response {
 		resp.Tabular = [][]string{{fakeHost}}
 	case base == "vm info" || base == "vm info summary":
 		resp.Host = f.vmHost
-		resp.Header = []string{"id", "name", "state", "type", "uuid", "snapshot", "disks"}
-		resp.Tabular = [][]string{{"0", f.vm, f.state, f.vmType, fakeUUID, "true", ""}}
+		resp.Header = []string{"id", "name", "state", "type", "uuid", "snapshot", "disks", "firecracker-scratch"}
+		resp.Tabular = [][]string{{"0", f.vm, f.state, f.vmType, fakeUUID, "true", f.disks, f.scratch}}
 	case base == "vm save" || base == "vm export-disk" || base == "vm memory-dump":
 		// The first poll finds the task half done, and the next one finds it completed.
 		resp.Header = []string{"name", "status", "complete (%)"}
