@@ -46,6 +46,10 @@ func TestVMStateError(t *testing.T) {
 			name: "a VM with two disks", err: fmt.Errorf("checking VM web: %w", vm.ErrMultipleDisks),
 			wantStatus: http.StatusConflict, wantMessage: "checking VM web: snapshots support only VMs with one disk",
 		},
+		{
+			name: "an operation the VM's type does not support", err: vm.NotSupportedError("taking a screenshot"),
+			wantStatus: http.StatusBadRequest, wantMessage: "taking a screenshot is not supported for firecracker VMs",
+		},
 		{name: "another error", err: errors.New("minimega unreachable")},
 	}
 

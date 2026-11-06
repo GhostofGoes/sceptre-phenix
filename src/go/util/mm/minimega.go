@@ -22,6 +22,7 @@ import (
 	"github.com/sandia-minimega/minimega/v2/pkg/ranges"
 
 	"phenix/util/common"
+	"phenix/util/firecracker"
 	"phenix/util/freshness"
 	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
@@ -79,6 +80,7 @@ const (
 	hostColumn             = "host"
 	stateColumn            = "state"
 	stateRunning           = "RUNNING"
+	typeColumn             = "type"
 	c2ActiveCheckInterval  = 2 * time.Second
 	responseWaitInterval   = 1 * time.Second
 	responseRegexGroupUUID = 2
@@ -438,6 +440,7 @@ func (m Minimega) getVMInfo(o options, started func()) (VMs, error) {
 		"snapshot",
 		"cdrom",
 		"tags",
+		typeColumn,
 	}
 
 	if o.vm != "" {
@@ -468,6 +471,7 @@ func (m Minimega) getVMInfo(o options, started func()) (VMs, error) {
 			Taps:     parseList(row["tap"]),
 			IPv4:     parseList(row["ip"]),
 			Captures: captures[row["name"]],
+			VMType:   row[typeColumn],
 		}
 
 		var tags map[string]string
@@ -492,7 +496,8 @@ func (m Minimega) getVMInfo(o options, started func()) (VMs, error) {
 
 		snapshot, _ := strconv.ParseBool(row["snapshot"])
 
-		if snapshot && disk != "" {
+		// A Firecracker VM's disks column names its image.
+		if snapshot && disk != "" && !vm.IsFirecracker() {
 			launch := vmLaunch{ //nolint:exhaustruct // at is only known with an uptime
 				ns:   o.ns,
 				name: vm.Name,
@@ -706,20 +711,24 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 	}
 
 	// relaunched as the type it runs as, such as container
-	vmType := info[0]["type"]
+	vmType := info[0][typeColumn]
 	if vmType == "" {
-		vmType = "kvm"
+		vmType = DefaultVMType
 	}
 
 	if err := ValidateArg(vmType); err != nil {
 		return fmt.Errorf("type of VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
+	firecrackerVM := vmType == firecracker.VMType
+
 	var disks redeployDisks
 
 	if o.disk != "" {
-		// Should only be one row of data since we filtered by VM name.
-		plan, err := planRedeployDisks(info[0]["disks"], o.disk, len(o.injects) > 0)
+		// Should only be one row of data since we filtered by VM name. minimega
+		// injects the files into a firecracker VM's own disk copy at launch, so
+		// it gets no disk snapshot.
+		plan, err := planRedeployDisks(info[0]["disks"], o.disk, len(o.injects) > 0 && !firecrackerVM)
 		if err != nil {
 			return fmt.Errorf("disks of VM %s in namespace %s: %w", o.vm, o.ns, err)
 		}
@@ -741,7 +750,11 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		return fmt.Errorf("cloning VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
+	// A firecracker VM restored from a snapshot keeps it in firecracker-snapshot.
 	cmd.Command = "clear vm config state"
+	if firecrackerVM {
+		cmd.Command = "clear vm config firecracker-snapshot"
+	}
 
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
@@ -805,6 +818,12 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 		if err != nil {
 			return fmt.Errorf("configuring disk for VM %s in namespace %s: %w", o.vm, o.ns, err)
 		}
+
+		if firecrackerVM {
+			if err := redeployFirecrackerInjects(cmd, o); err != nil {
+				return err
+			}
+		}
 	}
 
 	cmd.Command = fmt.Sprintf("vm launch %s %s", vmType, o.vm)
@@ -826,6 +845,30 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 	err = mmcli.ErrorResponse(mmcli.Run(cmd))
 	if err != nil {
 		return fmt.Errorf("starting VM %s in namespace %s: %w", o.vm, o.ns, err)
+	}
+
+	return nil
+}
+
+// redeployFirecrackerInjects sets the file injections of a firecracker VM that
+// RedeployVM relaunches with a new disk. minimega injects the files into the
+// VM's own disk copy at launch, so no disk snapshot is made. Without a new
+// disk, the cloned config keeps the disk and injections of the original launch.
+func redeployFirecrackerInjects(cmd *mmcli.Command, o options) error {
+	cmd.Command = "clear vm config inject"
+
+	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
+		return fmt.Errorf("clearing injections for VM %s in namespace %s: %w", o.vm, o.ns, err)
+	}
+
+	if len(o.injects) == 0 {
+		return nil
+	}
+
+	cmd.Command = fmt.Sprintf("vm config inject %d %s", o.injectPart, strings.Join(o.injects, " "))
+
+	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
+		return fmt.Errorf("configuring injections for VM %s in namespace %s: %w", o.vm, o.ns, err)
 	}
 
 	return nil

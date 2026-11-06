@@ -299,6 +299,7 @@ func vmToProtobuf(exp string, vm mm.VM) *proto.VM {
 		Tags:            vm.Tags,
 		CcActive:        vm.CCActive,
 		Snapshot:        vm.Snapshot,
+		VmType:          vm.VMType,
 	}
 }
 
