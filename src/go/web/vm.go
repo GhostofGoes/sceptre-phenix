@@ -157,7 +157,7 @@ func GetVM(w http.ResponseWriter, r *http.Request) error {
 		}
 
 		if err != nil {
-			plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
+			logScreenshotError(err)
 		} else {
 			vm.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(screenshot)
 		}
@@ -212,10 +212,13 @@ func vmTarget(expName, name string, running bool) (*types.Experiment, error) {
 }
 
 // vmStateError is the error that a handler answers for err, from an action on the VM name of the experiment expName,
-// when err is about the state of the VM: 404 for a VM or snapshot that does not exist, and 409 for a VM that does
-// not run, whose snapshot flag is not set, or whose disks a snapshot cannot hold. It returns nil for other errors.
+// when err is about the state or type of the VM: 404 for a VM or snapshot that does not exist, 409 for a VM that does
+// not run, whose snapshot flag is not set, or whose disks a snapshot cannot hold, and 400 for an operation that the
+// VM's type does not support. It returns nil for other errors.
 func vmStateError(expName, name string, err error) *weberror.WebError {
 	switch {
+	case errors.Is(err, vm.ErrNotSupported):
+		return weberror.New(http.StatusBadRequest, err.Error())
 	case errors.Is(err, vm.ErrSnapshotNotFound):
 		return weberror.New(http.StatusNotFound, fmt.Sprintf("snapshot not found for VM %s in experiment %s", name, expName))
 	case errors.Is(err, mm.ErrVMNotFound):
@@ -229,6 +232,16 @@ func vmStateError(expName, name string, err error) *weberror.WebError {
 	}
 
 	return nil
+}
+
+// logScreenshotError logs a failed screenshot, but not for a VM type that has
+// no screen.
+func logScreenshotError(err error) {
+	if errors.Is(err, vm.ErrNotSupported) {
+		return
+	}
+
+	plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
 }
 
 // vmWithAnnotations converts a VM for a response about that one VM, which,
@@ -641,7 +654,7 @@ func readBackVM(ctx context.Context, r *http.Request, expName, name string) *pro
 		}
 
 		if err != nil {
-			plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
+			logScreenshotError(err)
 		} else {
 			v.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(screenshot)
 		}
@@ -954,7 +967,7 @@ func GetAllVMs(w http.ResponseWriter, r *http.Request) error {
 			}
 
 			if err != nil {
-				plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
+				logScreenshotError(err)
 			} else {
 				v.vm.Screenshot = "data:image/png;base64," + base64.StdEncoding.EncodeToString(screenshot)
 			}

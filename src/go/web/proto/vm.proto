@@ -38,6 +38,8 @@ message VM {
   // the settings the VM had when its experiment was created; null for a VM
   // the experiment saved none for
   VMDefaults defaults = 27;
+  // the minimega VM type: kvm, container or firecracker
+  string vm_type = 28 [json_name="vm_type"];
 }
 
 // VMDefaults is the settings of a VM that phenix saved when it created the

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"phenix/util/firecracker"
 )
 
 var ErrHostNotFound = errors.New("host not found")
@@ -205,11 +207,15 @@ func (v VMs) Paginate(page, size int) VMs {
 	return v[start:end]
 }
 
+// DefaultVMType is the minimega VM type of a node that does not set one.
+const DefaultVMType = "kvm"
+
 type VM struct {
 	ID              int               `json:"id"`
 	Name            string            `json:"name"`
 	Description     string            `json:"description"`
-	Type            string            `json:"type"`
+	Type            string            `json:"type"`    // topology node type, such as VirtualMachine
+	VMType          string            `json:"vm_type"` // minimega VM type: kvm, container, or firecracker
 	Experiment      string            `json:"experiment"`
 	Host            string            `json:"host"`
 	IPv4            []string          `json:"ipv4"`
@@ -256,6 +262,11 @@ type VM struct {
 // minimega reports them; a VM with no host matches none.
 func (v VM) OnAnyHost(hosts []string) bool {
 	return v.Host != "" && slices.Contains(hosts, v.Host)
+}
+
+// IsFirecracker reports whether minimega runs the VM as a Firecracker microVM.
+func (v VM) IsFirecracker() bool {
+	return v.VMType == firecracker.VMType
 }
 
 // Copy returns a deep copy of the VM. No slice or map field of the copy

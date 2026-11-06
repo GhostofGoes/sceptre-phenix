@@ -364,3 +364,17 @@ func TestVMToProtobuf(t *testing.T) {
 		})
 	}
 }
+
+func TestVMToProtobufVMType(t *testing.T) {
+	t.Parallel()
+
+	for _, vmType := range []string{"kvm", "container", "firecracker"} {
+		t.Run(vmType, func(t *testing.T) {
+			t.Parallel()
+
+			if got := VMToProtobuf("test", mm.VM{Name: "vm", VMType: vmType}, nil).GetVmType(); got != vmType {
+				t.Errorf("VMToProtobuf(VMType %q).GetVmType() = %q, want %q", vmType, got, vmType)
+			}
+		})
+	}
+}

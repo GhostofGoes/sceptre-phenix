@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	ifaces "phenix/types/interfaces"
 	"phenix/util/common"
 	"phenix/util/file"
+	"phenix/util/firecracker"
 	"phenix/util/freshness"
 	"phenix/util/mm"
 	"phenix/util/mm/mmcli"
@@ -176,6 +178,7 @@ func nodeVM(exp types.Experiment, idx int, node ifaces.NodeSpec) (mm.VM, map[str
 		Interfaces:      make(map[string]string),
 		DoNotBoot:       dnb,
 		Type:            node.Type(),
+		VMType:          NodeVMType(node),
 		OSType:          node.Hardware().OSType(),
 		Snapshot:        snapshot,
 		Tags:            node.Labels(),
@@ -214,6 +217,8 @@ func mergeRunning(vm *mm.VM, details mm.VM, ifaceNameByVLAN map[string]string) {
 	vm.RAM = details.RAM
 	vm.Disk = details.Disk
 	vm.CCActive = details.CCActive
+
+	vm.VMType = cmp.Or(details.VMType, vm.VMType)
 
 	// `vm.IPv4` could be nil/empty if minimega isn't reporting any IPs for it
 	if len(vm.IPv4) == 0 {
@@ -626,6 +631,15 @@ func Restart(ctx context.Context, expName, vmName string) error {
 		return mm.StartVM(mm.NS(expName), mm.VMName(vmName), mm.Context(ctx))
 	}
 
+	vmType, err := lookupVMType(expName, vmName)
+	if err != nil {
+		return err
+	}
+
+	if vmType == firecracker.VMType {
+		return restartFirecracker(ctx, expName, vmName)
+	}
+
 	cmd := mmcli.NewNamespacedCommand(expName)
 	qmp := `{ "execute": "system_reset" }`
 	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
@@ -670,16 +684,26 @@ func shutdown(ctx context.Context, expName, vmName string, poll, timeout time.Du
 		return fmt.Errorf("shutting down VM %s in experiment %s: %w", vmName, expName, err)
 	}
 
+	vmType, err := lookupVMType(expName, vmName)
+	if err != nil {
+		return err
+	}
+
 	// Stop all packet captures for a vm that will be powered down
 	err = StopCaptures(context.Background(), expName, vmName)
 	if err != nil && !errors.Is(err, ErrNoCaptures) {
 		return fmt.Errorf("stopping captures for VM %s in experiment %s: %w", vmName, expName, err)
 	}
 
-	// Send a powerdown signal to the VM using QEMU QMP.
+	// Send a powerdown signal to the VM: QEMU QMP for KVM, and minimega's vm
+	// shutdown (Ctrl-Alt-Del) for firecracker.
 	cmd := mmcli.NewNamespacedCommand(expName)
 	qmp := `{ "execute": "system_powerdown" }`
 	cmd.Command = fmt.Sprintf("vm qmp %s '%s'", vmName, qmp)
+
+	if vmType == firecracker.VMType {
+		cmd.Command = "vm shutdown " + vmName
+	}
 
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		cmd.Command = "vm kill " + vmName
@@ -739,7 +763,7 @@ func ResetDiskState(ctx context.Context, expName, vmName string) error {
 	// directory with a new snapshot.
 	cmd := mmcli.NewNamespacedCommand(expName)
 	cmd.Command = vmInfoCmd
-	cmd.Columns = []string{"host", "name", "id", "state", "disks", "snapshot"}
+	cmd.Columns = []string{"host", "name", "id", "state", "disks", "snapshot", "type"}
 	cmd.Filters = []string{"name=" + vmName}
 
 	status := mmcli.RunTabularContext(ctx, cmd)
@@ -750,6 +774,10 @@ func ResetDiskState(ctx context.Context, expName, vmName string) error {
 
 	if len(status) == 0 {
 		return &mm.VMNotFoundError{Err: errors.New("vm not found")}
+	}
+
+	if status[0]["type"] == firecracker.VMType {
+		return resetFirecrackerDisk(expName, vmName, status[0])
 	}
 
 	var (
@@ -1093,14 +1121,21 @@ func Snapshot(ctx context.Context, expName, vmName, out string, cb func(string),
 
 	final := strings.TrimPrefix(out, expName+"_")
 
-	err = mm.MeshShell(host, fmt.Sprintf("mv %s/images/%s.state %s/%s.state", common.PhenixBase, out, dst, final))
-	if err != nil {
-		return fmt.Errorf("moving memory snapshot to experiment files directory: %w", err)
+	// vm save writes .state and .hdd for every VM type. For a firecracker VM it
+	// also writes the guest memory (.mem) and the sidecar that restore reads (.json).
+	type snapshotFile struct{ ext, desc string }
+
+	files := []snapshotFile{{"state", "memory snapshot"}, {"hdd", "disk snapshot"}}
+
+	if vm.IsFirecracker() {
+		files = append(files, snapshotFile{"mem", "guest memory"}, snapshotFile{snapshotSidecarExt, "snapshot sidecar"})
 	}
 
-	err = mm.MeshShell(host, fmt.Sprintf("mv %s/images/%s.hdd %s/%s.hdd", common.PhenixBase, out, dst, final))
-	if err != nil {
-		return fmt.Errorf("moving disk snapshot to experiment files directory: %w", err)
+	for _, f := range files {
+		err = mm.MeshShell(host, fmt.Sprintf("mv %s/images/%s.%s %s/%s.%s", common.PhenixBase, out, f.ext, dst, final, f.ext))
+		if err != nil {
+			return fmt.Errorf("moving %s to experiment files directory: %w", f.desc, err)
+		}
 	}
 
 	return nil
@@ -1170,7 +1205,7 @@ func awaitSave(expName, vmName string, cb func(string), timing saveTiming) (err 
 // first change is sent; after that it ignores ctx. Before the first change, it refuses a snapshot the VM does not have
 // (ErrSnapshotNotFound), a VM whose snapshot flag is not set (ErrSnapshotDisabled) and a VM with more than one disk
 // (ErrMultipleDisks).
-func Restore(ctx context.Context, expName, vmName, snap string) error {
+func Restore(ctx context.Context, expName, vmName, snap string) error { //nolint:funlen // complex logic
 	snap = strings.TrimSuffix(snap, filepath.Ext(snap))
 
 	snapshots, err := Snapshots(ctx, expName, vmName)
@@ -1188,8 +1223,6 @@ func Restore(ctx context.Context, expName, vmName, snap string) error {
 		return ErrSnapshotNotFound
 	}
 
-	snap = fmt.Sprintf("%s/files/%s", expName, snap)
-
 	details := mm.GetVMInfo(mm.NS(expName), mm.VMName(vmName), mm.Context(ctx))
 	if len(details) == 0 {
 		if err := ctx.Err(); err != nil {
@@ -1201,6 +1234,19 @@ func Restore(ctx context.Context, expName, vmName, snap string) error {
 
 	if err := checkVMDisks(ctx, expName, vmName); err != nil {
 		return err
+	}
+
+	if err := checkSnapshotType(expName, vmName, snap, details[0].IsFirecracker()); err != nil {
+		return err
+	}
+
+	vmType := cmp.Or(details[0].VMType, mm.DefaultVMType)
+	snap = fmt.Sprintf("%s/files/%s", expName, snap)
+
+	// A firecracker VM loads its saved state with firecracker-snapshot.
+	stateConfig := fmt.Sprintf("vm config state %s.state", snap)
+	if details[0].IsFirecracker() {
+		stateConfig = "vm config firecracker-snapshot " + snap
 	}
 
 	cmd := mmcli.NewNamespacedCommand(expName)
@@ -1222,7 +1268,15 @@ func Restore(ctx context.Context, expName, vmName, snap string) error {
 		return fmt.Errorf("setting uuid for VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = fmt.Sprintf("vm config state %s.state", snap)
+	// minimega refuses to restore a firecracker VM that has injects, which the clone keeps.
+	if details[0].IsFirecracker() {
+		cmd.Command = "clear vm config inject"
+		if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
+			return fmt.Errorf("clearing injects for VM %s: %w", vmName, err)
+		}
+	}
+
+	cmd.Command = stateConfig
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("configuring state file for VM %s: %w", vmName, err)
 	}
@@ -1244,7 +1298,7 @@ func Restore(ctx context.Context, expName, vmName, snap string) error {
 		return fmt.Errorf("flushing VM %s: %w", vmName, err)
 	}
 
-	cmd.Command = "vm launch kvm " + vmName
+	cmd.Command = fmt.Sprintf("vm launch %s %s", vmType, vmName)
 	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
 		return fmt.Errorf("relaunching VM %s: %w", vmName, err)
 	}
@@ -1328,6 +1382,16 @@ func CommitToDisk(
 
 	if !filepath.IsAbs(out) {
 		out = common.PhenixBase + "/images/" + out
+	}
+
+	vmType, err := lookupVMType(expName, vmName)
+	if err != nil {
+		return "", err
+	}
+
+	// A firecracker VM never writes to a qcow2 overlay, so minimega exports its disk.
+	if vmType == firecracker.VMType {
+		return exportFirecrackerDisk(ctx, expName, vmName, out, cb)
 	}
 
 	base, err := getBackingImage(ctx, disk)
@@ -1706,7 +1770,7 @@ func MemorySnapshot(
 		opt(&timing)
 	}
 
-	_, err := Get(ctx, expName, vmName)
+	vm, err := Get(ctx, expName, vmName)
 	if err != nil {
 		return "", fmt.Errorf("getting VM details: %w", err)
 	}
@@ -1779,6 +1843,20 @@ func MemorySnapshot(
 	if err := mmcli.ErrorResponse(mmcli.RunContext(ctx, cmd)); err != nil {
 		return "", fmt.Errorf("ensuring experiment files directory exists: %w", err)
 	}
+
+	// Firecracker has no QMP; minimega dumps its memory from a snapshot.
+	if vm.IsFirecracker() {
+		if err := dumpFirecrackerMemory(ctx, expName, vmName, out, cb); err != nil {
+			return "", err
+		}
+
+		if err := pullDump(expName, pull); err != nil {
+			return "", err
+		}
+
+		return out, nil
+	}
+
 	// ***** BEGIN: MEMORY SNAPSHOT VM *****
 
 	cmd.Command = dumpGuestMemoryCommand(vmName, out)
@@ -1792,18 +1870,29 @@ func MemorySnapshot(
 		return res, err
 	}
 
-	// Copy the ELF memory dump to the headnode if the VM was not
-	// hosted on the headnode
-	if pull != "" {
-		cmd.Command = "file get " + pull
-
-		err := mmcli.ErrorResponse(mmcli.Run(cmd))
-		if err != nil {
-			return "", fmt.Errorf("pulling ELF memory snapshot to headnode: %w", err)
-		}
+	if err := pullDump(expName, pull); err != nil {
+		return "", err
 	}
 
 	return out, nil
+}
+
+// pullDump copies the ELF memory dump at pull, its path in the minimega files
+// directory, to the headnode. An empty pull is a dump of a VM on the headnode,
+// so it does nothing.
+func pullDump(expName, pull string) error {
+	if pull == "" {
+		return nil
+	}
+
+	cmd := mmcli.NewNamespacedCommand(expName)
+	cmd.Command = "file get " + pull
+
+	if err := mmcli.ErrorResponse(mmcli.Run(cmd)); err != nil {
+		return fmt.Errorf("pulling ELF memory snapshot to headnode: %w", err)
+	}
+
+	return nil
 }
 
 // awaitDump reports the progress of the VM's memory dump to cb, if set, until it completes, fails or outlasts
@@ -2081,6 +2170,10 @@ func ChangeOpticalDisc(ctx context.Context, expName, vmName, isoPath string) err
 		return err
 	}
 
+	if err := refuseFirecracker(expName, vmName, "changing the optical disc"); err != nil {
+		return err
+	}
+
 	cmd := mmcli.NewNamespacedCommand(expName)
 	cmd.Command = fmt.Sprintf("vm cdrom change %s %s", vmName, isoPath)
 
@@ -2101,6 +2194,10 @@ func EjectOpticalDisc(ctx context.Context, expName, vmName string) error {
 
 	if vmName == "" {
 		return errors.New("no VM name provided")
+	}
+
+	if err := refuseFirecracker(expName, vmName, "ejecting the optical disc"); err != nil {
+		return err
 	}
 
 	cmd := mmcli.NewNamespacedCommand(expName)

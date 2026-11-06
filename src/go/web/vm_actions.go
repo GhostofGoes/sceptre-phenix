@@ -339,6 +339,8 @@ func runVMAction(req vmRequest, a *vmAction) ([]byte, error) {
 				return nil, fail(actionErr.status, err)
 			case errors.Is(err, mm.ErrVMNotFound):
 				return nil, fail(http.StatusNotFound, vmNotFound(req.exp, req.name))
+			case errors.Is(err, vm.ErrNotSupported):
+				return nil, fail(http.StatusBadRequest, err)
 			}
 
 			return nil, fail(http.StatusInternalServerError, err)
@@ -400,7 +402,7 @@ func vmScreenshot(change context.Context, exp, name, size string) string {
 
 	screenshot, err := util.GetScreenshotContext(ctx, exp, name, size)
 	if err != nil {
-		plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
+		logScreenshotError(err)
 
 		return ""
 	}

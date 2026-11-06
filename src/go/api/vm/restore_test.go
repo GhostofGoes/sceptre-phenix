@@ -15,8 +15,8 @@ import (
 	"phenix/util/mm/mmtest"
 )
 
-// snapshotFiles lists the cluster's snapshots. Any other file.ClusterFiles
-// method panics through the nil embedded interface.
+// snapshotFiles lists the cluster's snapshots and no other files. Any other
+// file.ClusterFiles method panics through the nil embedded interface.
 type snapshotFiles struct {
 	file.ClusterFiles
 
@@ -25,6 +25,11 @@ type snapshotFiles struct {
 
 func (f snapshotFiles) GetExperimentSnapshots(string) ([]string, error) {
 	return f.snapshots, nil
+}
+
+// GetExperimentFiles lists no files, so a snapshot has no firecracker sidecar.
+func (snapshotFiles) GetExperimentFiles(string, string) (file.Files, error) {
+	return nil, nil
 }
 
 func TestRestore(t *testing.T) {
