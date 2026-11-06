@@ -496,7 +496,8 @@ func (m Minimega) getVMInfo(o options, started func()) (VMs, error) {
 
 		snapshot, _ := strconv.ParseBool(row["snapshot"])
 
-		if snapshot && disk != "" {
+		// A Firecracker VM's disks column names its image.
+		if snapshot && disk != "" && !vm.IsFirecracker() {
 			launch := vmLaunch{ //nolint:exhaustruct // at is only known with an uptime
 				ns:   o.ns,
 				name: vm.Name,
