@@ -1,4 +1,5 @@
 import { isInterfaceCapturing } from '@/utils/captures.js';
+import { isFirecracker } from '@/utils/vmType.js';
 import {
   actionState,
   partitionForAction,
@@ -192,6 +193,8 @@ export const VM_ACTIONS = {
       ['vms/cdrom', 'update'],
       ['vms/cdrom', 'delete'],
     ],
+    unavailable: (vm) =>
+      isFirecracker(vm) ? 'Firecracker VMs have no CD-ROM drive' : null,
     blocked: (vm) => (vm.running ? null : NOT_RUNNING),
   },
   mount: {
@@ -324,6 +327,8 @@ export function vmActionState(name, vm, { can, features = [] }) {
   if (vm.external) unavailable = 'external nodes are not VMs';
   else if (action.feature && !features.includes(action.feature)) {
     unavailable = 'the server does not support it';
+  } else if (action.unavailable) {
+    unavailable = action.unavailable(vm);
   }
 
   return actionState(

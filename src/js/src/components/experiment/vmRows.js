@@ -1,6 +1,7 @@
 import { onBeforeUnmount } from 'vue';
 
 import { applyStopCaptureUpdate } from '@/utils/captures.js';
+import { isFirecracker } from '@/utils/vmType.js';
 import { onWsReconnect } from '@/utils/websocket';
 
 // The running experiment page's VM table rows as the websocket changes them:
@@ -319,10 +320,10 @@ export function applyVmEvent(experiment, msg, name) {
     case 'experiment/vm/screenshot':
       // Screenshots arrive for every subscribed VM every few seconds: mutate
       // the row in place instead of replacing the array, which would make
-      // b-table re-process every row.
+      // b-table re-process every row. A Firecracker VM has no screen.
       if (msg.resource.action == 'update') {
         const row = findVm(experiment, name);
-        if (row) row.screenshot = msg.result.screenshot;
+        if (row && !isFirecracker(row)) row.screenshot = msg.result.screenshot;
       }
       return null;
     case 'experiment/vm/capture':

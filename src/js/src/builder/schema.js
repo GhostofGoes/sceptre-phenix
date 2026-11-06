@@ -378,6 +378,10 @@ const SPEC_TITLES = {
   hello_interval: 'Hello interval',
   id: 'ID',
   inject_partition: 'Inject partition',
+  // The boot files and command line of a Firecracker node.
+  initrd: 'Initrd',
+  kernel: 'Kernel',
+  kernel_args: 'Kernel arguments',
   mac: 'MAC address',
   mtu: 'MTU',
   // A route's next hop.

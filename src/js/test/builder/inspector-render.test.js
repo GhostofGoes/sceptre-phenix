@@ -248,7 +248,12 @@ describe('inspector field accessibility', () => {
         .map((option) => option.replace(/<[^>]+>/g, '').trim());
     const select = (key) =>
       tags(html, 'select').find((tag) => tag.includes(`${key}-input`));
-    expect(choices('vm_type')).toEqual(['kvm', 'container', 'Default (kvm)']);
+    expect(choices('vm_type')).toEqual([
+      'kvm',
+      'container',
+      'firecracker',
+      'Default (kvm)',
+    ]);
     expect(select('vm_type')).toMatch(
       /aria-describedby="[^"]*vm_type-default"/,
     );
