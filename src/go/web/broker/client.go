@@ -634,8 +634,9 @@ func (c *Client) listVMs(job listJob) {
 	c.vms = nil
 	c.sent = nil
 
+	// a firecracker VM has no screen, so it is never screenshotted
 	for _, v := range allowed {
-		c.vms = append(c.vms, vmScope{exp: expName, name: v.Name, running: v.Running})
+		c.vms = append(c.vms, vmScope{exp: expName, name: v.Name, running: v.Running && !v.IsFirecracker()})
 	}
 
 	c.vmMu.Unlock()

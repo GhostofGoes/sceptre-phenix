@@ -245,7 +245,7 @@ func addVMScreenshots(ctx context.Context, expName string, vms []mm.VM, size str
 		}
 
 		if err != nil {
-			plog.Error(plog.TypeSystem, "getting screenshot", "err", err)
+			logScreenshotError(err)
 
 			continue
 		}

@@ -46,6 +46,11 @@ func (f *vmSnapshotCmdFiles) GetExperimentSnapshots(string) ([]string, error) {
 	return f.snapshots, f.err
 }
 
+// GetExperimentFiles lists no files, so a snapshot has no firecracker sidecar.
+func (*vmSnapshotCmdFiles) GetExperimentFiles(string, string) (file.Files, error) {
+	return nil, nil
+}
+
 func (f *vmSnapshotCmdFiles) CopyFile(path, dest string, _ file.CopyStatus) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

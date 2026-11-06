@@ -9,7 +9,9 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"phenix/api/experiment"
 	"phenix/api/vm"
+	"phenix/util/firecracker"
 	"phenix/web/cache"
 )
 
@@ -23,6 +25,8 @@ const (
 	maxScreenshotSize = 4096
 	// screenshotStep is what screenshot widths are rounded up to a multiple of.
 	screenshotStep = 200
+	// vmTypeCacheDuration is how long the VM types of an experiment's nodes are reused.
+	vmTypeCacheDuration = 1 * time.Minute
 )
 
 var ErrInvalidScreenshotSize = errors.New("screenshot size must be a whole number from 1 to 4096")
@@ -51,6 +55,9 @@ func ScreenshotWidth(size string) (string, error) {
 	return strconv.Itoa(min((n+screenshotStep-1)/screenshotStep*screenshotStep, maxScreenshotSize)), nil
 }
 
+// GetScreenshot returns a screenshot of a running VM. A firecracker VM has no
+// screen, so for one it returns an error that wraps vm.ErrNotSupported and
+// sends no command to minimega.
 func GetScreenshot(expName, vmName, size string) ([]byte, error) {
 	return GetScreenshotContext(context.Background(), expName, vmName, size)
 }
@@ -67,6 +74,10 @@ func GetScreenshotContext(ctx context.Context, expName, vmName, size string) ([]
 
 	if screenshot, ok := cache.Get(name); ok {
 		return screenshot, nil
+	}
+
+	if nodeVMType(expName, vmName) == firecracker.VMType {
+		return nil, fmt.Errorf("getting screenshot for VM: %w", vm.NotSupportedError("taking a screenshot"))
 	}
 
 	flight := screenshotFlights.DoChan(name, func() (any, error) {
@@ -101,4 +112,41 @@ func GetScreenshotContext(ctx context.Context, expName, vmName, size string) ([]
 
 		return screenshot, nil
 	}
+}
+
+// nodeVMType returns the minimega VM type of a topology node, or "" when the
+// experiment does not have the node. It reads the experiment at most once a
+// minute and caches the type of every node in it, because the screenshot
+// callers ask for many VMs of one experiment in turn.
+func nodeVMType(expName, vmName string) string {
+	if vmType, ok := cache.Get(vmTypeCacheKey(expName, vmName)); ok {
+		return string(vmType)
+	}
+
+	exp, err := experiment.Get(expName)
+	if err != nil {
+		return ""
+	}
+
+	var found string
+
+	for _, node := range exp.Spec.Topology().Nodes() {
+		vmType := vm.NodeVMType(node)
+
+		_ = cache.SetWithExpire(
+			vmTypeCacheKey(expName, node.General().Hostname()),
+			[]byte(vmType),
+			vmTypeCacheDuration,
+		)
+
+		if node.General().Hostname() == vmName {
+			found = vmType
+		}
+	}
+
+	return found
+}
+
+func vmTypeCacheKey(expName, vmName string) string {
+	return "vm-type/" + expName + "/" + vmName
 }
