@@ -351,6 +351,65 @@ func TestNodeValidateFirecracker(t *testing.T) {
 				n.HardwareF.KernelF = ""
 			}),
 		},
+		{
+			name: "read-only qcow2 without snapshot",
+			node: firecrackerTestNode(1, func(n *Node) {
+				n.GeneralF.SnapshotF = boolPtr(false)
+				n.HardwareF.DrivesF[0].ReadOnlyF = true
+			}),
+		},
+		{
+			name: "scratch drive",
+			node: firecrackerTestNode(1, func(n *Node) { n.HardwareF.ScratchF = "64M" }),
+		},
+		{
+			name:   "scratch size with an unknown suffix",
+			node:   firecrackerTestNode(1, func(n *Node) { n.HardwareF.ScratchF = "12x" }),
+			substr: `hardware.scratch: invalid size "12x"`,
+		},
+		{
+			name:   "scratch size that is not a multiple of 512",
+			node:   firecrackerTestNode(1, func(n *Node) { n.HardwareF.ScratchF = "1000" }),
+			substr: "multiple of 512 bytes",
+		},
+		{name: "17 devices with scratch", node: firecrackerTestNode(13, func(n *Node) { n.HardwareF.ScratchF = "1G" })},
+		{
+			name:   "18 devices with scratch",
+			node:   firecrackerTestNode(14, func(n *Node) { n.HardwareF.ScratchF = "1G" }),
+			substr: "needs 18 Firecracker devices (1 disk, scratch, 14 NICs, vsock, entropy)",
+		},
+		{
+			name: "injections into a read-only first drive",
+			node: firecrackerTestNode(1, func(n *Node) {
+				n.HardwareF.DrivesF[0].ReadOnlyF = true
+				n.InjectionsF = []*Injection{{SrcF: "a.sh", DstF: "/etc/a.sh"}}
+			}),
+			substr: "injections need a writable first drive",
+		},
+		{
+			name: "deletions from a read-only first drive",
+			node: firecrackerTestNode(1, func(n *Node) {
+				n.HardwareF.DrivesF[0].ReadOnlyF = true
+				n.DeletionsF = []*Deletion{{PathF: "/etc/old"}}
+			}),
+			substr: "injections need a writable first drive",
+		},
+		{
+			name: "injections with a read-only first drive and inject partition 0",
+			node: firecrackerTestNode(1, func(n *Node) {
+				part := 0
+				n.HardwareF.DrivesF[0].ReadOnlyF = true
+				n.HardwareF.DrivesF[0].InjectPartitionF = &part
+				n.InjectionsF = []*Injection{{SrcF: "a.sh", DstF: "/etc/a.sh"}}
+			}),
+		},
+		{
+			name: "injections with a read-only second drive",
+			node: firecrackerTestNode(1, func(n *Node) {
+				n.HardwareF.DrivesF = append(n.HardwareF.DrivesF, &Drive{ImageF: "tools.img", ReadOnlyF: true})
+				n.InjectionsF = []*Injection{{SrcF: "a.sh", DstF: "/etc/a.sh"}}
+			}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -400,6 +459,117 @@ func TestHardwareFirecrackerAppend(t *testing.T) {
 		t.Run(args, func(t *testing.T) {
 			if got := (&Hardware{KernelArgsF: args}).FirecrackerAppend(); got != want {
 				t.Errorf("FirecrackerAppend(%q) = %q, want %q", args, got, want)
+			}
+		})
+	}
+}
+
+// A read-only first drive is usually a file system without partitions, so
+// phenix boots it read only from the whole device.
+func TestHardwareFirecrackerAppendReadOnlyRoot(t *testing.T) {
+	for args, want := range map[string]string{
+		"":                    "root=/dev/vda ro",
+		"console=ttyS0":       "console=ttyS0 root=/dev/vda ro",
+		"root=/dev/vda1 rw":   "root=/dev/vda1 rw",
+		"init=/sbin/init.sh ": "init=/sbin/init.sh root=/dev/vda ro",
+	} {
+		t.Run(args, func(t *testing.T) {
+			h := &Hardware{KernelArgsF: args, DrivesF: []*Drive{{ImageF: "root.squashfs", ReadOnlyF: true}, {ImageF: "data.raw"}}}
+			if got := h.FirecrackerAppend(); got != want {
+				t.Errorf("FirecrackerAppend(%q) = %q, want %q", args, got, want)
+			}
+		})
+	}
+
+	second := &Hardware{DrivesF: []*Drive{{ImageF: "debian.raw"}, {ImageF: "tools.img", ReadOnlyF: true}}}
+	if got, want := second.FirecrackerAppend(), "root=/dev/vda1 rw"; got != want {
+		t.Errorf("FirecrackerAppend() with a read-only second drive = %q, want %q", got, want)
+	}
+}
+
+func TestHardwareDiskConfigReadOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		drives   []*Drive
+		snapshot string
+		want     string
+	}{
+		{
+			name:   "read-only drive",
+			drives: []*Drive{{ImageF: "root.squashfs", ReadOnlyF: true}},
+			want:   "root.squashfs,ro",
+		},
+		{
+			name: "ro after the interface and the cache mode",
+			drives: []*Drive{
+				{ImageF: "root.raw", IfaceF: "virtio", CacheModeF: "unsafe", ReadOnlyF: true},
+				{ImageF: "data.raw"},
+			},
+			want: "root.raw,virtio,unsafe,ro data.raw",
+		},
+		{
+			name:     "snapshot of a writable drive",
+			drives:   []*Drive{{ImageF: "base.qc2"}, {ImageF: "data.raw", IfaceF: "virtio"}},
+			snapshot: "snap.qc2",
+			want:     "snap.qc2,writeback data.raw,virtio,writeback",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (Hardware{DrivesF: tt.drives}).DiskConfig(tt.snapshot); got != tt.want {
+				t.Errorf("DiskConfig(%q) = %q, want %q", tt.snapshot, got, tt.want)
+			}
+		})
+	}
+}
+
+// read_only and scratch are only for firecracker nodes, and minimega refuses
+// a read-only drive for the other VM types.
+func TestNodeValidateFirecrackerOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		vmType  string
+		change  func(*Node)
+		wantErr bool
+	}{
+		{name: "kvm node without them", vmType: "kvm", change: func(*Node) {}},
+		{
+			name: "kvm node with a read-only drive", vmType: "kvm", wantErr: true,
+			change: func(n *Node) { n.HardwareF.DrivesF[0].ReadOnlyF = true },
+		},
+		{
+			name: "container node with a scratch drive", vmType: "container", wantErr: true,
+			change: func(n *Node) { n.HardwareF.ScratchF = "64M" },
+		},
+		{
+			name: "node without a VM type with a scratch drive", vmType: "", wantErr: true,
+			change: func(n *Node) { n.HardwareF.ScratchF = "64M" },
+		},
+		{
+			name: "firecracker node with both", vmType: "firecracker",
+			change: func(n *Node) {
+				n.HardwareF.DrivesF[0].ReadOnlyF = true
+				n.HardwareF.ScratchF = "64M"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := firecrackerTestNode(1, func(n *Node) {
+				n.GeneralF.VMTypeF = tt.vmType
+				tt.change(n)
+			})
+
+			err := node.validate()
+
+			if got := errors.Is(err, ErrFirecrackerOnly); got != tt.wantErr {
+				t.Errorf("validate() = %v, want an error wrapping ErrFirecrackerOnly: %t", err, tt.wantErr)
+			}
+
+			if !tt.wantErr && err != nil {
+				t.Errorf("validate() = %v, want nil", err)
 			}
 		})
 	}

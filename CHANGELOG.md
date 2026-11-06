@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - **Firecracker Nodes**: Added the `firecracker` VM type for minimega nodes, with `kernel`, `initrd`, and `kernel_args` hardware fields.
 - **Firecracker VM Operations**: VM operations support Firecracker VMs, and VM API responses include `vm_type`.
+- **Firecracker Drives**: Added the `read_only` drive field and the `scratch` hardware field for Firecracker nodes, for a shared read-only root drive and a writable scratch drive.
 - **Web UI Help**: Added a Help link to the documentation in the footer.
 - **Image Releases**: `phenix image create` recognizes the Debian releases `trixie` and `forky`.
 - **SCORCH**: Support the `cleanup` stage in the built-in `tap` component for reliable tap teardown on run completion or cancellation.

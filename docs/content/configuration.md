@@ -185,7 +185,12 @@ boots a kernel file directly, so set these `hardware` fields:
   relative path is in the phēnix image directory.
 - `initrd` (optional): the path of the guest initrd.
 - `kernel_args` (optional): the kernel command line. When it has no `root=`,
-  phēnix adds `root=/dev/vda1 rw`.
+  phēnix adds `root=/dev/vda1 rw`, or `root=/dev/vda ro` when the first drive
+  is read only.
+- `scratch` (optional): the size of a writable scratch drive, such as `64M`.
+  Use a number of bytes with an optional `K`, `M`, `G`, or `T` suffix (powers
+  of 1024). The size must be a multiple of 512 bytes. minimega adds the drive
+  after the other drives. An empty size or `0` adds no drive.
 
 ```yaml
 general:
@@ -207,13 +212,20 @@ Topology validation refuses a Firecracker node that:
 - has an OS type other than `linux`
 - has no `kernel`
 - has fewer than 1 or more than 32 vCPUs
-- has a qcow2 drive image and `general.snapshot: false`
+- has a qcow2 drive image on a drive that is not read only, and
+  `general.snapshot: false`
+- has a `scratch` size that minimega refuses
+- has file injections or deletions and a read-only first drive
 - has a `serial` interface or a `qinq` interface
 - needs more than 17 devices
 
-Each drive, each interface, the vsock device, and the entropy device is one
-device. Set `firecracker-entropy: "false"` in `advanced` to remove the entropy
-device. Set `firecracker-pci: "true"` in `advanced` to increase the limit to 31.
+Topology validation also refuses `read_only` and `scratch` on a node that is
+not a Firecracker node.
+
+Each drive, the scratch drive, each interface, the vsock device, and the
+entropy device is one device. Set `firecracker-entropy: "false"` in `advanced`
+to remove the entropy device. Set `firecracker-pci: "true"` in `advanced` to
+increase the limit to 31.
 The guest kernel must then support PCI.
 
 Firecracker ignores the `cpu` field, the drive `interface` field, and
@@ -221,6 +233,38 @@ Firecracker ignores the `cpu` field, the drive `interface` field, and
 other than `virtio`. When `general.snapshot` is `true`, minimega injects the
 node's files into the VM's copy of the disk at launch. When the kernel or initrd
 file is missing, the `startup` app sets `do_not_boot` on the node.
+
+##### Shared Root Drive
+
+Set `read_only: true` on a drive to share its image with all the Firecracker
+VMs that use it. minimega does not copy a read-only drive, so
+`general.snapshot` does not apply to it. minimega converts a qcow2 image one
+time. A shared root image is usually a file system without partitions, such as
+a squashfs or ext4 image.
+
+phēnix injects no files into a read-only first drive. Set
+`inject_partition: 0` on that drive, and phēnix sends its startup scripts
+through minimega command and control instead. Set `scratch` to give each VM a
+writable drive of its own.
+
+```yaml
+general:
+  hostname: worker1
+  vm_type: firecracker
+hardware:
+  os_type: linux
+  memory: 128
+  kernel: vmlinux-6.1
+  kernel_args: console=ttyS0
+  scratch: 64M
+  drives:
+    - image: busybox-root.squashfs
+      read_only: true
+      inject_partition: 0
+```
+
+phēnix boots this node with `root=/dev/vda ro`, and minimega attaches the
+scratch drive after the root drive.
 
 ### External Nodes
 

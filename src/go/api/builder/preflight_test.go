@@ -1050,6 +1050,113 @@ func TestPreflightCapacityFirecrackerRules(t *testing.T) {
 	}
 }
 
+// The capacity check applies the rules of read-only and scratch drives: a
+// read-only qcow2 drive needs no snapshot, a scratch drive counts as a
+// device, an invalid scratch size and file injections into a read-only first
+// drive are errors, and a kvm device may set neither field.
+func TestPreflightCapacityFirecrackerDrives(t *testing.T) {
+	env := &fakePreflight{hosts: []PreflightHost{{Name: "h1", CPUs: 64, CPUCommit: 0, MemTotal: 65536, MemCommit: 0}}}
+
+	issue := func(code builder.Code, path, field string) builder.Issue {
+		return builder.Issue{
+			Code: code, Severity: code.DefaultSeverity(),
+			Path: "nodes[0].device.spec." + path, NodeID: "n-fc", Field: "spec." + field,
+		}
+	}
+
+	for _, tt := range []struct {
+		name    string
+		nics    int
+		edit    func(spec, hardware map[string]any)
+		want    []builder.Issue
+		message string
+	}{
+		{
+			name: "a read-only qcow2 drive needs no snapshot", nics: 1,
+			edit: func(spec, hardware map[string]any) {
+				spec["general"] = map[string]any{"vm_type": "firecracker", "snapshot": false}
+				hardware["drives"] = []any{map[string]any{"image": "base.qc2", "read_only": true}}
+			},
+		},
+		{
+			name: "17 devices with a scratch drive fit", nics: 13,
+			edit: func(_, hardware map[string]any) { hardware["scratch"] = "64M" },
+		},
+		{
+			name: "18 devices with a scratch drive do not fit", nics: 14,
+			edit: func(_, hardware map[string]any) { hardware["scratch"] = "64M" },
+			want: []builder.Issue{issue(builder.CodePreflightCapacityFirecrackerDevices, "network.interfaces", "network.interfaces")},
+			message: `device "fc" needs 18 Firecracker devices (1 disk, scratch, 14 NICs, vsock, entropy); ` +
+				"the limit is 17 without firecracker-pci",
+		},
+		{
+			name: "a scratch size that is not a multiple of 512", nics: 1,
+			edit: func(_, hardware map[string]any) { hardware["scratch"] = "1000" },
+			want: []builder.Issue{issue(builder.CodePreflightCapacityFirecracker, "hardware.scratch", "hardware.scratch")},
+			message: `device "fc" is a firecracker VM, but minimega refuses its scratch drive size: ` +
+				`invalid size "1000": the size must be a multiple of 512 bytes`,
+		},
+		{
+			name: "file injections into a read-only first drive", nics: 1,
+			edit: func(spec, hardware map[string]any) {
+				hardware["drives"] = []any{map[string]any{"image": "root.squashfs", "read_only": true}}
+				spec["injections"] = []any{map[string]any{"src": "a.sh", "dst": "/etc/a.sh"}}
+			},
+			want: []builder.Issue{
+				issue(builder.CodePreflightCapacityFirecracker, "hardware.drives[0].read_only", "hardware.drives.0.read_only"),
+			},
+		},
+		{
+			name: "file deletions with inject partition 0", nics: 1,
+			edit: func(spec, hardware map[string]any) {
+				hardware["drives"] = []any{
+					map[string]any{"image": "root.squashfs", "read_only": true, "inject_partition": float64(0)},
+				}
+				spec["deletions"] = []any{map[string]any{"path": "/etc/old"}}
+			},
+		},
+		{
+			name: "a kvm device with a read-only drive and a scratch drive", nics: 1,
+			edit: func(spec, hardware map[string]any) {
+				spec["general"] = map[string]any{"vm_type": "kvm"}
+				hardware["drives"] = []any{
+					map[string]any{"image": "base.qc2"}, map[string]any{"image": "tools.img", "read_only": true},
+				}
+				hardware["scratch"] = "64M"
+			},
+			want: []builder.Issue{
+				issue(builder.CodePreflightCapacityFirecracker, "hardware.drives[1].read_only", "hardware.drives.1.read_only"),
+				issue(builder.CodePreflightCapacityFirecracker, "hardware.scratch", "hardware.scratch"),
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := firecrackerSpec(tt.nics)
+			hardware, _ := spec["hardware"].(map[string]any)
+			tt.edit(spec, hardware)
+
+			doc := builder.NewDocument("firecracker")
+			doc.Nodes = []builder.Node{preflightNode("n-fc", "fc", spec)}
+
+			result := runOne(t, doc, PreflightCapacity, "", env)
+
+			status := PreflightPassed
+			if len(tt.want) > 0 {
+				status = PreflightFailed
+			}
+
+			want := PreflightResult{Name: PreflightCapacity, Status: status, Issues: tt.want}
+			if diff := resultDiff(want, result); diff != "" {
+				t.Fatalf("RunPreflight(capacity) mismatch (-want +got):\n%s", diff)
+			}
+
+			if tt.message != "" && result.Issues[0].Message != tt.message {
+				t.Errorf("RunPreflight(capacity) issue message = %q, want %q", result.Issues[0].Message, tt.message)
+			}
+		})
+	}
+}
+
 // The disks check describes a firecracker device as one, and refuses an ISO
 // image for it, since it has no CD-ROM.
 func TestPreflightDisksFirecracker(t *testing.T) {

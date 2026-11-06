@@ -1711,6 +1711,15 @@
                     ],
                     "title": "Interface",
                     "type": "string"
+                  },
+                  "read_only": {
+                    "default": false,
+                    "description": "Attach the drive read only, for Firecracker nodes only. All the VMs that use the image share it without a copy, so general.snapshot does not apply to it. phenix injects no files into a read-only first drive.",
+                    "examples": [
+                      true
+                    ],
+                    "title": "Read Only",
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -1739,7 +1748,7 @@
               "type": "string"
             },
             "kernel_args": {
-              "description": "Kernel command line for Firecracker nodes. phenix adds root=/dev/vda1 rw when it sets no root=.",
+              "description": "Kernel command line for Firecracker nodes. phenix adds root=/dev/vda1 rw when it sets no root=, or root=/dev/vda ro when the first drive is read only.",
               "examples": [
                 "console=ttyS0 quiet"
               ],
@@ -1779,6 +1788,14 @@
                 "windows"
               ],
               "title": "OS Type",
+              "type": "string"
+            },
+            "scratch": {
+              "description": "Size of a writable scratch drive for Firecracker nodes only, such as 64M: a number of bytes with an optional K, M, G or T suffix (powers of 1024) that is a multiple of 512. minimega adds the drive after the other drives. Empty or 0 adds no drive.",
+              "examples": [
+                "64M"
+              ],
+              "title": "Scratch",
               "type": "string"
             },
             "vcpus": {
