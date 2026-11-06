@@ -241,6 +241,42 @@ func TestGetVMInfoNamesTheImageBehindASnapshot(t *testing.T) { //nolint:parallel
 	}
 }
 
+// A Firecracker VM's disks column names its image, so GetVMInfo sends no
+// `disk info` about it.
+func TestGetVMInfoSkipsDiskInfoForFirecracker(t *testing.T) { //nolint:paralleltest // shares the fake minimega
+	cluster := new(vmInfoCluster)
+
+	received := useFakeMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
+		if cmd.Base == vmInfoCmd {
+			return []*minicli.Response{mmtest.Tabular("head",
+				[]string{"uuid", "name", "state", "disks", "snapshot", typeColumn},
+				[]string{"uuid-fc", "fc", "RUNNING", "/images/fc.raw", "true", "firecracker"},
+				[]string{"uuid-kvm", "kvm", "RUNNING", "/f/kvm_snapshot", "true", "kvm"},
+			)}
+		}
+
+		return cluster.reply(cmd)
+	})
+
+	want := map[string][2]string{
+		"fc":  {"firecracker", "/images/fc.raw"},
+		"kvm": {"kvm", "/base/f/kvm_snapshot"},
+	}
+
+	got := make(map[string][2]string)
+	for _, vm := range (Minimega{}).GetVMInfo(NS("exp")) {
+		got[vm.Name] = [2]string{vm.VMType, vm.Disk}
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GetVMInfo(exp) types and disks by VM mismatch (-want +got):\n%s", diff)
+	}
+
+	if n := mmtest.Count(received(), "disk info"); n != 1 {
+		t.Errorf("GetVMInfo(exp) sent %d `disk info` commands, want 1 for the kvm VM (all: %v)", n, received())
+	}
+}
+
 func TestGetVMInfoMergesConcurrentCalls(t *testing.T) { //nolint:paralleltest // shares the fake minimega
 	const callers = 4
 
