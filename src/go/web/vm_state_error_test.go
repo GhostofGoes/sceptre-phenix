@@ -47,6 +47,10 @@ func TestVMStateError(t *testing.T) {
 			wantStatus: http.StatusConflict, wantMessage: "checking VM web: snapshots support only VMs with one disk",
 		},
 		{
+			name: "a VM with a read-only root drive", err: fmt.Errorf("checking VM web: %w", vm.ErrReadOnlyRoot),
+			wantStatus: http.StatusConflict, wantMessage: "checking VM web: snapshots do not support a read-only root drive",
+		},
+		{
 			name: "an operation the VM's type does not support", err: vm.NotSupportedError("taking a screenshot"),
 			wantStatus: http.StatusBadRequest, wantMessage: "taking a screenshot is not supported for firecracker VMs",
 		},

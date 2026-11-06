@@ -3965,7 +3965,304 @@ function deviceSetupFindings(spec, hostname, at = '') {
     ...setupFindings(spec, hostname, at),
     ...ospfFindings(spec, hostname, at),
     ...annotationFindings(spec, hostname, at),
+    ...firecrackerFindings(spec, hostname, at),
   ];
+}
+
+// What minimega's firecracker VM type allows, as phenix/util/firecracker
+// gives it: the most vCPUs, and the most virtio devices without and with
+// firecracker-pci. A scratch drive size is a whole number of 512-byte sectors.
+const FIRECRACKER = 'firecracker';
+const FIRECRACKER_MAX_VCPUS = 32;
+const FIRECRACKER_MAX_DEVICES = 17;
+const FIRECRACKER_MAX_DEVICES_PCI = 31;
+const SCRATCH_SECTOR = BigInt(512);
+const SCRATCH_SHIFTS = { K: 10, M: 20, G: 30, T: 40 };
+const SCRATCH_DIGITS = /^[+-]?[0-9]+$/;
+const MAX_INT64 = BigInt('9223372036854775807');
+
+// strconv.ParseBool, which minimega's vm config settings use: true, false,
+// or null for any other text.
+function goBool(text) {
+  if (['1', 't', 'T', 'TRUE', 'true', 'True'].includes(text)) {
+    return true;
+  }
+
+  return ['0', 'f', 'F', 'FALSE', 'false', 'False'].includes(text)
+    ? false
+    : null;
+}
+
+// Why minimega refuses a firecracker-scratch size, or '' (ParseSize in
+// phenix/util/firecracker): a number of bytes with an optional K, M, G or T
+// suffix (powers of 1024), a multiple of 512. An empty size is 0.
+function scratchProblem(size) {
+  if (size === '') {
+    return '';
+  }
+
+  const shift = SCRATCH_SHIFTS[size.slice(-1).toUpperCase()];
+  const digits = shift === undefined ? size : size.slice(0, -1);
+  const multiplier = BigInt(2) ** BigInt(shift ?? 0);
+  const number = SCRATCH_DIGITS.test(digits) ? BigInt(digits) : null;
+
+  if (number === null || number < 0 || number > MAX_INT64 / multiplier) {
+    return `invalid size ${goQuoted(size)}: use a number of bytes with an optional K, M, G or T suffix`;
+  }
+
+  return (number * multiplier) % SCRATCH_SECTOR === BigInt(0)
+    ? ''
+    : `invalid size ${goQuoted(size)}: the size must be a multiple of 512 bytes`;
+}
+
+// Whether a firecracker-scratch size adds a drive: a size minimega takes
+// that is not 0.
+function addsScratch(size) {
+  return size !== '' && !scratchProblem(size) && /[1-9]/.test(size);
+}
+
+// Whether an image is a qcow2 file, which Firecracker boots only from a copy
+// that minimega converts (IsQCOW2 in phenix/util/firecracker).
+function isQCOW2(image) {
+  return /\.(qcow2|qc2)$/i.test(image.split('/').pop());
+}
+
+// A positive whole number of a spec, a number or text that holds one, or
+// null (specWhole in api/builder/preflight.go).
+function specWhole(value) {
+  const number =
+    typeof value === 'string' && /^\s*[+-]?[0-9]+\s*$/.test(value)
+      ? Number(value)
+      : value;
+
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+// The general.vm_type of a spec in lowercase, as the preflight checks read it.
+function vmTypeOf(spec) {
+  return goToLower(trimmed(objectAt(spec, 'general').vm_type));
+}
+
+/** The Firecracker findings of a device, as the capacity preflight check gives them (firecrackerIssues). */
+function firecrackerFindings(spec, hostname, at) {
+  return vmTypeOf(spec) === FIRECRACKER
+    ? firecrackerDeviceFindings(spec, hostname, at)
+    : firecrackerOnlyFindings(spec, hostname, at);
+}
+
+// A device of another VM type that sets a field only firecracker VMs use
+// (firecrackerOnlyIssues): a read-only drive, which minimega refuses for
+// it, or a scratch drive.
+function firecrackerOnlyFindings(spec, hostname, at) {
+  const hardware = objectAt(spec, 'hardware');
+  const kind = vmTypeOf(spec) === 'container' ? 'a container' : 'a kvm VM';
+  const findings = arrayOf(hardware.drives).flatMap((drive, index) =>
+    isPlainObject(drive) && drive.read_only === true
+      ? [
+          fieldFinding(at, `spec.hardware.drives.${index}.read_only`, {
+            code: 'preflight.capacity.firecracker',
+            warning:
+              'Only firecracker VMs can have a read-only drive. Clear Read only, or set the VM type to firecracker.',
+            issue: `device ${goQuoted(hostname)} is ${kind}, but drive ${index} is read only, which only firecracker VMs support`,
+          }),
+        ]
+      : [],
+  );
+
+  if (typeof hardware.scratch === 'string' && hardware.scratch !== '') {
+    findings.push(
+      fieldFinding(at, `spec.hardware.scratch`, {
+        code: 'preflight.capacity.firecracker',
+        warning:
+          'Only firecracker VMs have a scratch drive. Clear the size, or set the VM type to firecracker.',
+        issue: `device ${goQuoted(hostname)} is ${kind}, but it sets a scratch drive, which only firecracker VMs have`,
+      }),
+    );
+  }
+
+  return findings;
+}
+
+// The findings of a firecracker device that minimega cannot launch, and of
+// the settings that Firecracker ignores.
+function firecrackerDeviceFindings(spec, hostname, at) {
+  const findings = [];
+  const add = (field, code, warning, text) =>
+    findings.push(fieldFinding(at, field, { code, warning, issue: text }));
+  const device = goQuoted(hostname);
+  const hardware = objectAt(spec, 'hardware');
+  const osType = trimmed(hardware.os_type);
+  const vcpus = specWhole(hardware.vcpus);
+  const scratch = typeof hardware.scratch === 'string' ? hardware.scratch : '';
+
+  if (osType && osType !== 'linux') {
+    add(
+      `spec.hardware.os_type`,
+      'preflight.capacity.firecracker',
+      'A firecracker VM runs only linux.',
+      `device ${device} is a firecracker VM, which runs only linux, but its OS type is ${goQuoted(osType)}`,
+    );
+  }
+
+  if (!trimmed(hardware.kernel)) {
+    add(
+      `spec.hardware.kernel`,
+      'preflight.capacity.firecracker',
+      'A firecracker VM boots a kernel file. Set the path of the kernel.',
+      `device ${device} is a firecracker VM, which boots a kernel file, but it names no kernel`,
+    );
+  }
+
+  if (vcpus !== null && vcpus > FIRECRACKER_MAX_VCPUS) {
+    add(
+      `spec.hardware.vcpus`,
+      'preflight.capacity.firecracker',
+      `A firecracker VM has at most ${FIRECRACKER_MAX_VCPUS} vCPUs.`,
+      `device ${device} takes ${vcpus} vCPUs, but a firecracker VM has at most ${FIRECRACKER_MAX_VCPUS}`,
+    );
+  }
+
+  const problem = scratchProblem(scratch);
+
+  if (problem) {
+    add(
+      `spec.hardware.scratch`,
+      'preflight.capacity.firecracker',
+      `minimega refuses this size: ${problem}.`,
+      `device ${device} is a firecracker VM, but minimega refuses its scratch drive size: ${problem}`,
+    );
+  }
+
+  const disks = firecrackerDriveFindings(spec, device, add);
+  const nics = firecrackerInterfaceFindings(spec, device, add);
+  const advanced = objectAt(spec, 'advanced');
+  const entropy = goBool(trimmed(advanced['firecracker-entropy'])) !== false;
+  const pci = goBool(trimmed(advanced['firecracker-pci'])) === true;
+  const needed =
+    disks + nics + 1 + (addsScratch(scratch) ? 1 : 0) + (entropy ? 1 : 0);
+  const limit = pci ? FIRECRACKER_MAX_DEVICES_PCI : FIRECRACKER_MAX_DEVICES;
+
+  if (needed > limit) {
+    const parts = [
+      `${disks} ${disks === 1 ? 'disk' : 'disks'}`,
+      ...(addsScratch(scratch) ? ['scratch'] : []),
+      `${nics} ${nics === 1 ? 'NIC' : 'NICs'}`,
+      'vsock',
+      ...(entropy ? ['entropy'] : []),
+    ];
+
+    add(
+      `spec.network.interfaces`,
+      'preflight.capacity.firecracker-devices',
+      `A firecracker VM can have at most ${limit} devices, but this one needs ${needed}.`,
+      `device ${device} needs ${needed} Firecracker devices (${parts.join(', ')}); the limit is ${limit} ${pci ? 'with' : 'without'} firecracker-pci`,
+    );
+  }
+
+  if (Object.keys(objectAt(spec, 'overrides')).length) {
+    add(
+      `spec.overrides`,
+      'preflight.capacity.firecracker-ignored',
+      'A firecracker VM ignores QEMU overrides.',
+      `device ${device} is a firecracker VM, which ignores its QEMU overrides`,
+    );
+  }
+
+  return findings;
+}
+
+// The drive findings of a firecracker device, and how many drives it has. A
+// qcow2 image needs a snapshot, unless the drive is read only. File
+// injections need a writable first drive.
+function firecrackerDriveFindings(spec, device, add) {
+  const drives = arrayOf(objectAt(spec, 'hardware').drives);
+  const snapshot = objectAt(spec, 'general').snapshot !== false;
+  let disks = 0;
+
+  drives.forEach((drive, index) => {
+    if (!isPlainObject(drive)) {
+      return;
+    }
+
+    disks += 1;
+
+    const image = trimmed(drive.image);
+    const iface = trimmed(drive.interface);
+
+    if (!snapshot && drive.read_only !== true && isQCOW2(image)) {
+      add(
+        `spec.hardware.drives.${index}.image`,
+        'preflight.capacity.firecracker',
+        'Without a snapshot, a firecracker VM needs a raw image or a read-only drive.',
+        `device ${device} is a firecracker VM without a snapshot, which needs a raw image, but drive image ${goQuoted(image)} is qcow2`,
+      );
+    }
+
+    if (iface && iface !== 'virtio') {
+      add(
+        `spec.hardware.drives.${index}.interface`,
+        'preflight.capacity.firecracker-ignored',
+        'A firecracker VM ignores the drive interface and always uses virtio.',
+        `device ${device} is a firecracker VM, which ignores drive interface ${goQuoted(iface)} and always uses virtio`,
+      );
+    }
+  });
+
+  const [first] = drives;
+  const files =
+    arrayOf(spec?.injections).length + arrayOf(spec?.deletions).length;
+
+  if (
+    files &&
+    isPlainObject(first) &&
+    first.read_only === true &&
+    first.inject_partition !== 0
+  ) {
+    add(
+      `spec.hardware.drives.0.read_only`,
+      'preflight.capacity.firecracker',
+      'phenix cannot inject files into a read-only first drive. Remove the injections and deletions, or set inject partition 0.',
+      `device ${device} is a firecracker VM with file injections or deletions, but its first drive is read only, and injections need a writable first drive`,
+    );
+  }
+
+  return disks;
+}
+
+// The interface findings of a firecracker device, and how many interfaces
+// it has.
+function firecrackerInterfaceFindings(spec, device, add) {
+  let nics = 0;
+
+  arrayOf(objectAt(spec, 'network').interfaces).forEach((iface, index) => {
+    if (!isPlainObject(iface)) {
+      return;
+    }
+
+    nics += 1;
+
+    const name = goQuoted(trimmed(iface.name));
+
+    if (trimmed(iface.type) === 'serial') {
+      add(
+        `spec.network.interfaces.${index}.type`,
+        'preflight.capacity.firecracker',
+        'The one serial port of a firecracker VM is its console.',
+        `device ${device} is a firecracker VM, whose one serial port is its console, so it cannot have serial interface ${name}`,
+      );
+    }
+
+    if (iface.qinq === true) {
+      add(
+        `spec.network.interfaces.${index}.qinq`,
+        'preflight.capacity.firecracker',
+        'Firecracker VMs do not support QinQ yet.',
+        `device ${device} is a firecracker VM, and interface ${name} uses QinQ, which is not supported for firecracker nodes yet`,
+      );
+    }
+  });
+
+  return nics;
 }
 
 /** A device with no drive, which the phenix schema refuses (drivesError). It blocks publishing. */

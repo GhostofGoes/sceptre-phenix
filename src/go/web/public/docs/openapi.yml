@@ -7052,8 +7052,8 @@ paths:
         "409":
           description: >-
             another action holds the VM, the experiment is not running, the VM
-            is not running, the VM's snapshot flag is not set, or the VM has
-            more than one disk
+            is not running, the VM's snapshot flag is not set, the VM has more
+            than one disk, or the VM is a Firecracker VM with a read-only drive
           content:
             application/json:
               schema:

@@ -218,6 +218,56 @@ func TestMinimegaScriptFirecracker(t *testing.T) {
 			),
 		},
 		{
+			name: "read-only shared root and a scratch drive, so no injections",
+			node: func() *v1.Node {
+				node := withFiles(firecrackerNode(true, "console=ttyS0"))
+				node.HardwareF.DrivesF = []*v1.Drive{{ImageF: "root.squashfs", ReadOnlyF: true}}
+				node.HardwareF.ScratchF = "64M"
+
+				return node
+			}(),
+			want: scriptLines(
+				"## VM: fc-01 ##",
+				"clear vm config",
+				"vm config vcpus 2",
+				"vm config memory 512",
+				"vm config kernel /phenix/images/vmlinux",
+				`vm config append "console=ttyS0 root=/dev/vda ro"`,
+				"vm config snapshot true",
+				"vm config disk root.squashfs,ro",
+				"vm config firecracker-scratch 64M",
+				"vm config net phenix,EXP",
+				"vm launch firecracker fc-01",
+				"",
+			),
+		},
+		{
+			name: "read-only second drive, so injections into the first",
+			node: func() *v1.Node {
+				node := withFiles(firecrackerNode(true, ""))
+				node.HardwareF.DrivesF = append(node.HardwareF.DrivesF, &v1.Drive{
+					ImageF: "tools.img", IfaceF: "virtio", ReadOnlyF: true,
+				})
+
+				return node
+			}(),
+			want: scriptLines(
+				"## VM: fc-01 ##",
+				"clear vm config",
+				"vm config vcpus 2",
+				"vm config memory 512",
+				"vm config kernel /phenix/images/vmlinux",
+				`vm config append "root=/dev/vda1 rw"`,
+				"vm config snapshot true",
+				"vm config disk debian.qc2 tools.img,virtio,ro",
+				`vm config inject 1 "`+scriptBaseDir+`/a.sh":"/etc/a.sh" "/abs/b.sh":"/etc/b.sh"`,
+				`vm config inject delete 1 "/etc/old" "/etc/old2"`,
+				"vm config net phenix,EXP",
+				"vm launch firecracker fc-01",
+				"",
+			),
+		},
+		{
 			name: "inject partition 0, so no injections",
 			node: func() *v1.Node {
 				node := withFiles(firecrackerNode(true, ""))
@@ -307,6 +357,52 @@ func TestPacketCaptureScriptFirecracker(t *testing.T) {
 		"vm config qemu-append -vga qxl",
 		"vm config net phenix,EXP",
 		"vm launch kvm mon",
+		"",
+		"vm launch",
+		"vm start all",
+	)
+
+	if diff := cmp.Diff(want, render(t, "packet_capture_script.tmpl", data)); diff != "" {
+		t.Errorf("packet capture script mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The packet capture script gives a firecracker node with a read-only shared
+// root its scratch drive and no injections, as the minimega script does.
+func TestPacketCaptureScriptFirecrackerReadOnlyRoot(t *testing.T) {
+	server := &v1.Node{
+		TypeF:    "VirtualMachine",
+		GeneralF: &v1.General{HostnameF: "es", VMTypeF: "firecracker"},
+		HardwareF: &v1.Hardware{
+			VCPUF: 1, MemoryF: 512, KernelF: "vmlinux", ScratchF: "1G",
+			DrivesF: []*v1.Drive{{ImageF: "root.squashfs", ReadOnlyF: true}},
+		},
+		NetworkF:    &v1.Network{InterfacesF: []*v1.Interface{{NameF: "eth0", VLANF: "EXP", BridgeF: "phenix"}}},
+		InjectionsF: []*v1.Injection{{SrcF: "/abs/es.yml", DstF: "/etc/es.yml"}},
+		LabelsF:     map[string]string{"soh-elastic-server": ""},
+	}
+
+	data := struct {
+		Exp ifaces.ExperimentSpec
+		Mon map[string][]string
+	}{Exp: scriptSpec(nil, server), Mon: map[string][]string{}}
+
+	want := scriptLines(
+		"## ELASTIC SERVER ##",
+		"## VM: es ##",
+		"",
+		"clear vm config",
+		"vm config vcpus 1",
+		"vm config memory 512",
+		"vm config kernel vmlinux",
+		`vm config append "root=/dev/vda ro"`,
+		"vm config snapshot true",
+		"vm config disk root.squashfs,ro",
+		"vm config firecracker-scratch 1G",
+		"vm config net phenix,EXP",
+		"vm launch firecracker es",
+		"",
+		"## CAPTURE/MONITOR VMS ##",
 		"",
 		"vm launch",
 		"vm start all",

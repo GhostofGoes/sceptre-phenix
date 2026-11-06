@@ -9,7 +9,7 @@ import (
 // diskSpecGrammar is minimega's diskspec grammar as a regular expression, an
 // oracle independent of parseDiskSpec.
 var diskSpecGrammar = regexp.MustCompile(
-	`^[^,]+(,(ahci|ide|scsi|sd|mtd|floppy|pflash|virtio))?(,(none|writeback|unsafe|directsync|writethrough))?$`,
+	`^[^,]+(,(ahci|ide|scsi|sd|mtd|floppy|pflash|virtio))?(,(none|writeback|unsafe|directsync|writethrough))?(,ro)?$`,
 )
 
 // FuzzParseDiskSpec checks parseDiskSpec against minimega's diskspec grammar:
@@ -19,6 +19,7 @@ func FuzzParseDiskSpec(f *testing.F) {
 		"/images/a.qc2", "/images/a.qc2,writeback", "/images/a.qc2,virtio", "a.qc2,ide,unsafe",
 		"a.qc2,writeback,virtio", "a.qc2,none,none", "a.qc2,bogus", "/images/a.qc2,", ",virtio", "",
 		"a.qc2,virtio,writeback,none", "a b,virtio", "a.qc2 b.qc2,none",
+		"a.squashfs,ro", "a.qc2,virtio,writeback,ro", "a.qc2,ro,virtio", "a.qc2,ro,ro", ",ro", "ro",
 	} {
 		f.Add(seed)
 	}

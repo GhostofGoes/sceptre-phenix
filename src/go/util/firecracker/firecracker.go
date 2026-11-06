@@ -4,7 +4,9 @@
 package firecracker
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,25 +34,44 @@ const (
 	// DefaultRoot is what phenix adds to the kernel arguments of a node that
 	// does not set root=, to boot the first partition of the first drive.
 	DefaultRoot = "root=/dev/vda1 rw"
+
+	// ReadOnlyRoot is what phenix adds instead when the first drive is read
+	// only. A shared root image is usually a file system without partitions.
+	ReadOnlyRoot = "root=/dev/vda ro"
+
+	// sectorSize is the unit of a scratch drive size.
+	sectorSize = 512
+
+	// The sizes of the K, M, G and T suffixes of a scratch drive size.
+	kibibyte = 1 << 10
+	mebibyte = 1 << 20
+	gibibyte = 1 << 30
+	tebibyte = 1 << 40
 )
 
-// Devices is what a Firecracker VM attaches as virtio devices: its disks, its
-// NICs, the vsock device (always counted, because cc can use it), and the
-// entropy device unless it is turned off. PCI tells which device limit
-// applies.
+// ErrInvalidSize is the error that [ParseSize] wraps for a size that minimega
+// refuses.
+var ErrInvalidSize = errors.New("invalid size")
+
+// Devices is what a Firecracker VM attaches as virtio devices: its disks, the
+// scratch drive minimega adds when firecracker-scratch is set, its NICs, the
+// vsock device (always counted, because cc can use it), and the entropy device
+// unless it is turned off. PCI tells which device limit applies.
 type Devices struct {
 	Disks   int
+	Scratch bool
 	NICs    int
 	Entropy bool
 	PCI     bool
 }
 
-// NewDevices returns the devices of a VM with the given disks and NICs.
-// entropy and pci are the values of the firecracker-entropy and
-// firecracker-pci settings, or "" when they are not set. The entropy device is
-// on unless entropy is false, and the PCI transport is off unless pci is true.
-func NewDevices(disks, nics int, entropy, pci string) Devices {
-	devices := Devices{Disks: disks, NICs: nics, Entropy: true, PCI: false}
+// NewDevices returns the devices of a VM with the given disks and NICs, and a
+// scratch drive when scratch is true. entropy and pci are the values of the
+// firecracker-entropy and firecracker-pci settings, or "" when they are not
+// set. The entropy device is on unless entropy is false, and the PCI transport
+// is off unless pci is true.
+func NewDevices(disks, nics int, scratch bool, entropy, pci string) Devices {
+	devices := Devices{Disks: disks, Scratch: scratch, NICs: nics, Entropy: true, PCI: false}
 
 	if on, err := strconv.ParseBool(strings.TrimSpace(entropy)); err == nil {
 		devices.Entropy = on
@@ -66,6 +87,10 @@ func NewDevices(disks, nics int, entropy, pci string) Devices {
 // Count returns how many virtio devices the VM needs.
 func (d Devices) Count() int {
 	count := d.Disks + d.NICs + 1
+
+	if d.Scratch {
+		count++
+	}
 
 	if d.Entropy {
 		count++
@@ -88,11 +113,17 @@ func (d Devices) Fits() bool {
 	return d.Count() <= d.Limit()
 }
 
-// String describes the devices and the limit, for example "19 Firecracker
-// devices (2 disks, 15 NICs, vsock, entropy); the limit is 17 without
+// String describes the devices and the limit, for example "20 Firecracker
+// devices (2 disks, scratch, 15 NICs, vsock, entropy); the limit is 17 without
 // firecracker-pci".
 func (d Devices) String() string {
-	parts := []string{plural(d.Disks, "disk", "disks"), plural(d.NICs, "NIC", "NICs"), "vsock"}
+	parts := []string{plural(d.Disks, "disk", "disks")}
+
+	if d.Scratch {
+		parts = append(parts, "scratch")
+	}
+
+	parts = append(parts, plural(d.NICs, "NIC", "NICs"), "vsock")
 
 	if d.Entropy {
 		parts = append(parts, "entropy")
@@ -115,7 +146,7 @@ func VCPUsFit(vcpus int) bool {
 }
 
 // IsQCOW2 reports whether image names a qcow2 file (.qcow2 or .qc2), which
-// Firecracker can boot only from a snapshot copy that minimega converts.
+// Firecracker can boot only from a copy that minimega converts.
 func IsQCOW2(image string) bool {
 	switch strings.ToLower(filepath.Ext(image)) {
 	case ".qcow2", ".qc2":
@@ -126,8 +157,9 @@ func IsQCOW2(image string) bool {
 }
 
 // KernelArgs returns the kernel command line for a node with the given
-// kernel_args. It adds [DefaultRoot] when args sets no root=.
-func KernelArgs(args string) string {
+// kernel_args. When args sets no root=, it adds [DefaultRoot], or
+// [ReadOnlyRoot] when the first drive of the node is read only.
+func KernelArgs(args string, readOnlyRoot bool) string {
 	args = strings.TrimSpace(args)
 
 	for field := range strings.FieldsSeq(args) {
@@ -136,11 +168,55 @@ func KernelArgs(args string) string {
 		}
 	}
 
-	if args == "" {
-		return DefaultRoot
+	root := DefaultRoot
+	if readOnlyRoot {
+		root = ReadOnlyRoot
 	}
 
-	return args + " " + DefaultRoot
+	if args == "" {
+		return root
+	}
+
+	return args + " " + root
+}
+
+// ParseSize returns the bytes of a firecracker-scratch size, as minimega reads
+// it: a number of bytes, with an optional K, M, G or T suffix (powers of
+// 1024), that is a multiple of 512. An empty size is 0, which adds no scratch
+// drive, as 0 does. The error wraps [ErrInvalidSize].
+func ParseSize(size string) (int64, error) {
+	if size == "" {
+		return 0, nil
+	}
+
+	num, mult := size, int64(1)
+
+	switch strings.ToUpper(size[len(size)-1:]) {
+	case "K":
+		mult = kibibyte
+	case "M":
+		mult = mebibyte
+	case "G":
+		mult = gibibyte
+	case "T":
+		mult = tebibyte
+	}
+
+	if mult > 1 {
+		num = size[:len(size)-1]
+	}
+
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("%w %q: use a number of bytes with an optional K, M, G or T suffix", ErrInvalidSize, size)
+	}
+
+	n *= mult
+	if n%sectorSize != 0 {
+		return 0, fmt.Errorf("%w %q: the size must be a multiple of %d bytes", ErrInvalidSize, size, sectorSize)
+	}
+
+	return n, nil
 }
 
 func plural(n int, one, many string) string {

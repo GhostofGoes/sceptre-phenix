@@ -238,7 +238,9 @@ The VM commands and the REST API use the minimega type of each VM
   into the disk at launch.
 - `memory-snapshot` runs minimega `vm memory-dump` and writes an ELF file.
 - Commit to disk runs minimega `vm export-disk` and writes a qcow2 image.
-- A snapshot also has a `.mem` file and a `.json` sidecar file. A restore
+- A snapshot also has a `.mem` file and a `.json` sidecar file, and a
+  `.scratch` file for a VM with a scratch drive. A snapshot refuses a VM with
+  a read-only drive (`vm.ErrReadOnlyRoot`, 409 in the REST API). A restore
   refuses a KVM snapshot on a Firecracker VM, and the reverse.
 - Screenshots, VNC, and optical discs are not supported. The API returns 400
   with `<operation> is not supported for firecracker VMs`.

@@ -613,23 +613,25 @@ func deviceFit(device preflightDevice, vcpus, memory int, hosts []PreflightHost)
 // firecrackerIssues returns the issues of a firecracker device that topology
 // validation also finds, so that minimega could not launch it: an OS type
 // other than linux, no kernel, too many vCPUs or devices, a qcow2 drive
-// without a snapshot, and a serial or QinQ interface. It also warns about QEMU
-// overrides and drive interfaces, which Firecracker ignores. Any other device
-// has none.
+// without a snapshot (unless it is read only), an invalid scratch size, file
+// injections into a read-only first drive, and a serial or QinQ interface. It
+// also warns about QEMU overrides and drive interfaces, which Firecracker
+// ignores. Any other device has the issues of [firecrackerOnlyIssues].
 func firecrackerIssues(device preflightDevice) []builder.Issue {
 	if device.vmType() != firecracker.VMType {
-		return nil
+		return firecrackerOnlyIssues(device)
 	}
 
 	var (
 		general  = specMap(device.spec["general"])
 		hardware = specMap(device.spec["hardware"])
 		advanced = specMap(device.spec["advanced"])
+		drives   = specItems(hardware["drives"])
 		issues   = firecrackerHardwareIssues(device, hardware)
 	)
 
 	snapshot, set := general["snapshot"].(bool)
-	driveIssues, disks := firecrackerDriveIssues(device, specItems(hardware["drives"]), snapshot || !set)
+	driveIssues, disks := firecrackerDriveIssues(device, drives, snapshot || !set)
 	issues = append(issues, driveIssues...)
 
 	nicIssues, nics := firecrackerInterfaceIssues(device, specItems(specMap(device.spec["network"])["interfaces"]))
@@ -637,8 +639,20 @@ func firecrackerIssues(device preflightDevice) []builder.Issue {
 
 	add := firecrackerAdder(device, &issues)
 
+	if len(drives) > 0 && specReadOnly(drives[0]) && injectsIntoFirstDrive(device.spec, specMap(drives[0])) {
+		add(builder.CodePreflightCapacityFirecracker, "hardware.drives[0].read_only", "hardware.drives.0.read_only",
+			fmt.Sprintf(
+				"device %q is a firecracker VM with file injections or deletions, but its first drive is read only, "+
+					"and injections need a writable first drive",
+				device.hostname,
+			))
+	}
+
+	scratchSize, _ := hardware["scratch"].(string)
+	scratch, _ := firecracker.ParseSize(scratchSize)
+
 	devices := firecracker.NewDevices(
-		disks, nics, specString(advanced[firecracker.EntropyKey]), specString(advanced[firecracker.PCIKey]),
+		disks, nics, scratch > 0, specString(advanced[firecracker.EntropyKey]), specString(advanced[firecracker.PCIKey]),
 	)
 
 	if !devices.Fits() {
@@ -689,11 +703,86 @@ func firecrackerHardwareIssues(device preflightDevice, hardware map[string]any) 
 		))
 	}
 
+	if size, _ := hardware["scratch"].(string); size != "" {
+		if _, err := firecracker.ParseSize(size); err != nil {
+			add(builder.CodePreflightCapacityFirecracker, "hardware.scratch", "hardware.scratch", fmt.Sprintf(
+				"device %q is a firecracker VM, but minimega refuses its scratch drive size: %v", device.hostname, err,
+			))
+		}
+	}
+
 	return issues
 }
 
+// firecrackerOnlyIssues returns the issues of a device that is not a
+// firecracker VM but sets a field that only firecracker VMs use: a read-only
+// drive, which minimega refuses for it, or a scratch drive.
+func firecrackerOnlyIssues(device preflightDevice) []builder.Issue {
+	var issues []builder.Issue
+
+	add := firecrackerAdder(device, &issues)
+	hardware := specMap(device.spec["hardware"])
+
+	for position, entry := range specItems(hardware["drives"]) {
+		if !specReadOnly(entry) {
+			continue
+		}
+
+		add(builder.CodePreflightCapacityFirecracker,
+			fmt.Sprintf("hardware.drives[%d].read_only", position), fmt.Sprintf("hardware.drives.%d.read_only", position),
+			fmt.Sprintf(
+				"device %q is %s, but drive %d is read only, which only firecracker VMs support",
+				device.hostname, deviceKind(device.vmType()), position,
+			))
+	}
+
+	if size, _ := hardware["scratch"].(string); size != "" {
+		add(builder.CodePreflightCapacityFirecracker, "hardware.scratch", "hardware.scratch", fmt.Sprintf(
+			"device %q is %s, but it sets a scratch drive, which only firecracker VMs have",
+			device.hostname, deviceKind(device.vmType()),
+		))
+	}
+
+	return issues
+}
+
+// specReadOnly reports whether a drive of a node spec is read only.
+func specReadOnly(drive any) bool {
+	readOnly, _ := specMap(drive)["read_only"].(bool)
+
+	return readOnly
+}
+
+// injectsIntoFirstDrive reports whether phenix injects files into the first
+// drive of a node spec: the spec has file injections or deletions, and the
+// inject partition of the drive is not 0.
+func injectsIntoFirstDrive(spec, first map[string]any) bool {
+	if len(specItems(spec["injections"]))+len(specItems(spec["deletions"])) == 0 {
+		return false
+	}
+
+	return !specZero(first["inject_partition"])
+}
+
+// specZero reports whether a value of a node spec is the number 0.
+func specZero(value any) bool {
+	switch number := value.(type) {
+	case float64:
+		return number == 0
+	case int:
+		return number == 0
+	case json.Number:
+		zero, err := number.Float64()
+
+		return err == nil && zero == 0
+	}
+
+	return false
+}
+
 // firecrackerDriveIssues returns the drive issues of a firecracker device and
-// the number of its drives. A qcow2 image is an issue only without a snapshot.
+// the number of its drives. A qcow2 image is an issue only without a snapshot,
+// and not on a read-only drive, which minimega converts once into its cache.
 func firecrackerDriveIssues(device preflightDevice, drives []any, snapshot bool) ([]builder.Issue, int) {
 	var (
 		issues []builder.Issue
@@ -710,7 +799,7 @@ func firecrackerDriveIssues(device preflightDevice, drives []any, snapshot bool)
 
 		disks++
 
-		if image := specString(drive["image"]); !snapshot && firecracker.IsQCOW2(image) {
+		if image := specString(drive["image"]); !snapshot && !specReadOnly(drive) && firecracker.IsQCOW2(image) {
 			add(builder.CodePreflightCapacityFirecracker,
 				fmt.Sprintf("hardware.drives[%d].image", position), fmt.Sprintf("hardware.drives.%d.image", position),
 				fmt.Sprintf(

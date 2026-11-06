@@ -51,6 +51,19 @@ func checkOneDisk(vmName string, row map[string]string) error {
 	return nil
 }
 
+// checkWritableDisks returns an error wrapping ErrReadOnlyRoot when row, the VM's `vm info` row, lists a read-only
+// disk.
+func checkWritableDisks(vmName string, row map[string]string) error {
+	// minimega shows a read-only disk as <diskspec>,ro, and a path has no comma
+	for d := range strings.FieldsSeq(row["disks"]) {
+		if strings.HasSuffix(d, ",ro") {
+			return fmt.Errorf("VM %s: %w", vmName, ErrReadOnlyRoot)
+		}
+	}
+
+	return nil
+}
+
 // checkVMDisks returns an error wrapping ErrMultipleDisks when minimega lists more than one disk for the VM vmName of
 // the experiment expName, an error wrapping ErrSnapshotDisabled when its snapshot flag is not set, or the error of the
 // listing.

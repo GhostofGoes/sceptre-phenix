@@ -122,6 +122,7 @@ type NodeHardware interface { //nolint:interfacebloat // one getter for each har
 	Kernel() string
 	Initrd() string
 	KernelArgs() string
+	Scratch() string
 
 	SetVCPU(int)
 	SetMemory(int)
@@ -134,6 +135,7 @@ type NodeDrive interface {
 	Interface() string
 	CacheMode() string
 	InjectPartition() *int
+	ReadOnly() bool
 
 	SetInjectPartition(*int)
 	SetImage(string)

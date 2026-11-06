@@ -376,6 +376,10 @@ var (
 	// ErrMultipleDisks is the error of Snapshot and Restore for a VM with more than one disk: a snapshot holds only
 	// the first disk, so it cannot restore such a VM (see sandialabs/sceptre-phenix#145).
 	ErrMultipleDisks = errors.New("snapshots support only VMs with one disk")
+
+	// ErrReadOnlyRoot is the error of Snapshot for a firecracker VM whose drive is read only: vm save writes no disk
+	// file for it, and a snapshot needs one.
+	ErrReadOnlyRoot = errors.New("snapshots do not support a read-only root drive")
 )
 
 // updateFirstDrive sets the image and inject partition of the node's first drive that the update asks for.
@@ -1042,9 +1046,12 @@ func WithSaveTiming(poll, timeout time.Duration) SnapshotOption {
 
 // Snapshot saves the VM's disk and memory state as a snapshot it can later be restored from. Unsent minimega commands
 // give up once ctx is done, until the save starts; after that it ignores ctx. Before the save, it refuses a VM that is
-// not running (ErrVMNotRunning), whose snapshot flag is not set (ErrSnapshotDisabled) or that has more than one disk
-// (ErrMultipleDisks). The snapshot's files stay on the VM's node, in the experiment's files directory.
-func Snapshot(ctx context.Context, expName, vmName, out string, cb func(string), opts ...SnapshotOption) error {
+// not running (ErrVMNotRunning), whose snapshot flag is not set (ErrSnapshotDisabled), that has more than one disk
+// (ErrMultipleDisks) or that is a firecracker VM with a read-only drive (ErrReadOnlyRoot). The snapshot's files stay
+// on the VM's node, in the experiment's files directory.
+func Snapshot( //nolint:funlen // complex logic
+	ctx context.Context, expName, vmName, out string, cb func(string), opts ...SnapshotOption,
+) error {
 	timing := saveTiming{poll: time.Second, timeout: time.Hour}
 	for _, opt := range opts {
 		opt(&timing)
@@ -1075,6 +1082,10 @@ func Snapshot(ctx context.Context, expName, vmName, out string, cb func(string),
 	cmd.Columns = []string{"host", "id", "disks", "snapshot"}
 	cmd.Filters = []string{"name=" + vmName}
 
+	if vm.IsFirecracker() {
+		cmd.Columns = append(cmd.Columns, "firecracker-scratch")
+	}
+
 	status := mmcli.RunTabularContext(ctx, cmd)
 
 	if len(status) == 0 {
@@ -1091,6 +1102,21 @@ func Snapshot(ctx context.Context, expName, vmName, out string, cb func(string),
 
 	if err := checkOneDisk(vmName, status[0]); err != nil {
 		return err
+	}
+
+	var scratch bool
+
+	if vm.IsFirecracker() {
+		if err := checkWritableDisks(vmName, status[0]); err != nil {
+			return err
+		}
+
+		size, err := firecracker.ParseSize(status[0]["firecracker-scratch"])
+		if err != nil {
+			return fmt.Errorf("getting scratch drive of VM %s: %w", vmName, err)
+		}
+
+		scratch = size > 0
 	}
 
 	cmd.Columns = nil
@@ -1122,13 +1148,18 @@ func Snapshot(ctx context.Context, expName, vmName, out string, cb func(string),
 	final := strings.TrimPrefix(out, expName+"_")
 
 	// vm save writes .state and .hdd for every VM type. For a firecracker VM it
-	// also writes the guest memory (.mem) and the sidecar that restore reads (.json).
+	// also writes the guest memory (.mem), the sidecar that restore reads (.json)
+	// and the scratch drive (.scratch), if the VM has one.
 	type snapshotFile struct{ ext, desc string }
 
 	files := []snapshotFile{{"state", "memory snapshot"}, {"hdd", "disk snapshot"}}
 
 	if vm.IsFirecracker() {
 		files = append(files, snapshotFile{"mem", "guest memory"}, snapshotFile{snapshotSidecarExt, "snapshot sidecar"})
+	}
+
+	if scratch {
+		files = append(files, snapshotFile{"scratch", "scratch drive"})
 	}
 
 	for _, f := range files {

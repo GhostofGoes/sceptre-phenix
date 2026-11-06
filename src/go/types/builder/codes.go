@@ -831,7 +831,8 @@ var codeRegistry = []CodeInfo{
 	{CodePreflightCapacityVMTooBig, SeverityError, "A device fits on no single schedulable host: none has both its CPUs and its memory."},
 	{CodePreflightCapacityFirecracker, SeverityError, "A firecracker device sets something minimega cannot launch: " +
 		"an OS type other than linux, no kernel, more than 32 vCPUs, a qcow2 drive without a snapshot, " +
-		"a serial interface or a QinQ interface."},
+		"an invalid scratch size, file injections into a read-only first drive, a serial interface or a QinQ interface. " +
+		"Or another device sets read_only or scratch, which only firecracker devices use."},
 	{CodePreflightCapacityFirecrackerDevices, SeverityError, "A firecracker device needs more virtio devices " +
 		"than Firecracker allows: 17, or 31 with firecracker-pci."},
 	{CodePreflightCapacityFirecrackerIgnored, SeverityWarning, "Firecracker ignores a setting of a firecracker device, " +

@@ -399,8 +399,9 @@ const SPEC_MORE = [
   'annotations',
 ];
 
-// The hardware fields that only a Firecracker node uses: its boot files
-// and kernel command line.
+// The hardware fields that only a Firecracker node uses to boot: its boot
+// files and kernel command line. Its drive fields stay in the Hardware group
+// (see withFirecrackerFields).
 const BOOT_KEYS = ['kernel', 'initrd', 'kernel_args'];
 
 // Shows a field only while the node's VM type is firecracker. The scope is
@@ -414,6 +415,22 @@ const FIRECRACKER_ONLY = Object.freeze({
   },
 });
 
+// Shows a field while the node's VM type is firecracker, or while the field
+// holds a value, so that a value the other VM types refuse can be cleared.
+// The condition reads the whole form, so it also works in the Hardware group
+// and in a list item, where a LEAF scope cannot reach the VM type.
+function firecrackerOrSet(scope) {
+  return {
+    effect: 'SHOW',
+    condition: {
+      scope,
+      validate: ({ data, fullData }) =>
+        fullData?.spec?.general?.vm_type === 'firecracker' ||
+        (data !== undefined && data !== null && data !== '' && data !== false),
+    },
+  };
+}
+
 function scopeKey(element) {
   return String(element?.scope || '')
     .split('/')
@@ -421,8 +438,8 @@ function scopeKey(element) {
 }
 
 // The Hardware control without the boot fields, which follow it as fields
-// of the spec (see bootControls). A rule in the Hardware group cannot see
-// the VM type, because its scope is relative to the hardware.
+// of the spec (see bootControls). A LEAF rule in the Hardware group cannot
+// see the VM type, because its scope is relative to the hardware.
 function hardwareWithoutBoot(element, hardware, root) {
   const detail = Generate.uiSchema(hardware, 'Group', undefined, root);
 
@@ -433,8 +450,42 @@ function hardwareWithoutBoot(element, hardware, root) {
       detail: {
         ...detail,
         label: element.label || hardware.title || 'Hardware',
-        elements: (detail.elements || []).filter(
-          (child) => !BOOT_KEYS.includes(scopeKey(child)),
+        elements: (detail.elements || [])
+          .filter((child) => !BOOT_KEYS.includes(scopeKey(child)))
+          .map((child) => withFirecrackerFields(child, hardware, root)),
+      },
+    },
+  };
+}
+
+// A Hardware control with the fields that only a Firecracker node uses
+// shown by firecrackerOrSet: the scratch drive, and the Read only field of
+// each drive.
+function withFirecrackerFields(child, hardware, root) {
+  const key = scopeKey(child);
+  const drive = hardware.properties?.drives?.items;
+
+  if (key === 'scratch') {
+    return { ...child, rule: firecrackerOrSet(child.scope) };
+  }
+
+  if (key !== 'drives' || !drive?.properties?.read_only) {
+    return child;
+  }
+
+  // The item form the list generates without a detail, plus the rule.
+  const detail = Generate.uiSchema(drive, 'VerticalLayout', undefined, root);
+
+  return {
+    ...child,
+    options: {
+      ...child.options,
+      detail: {
+        ...detail,
+        elements: (detail.elements || []).map((field) =>
+          scopeKey(field) === 'read_only'
+            ? { ...field, rule: firecrackerOrSet(field.scope) }
+            : field,
         ),
       },
     },

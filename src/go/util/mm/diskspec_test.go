@@ -24,6 +24,13 @@ func TestParseDiskSpec(t *testing.T) {
 		{spec: "/images/a.qc2,ahci", want: diskSpec{path: "/images/a.qc2", iface: "ahci"}},
 		{spec: "a.qc2,ide,unsafe", want: diskSpec{path: "a.qc2", iface: "ide", cache: "unsafe"}},
 		{spec: "a.qc2,virtio,writeback", want: diskSpec{path: "a.qc2", iface: "virtio", cache: "writeback"}},
+		{spec: "a.squashfs,ro", want: diskSpec{path: "a.squashfs", ro: true}},
+		{spec: "a.squashfs,virtio,ro", want: diskSpec{path: "a.squashfs", iface: "virtio", ro: true}},
+		{spec: "a.squashfs,virtio,none,ro", want: diskSpec{path: "a.squashfs", iface: "virtio", cache: "none", ro: true}},
+		{spec: "ro", want: diskSpec{path: "ro"}},
+		{spec: "a.squashfs,ro,virtio", wantErr: true},
+		{spec: "a.squashfs,ro,ro", wantErr: true},
+		{spec: ",ro", wantErr: true},
 		{spec: "a.qc2,writeback,virtio", wantErr: true},
 		{spec: "a.qc2,none,none", wantErr: true},
 		{spec: "a.qc2,writeback,extra", wantErr: true},
@@ -177,6 +184,16 @@ func TestPlanRedeployDisks(t *testing.T) {
 			name: "uses the new disk for a VM with no disks", disks: "", disk: "/images/new.qc2", injects: true,
 			want: redeployDisks{specs: []diskSpec{{path: "/images/new.qc2"}}},
 		},
+		{
+			name: "keeps a read-only first disk", disks: "/images/a.squashfs,ro /images/b.qc2",
+			disk: "/images/new.squashfs",
+			want: redeployDisks{specs: []diskSpec{{path: "/images/new.squashfs", ro: true}, {path: "/images/b.qc2"}}},
+		},
+		{
+			name: "takes a new read-only disk", disks: "/images/a.qc2,virtio",
+			disk: "/images/new.squashfs,ro",
+			want: redeployDisks{specs: []diskSpec{{path: "/images/new.squashfs", iface: "virtio", ro: true}}},
+		},
 		{name: "a malformed new disk", disks: "/images/a.qc2", disk: "/images/new.qc2,bogus", wantErr: true},
 		{name: "a malformed current disk", disks: "/images/a.qc2,,", disk: "/images/new.qc2", wantErr: true},
 	}
@@ -214,6 +231,7 @@ func genDiskSpecs() *rapid.Generator[diskSpec] {
 				rapid.SampledFrom([]string{"", "_snapshot"}).Draw(t, "snapshot"),
 			iface: rapid.SampledFrom([]string{"", "ahci", "ide", "scsi", "sd", "mtd", "floppy", "pflash", "virtio"}).Draw(t, "iface"),
 			cache: rapid.SampledFrom([]string{"", "none", "writeback", "unsafe", "directsync", "writethrough"}).Draw(t, "cache"),
+			ro:    rapid.Bool().Draw(t, "ro"),
 		}
 	})
 }
@@ -238,7 +256,7 @@ func TestDiskSpecsRoundTrip(t *testing.T) {
 
 // A redeploy changes only the first disk, and keeps the others as they are.
 // The first disk keeps the old interface and cache mode that the new spec
-// does not set.
+// does not set, and stays read only when the old first disk is.
 func TestPlanRedeployDisksKeepsTheOtherDisks(t *testing.T) {
 	t.Parallel()
 
@@ -260,7 +278,7 @@ func TestPlanRedeployDisksKeepsTheOtherDisks(t *testing.T) {
 			t.Fatalf("planRedeployDisks snapshot = %q, want a snapshot %t", got.snapshot, snapshot)
 		}
 
-		wantFirst := diskSpec{path: disk.path, iface: disk.iface, cache: disk.cache}
+		wantFirst := diskSpec{path: disk.path, iface: disk.iface, cache: disk.cache, ro: disk.ro || old[0].ro}
 		if wantFirst.iface == "" {
 			wantFirst.iface = old[0].iface
 		}
