@@ -78,7 +78,10 @@ to access the VM VNC by clicking on the screenshot.
               {{ vmFullName(v) }}
             </h4>
             <figure class="image">
-              <template v-if="v.running">
+              <template v-if="isFirecracker(v)">
+                <p>{{ NO_CONSOLE_TEXT }}</p>
+              </template>
+              <template v-else-if="v.running">
                 <a :href="vncLoc(v)" target="_blank">
                   <img
                     :src="shotOf(v)"
@@ -113,6 +116,7 @@ to access the VM VNC by clicking on the screenshot.
   import { roleAllowed } from '@/utils/rbac.js';
   import { trackVisibility } from '@/utils/visibility.js';
   import { usePhenixStore } from '@/store';
+  import { isFirecracker, NO_CONSOLE_TEXT } from '@/utils/vmType.js';
 
   // the tiles' screenshot width, one of the widths the server takes them at
   const TILE_SCREENSHOT_WIDTH = 600;
@@ -123,6 +127,10 @@ to access the VM VNC by clicking on the screenshot.
   const tileKey = (vm) => `${vm.experiment}/${vm.name}`;
 
   export default {
+    setup() {
+      return { isFirecracker, NO_CONSOLE_TEXT };
+    },
+
     beforeUnmount() {
       this.stopPoll?.();
       this.loader.stop();
@@ -218,12 +226,13 @@ to access the VM VNC by clicking on the screenshot.
       },
 
       // asks for the screenshots of the tiles with these keys that are of
-      // running VMs and have none from this load of the VMs yet
+      // running VMs with a screen and have none from this load of the VMs yet
       fetchShots(keys) {
         const byKey = new Map(this.vms.map((vm) => [tileKey(vm), vm]));
         for (const key of keys) {
           const vm = byKey.get(key);
-          if (!vm?.running || this.shotLoad.get(key) === this.vmLoad) continue;
+          if (!vm?.running || isFirecracker(vm)) continue;
+          if (this.shotLoad.get(key) === this.vmLoad) continue;
           this.shotLoad.set(key, this.vmLoad);
           if (!roleAllowed('vms/screenshot', 'get', key)) {
             this.shots[key] = placeholderImage('notAvailable', {

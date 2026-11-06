@@ -18,7 +18,9 @@
         :files-dir="expModal.filesDir"
         :screenshot="vmScreenshot(expModalVm, screenshotsDue)"
         :vnc-href="
-          expModalVm.running && !expModalVm.busy ? vncLoc(expModalVm) : null
+          expModalVm.running && !expModalVm.busy && !isFirecracker(expModalVm)
+            ? vncLoc(expModalVm)
+            : null
         "
         :snapshots="expModal.snapshots"
         :forwards="expModal.forwards"
@@ -374,6 +376,7 @@
     useVmRows,
   } from '@/components/experiment/vmRows.js';
   import { vmScreenshot, vncHref } from '@/components/experiment/vmScreens.js';
+  import { isFirecracker } from '@/utils/vmType.js';
   import { createRunningCount } from '@/components/experiment/runningCount.js';
   import { createDelayedVms } from '@/components/experiment/delayedVms.js';
   import {
@@ -451,6 +454,15 @@
 
   // the screenshot width the server uses until the page asks for another
   const DEFAULT_SCREENSHOT_WIDTH = 200;
+
+  // whether the VM the CD-ROM picker of page is for is a Firecracker VM, which
+  // has no CD-ROM drive
+  function discVmIsFirecracker(page) {
+    const target = (page.experiment?.vms || []).find(
+      (vm) => vm.name == page.opticalDiscModal.vmName,
+    );
+    return isFirecracker(target) || isFirecracker(page.expModal?.vm);
+  }
 
   // the CD-ROM picker with nothing open
   function emptyOpticalDiscModal() {
@@ -531,6 +543,7 @@
         }),
         roleAllowed,
         vmScreenshot,
+        isFirecracker,
         TAB,
       };
     },
@@ -1760,6 +1773,11 @@
         const isoPath = this.opticalDiscModal.disc;
         if (!isoPath) return;
 
+        if (discVmIsFirecracker(this)) {
+          this.opticalDiscModal.active = false;
+          return;
+        }
+
         vmsApi
           .insertVmDisc(
             this.$route.params.id,
@@ -1771,6 +1789,11 @@
       },
 
       ejectOpticalDisc() {
+        if (discVmIsFirecracker(this)) {
+          this.opticalDiscModal.active = false;
+          return;
+        }
+
         vmsApi
           .ejectVmDisc(this.$route.params.id, this.opticalDiscModal.vmName)
           .catch((err) => useErrorNotification(err));
@@ -1877,6 +1900,8 @@
       // Opens the CD-ROM picker for a VM and lists the ISO images it can
       // insert, saying so when there are none or they cannot be listed.
       async showChangeDisc(vm) {
+        if (isFirecracker(vm)) return;
+
         this.opticalDiscModal = {
           ...emptyOpticalDiscModal(),
           active: true,
@@ -2389,6 +2414,11 @@
             storageKey: 'showScreenshotsColumn',
           },
           {
+            key: 'vmType',
+            label: 'Type',
+            storageKey: 'showTypeColumn',
+          },
+          {
             key: 'host',
             label: 'Host',
             storageKey: 'showHostColumn',
@@ -2426,6 +2456,7 @@
         ],
         columnVisibility: {
           screenshot: true,
+          vmType: false,
           host: true,
           ipv4: true,
           network: true,

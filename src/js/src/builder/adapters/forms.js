@@ -399,17 +399,74 @@ const SPEC_MORE = [
   'annotations',
 ];
 
+// The hardware fields that only a Firecracker node uses: its boot files
+// and kernel command line.
+const BOOT_KEYS = ['kernel', 'initrd', 'kernel_args'];
+
+// Shows a field only while the node's VM type is firecracker. The scope is
+// relative to the spec, as the scopes of the spec's fields are.
+const FIRECRACKER_ONLY = Object.freeze({
+  effect: 'SHOW',
+  condition: {
+    type: 'LEAF',
+    scope: '#/properties/general/properties/vm_type',
+    expectedValue: 'firecracker',
+  },
+});
+
+function scopeKey(element) {
+  return String(element?.scope || '')
+    .split('/')
+    .pop();
+}
+
+// The Hardware control without the boot fields, which follow it as fields
+// of the spec (see bootControls). A rule in the Hardware group cannot see
+// the VM type, because its scope is relative to the hardware.
+function hardwareWithoutBoot(element, hardware, root) {
+  const detail = Generate.uiSchema(hardware, 'Group', undefined, root);
+
+  return {
+    ...element,
+    options: {
+      ...element.options,
+      detail: {
+        ...detail,
+        label: element.label || hardware.title || 'Hardware',
+        elements: (detail.elements || []).filter(
+          (child) => !BOOT_KEYS.includes(scopeKey(child)),
+        ),
+      },
+    },
+  };
+}
+
+function bootControls(keys) {
+  return keys.map((key) => ({
+    type: 'Control',
+    scope: `#/properties/hardware/properties/${key}`,
+    rule: FIRECRACKER_ONLY,
+  }));
+}
+
 // The UI schema of a device's spec, which its control renders in place of
-// one generated in the schema's order.
+// one generated in the schema's order. The boot fields come after Hardware,
+// and show only for a Firecracker node.
 function specLayout(spec, root) {
   const generated = Generate.uiSchema(spec, 'Group', undefined, root);
+  const hardware = spec.properties?.hardware;
+  const boot = BOOT_KEYS.filter((key) => hardware?.properties?.[key]);
   const byKey = new Map(
-    (generated.elements || []).map((element) => [
-      String(element.scope || '')
-        .split('/')
-        .pop(),
-      element,
-    ]),
+    (generated.elements || []).map((element) => {
+      const key = scopeKey(element);
+
+      return [
+        key,
+        key === 'hardware' && boot.length
+          ? hardwareWithoutBoot(element, hardware, root)
+          : element,
+      ];
+    }),
   );
   const first = SPEC_FIRST.filter((key) => byKey.has(key));
   const more = SPEC_MORE.filter((key) => byKey.has(key));
@@ -424,7 +481,11 @@ function specLayout(spec, root) {
     label: spec.title || 'Node',
     options: { heading: true },
     elements: [
-      ...[...first, ...rest].map((key) => byKey.get(key)),
+      ...[...first, ...rest].flatMap((key) =>
+        key === 'hardware' && boot.length
+          ? [byKey.get(key), ...bootControls(boot)]
+          : [byKey.get(key)],
+      ),
       ...(more.length
         ? [
             {

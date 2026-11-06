@@ -439,7 +439,10 @@
                 @click="showStyleModal(detailsModal.vm)" />
             </b-tooltip>
           </template>
-          <template v-if="detailsModal.status.toLowerCase() == 'running'">
+          <template v-if="isFirecracker({ vm_type: detailsModal.vmType })">
+            <span>{{ NO_CONSOLE_TEXT }}</span>
+          </template>
+          <template v-else-if="detailsModal.status.toLowerCase() == 'running'">
             <b-tooltip
               label="open VNC for a running VM"
               type="is-light"
@@ -843,6 +846,7 @@
   import { docsPage } from '@/utils/docs.js';
   import { plural, pluralWord } from '@/utils/plural.js';
   import { roomInWindow } from '@/utils/viewportFit.js';
+  import { isFirecracker, NO_CONSOLE_TEXT } from '@/utils/vmType.js';
 
   const STATUS_TEXT = {
     running: 'running',
@@ -870,6 +874,8 @@
         docsPage,
         pluralWord,
         updatedMessage: UPDATED_MESSAGE,
+        isFirecracker,
+        NO_CONSOLE_TEXT,
       };
     },
     mounted() {
@@ -1652,6 +1658,20 @@
         this.detailsModal.soh =
           n.status.toLowerCase() == 'notboot' ? null : n.soh;
         this.detailsModal.tags = n.tags ?? {};
+        this.detailsModal.vmType = '';
+        this.loadDetailsVmType(n.label);
+      },
+
+      // The SoH graph does not carry the VM type, so the details dialog reads
+      // it from the VM API to know whether the VM has a VNC console.
+      async loadDetailsVmType(name) {
+        try {
+          const resp = await vmsApi.getVm(this.$route.params.id, name);
+
+          if (this.detailsModal.vm === name) {
+            this.detailsModal.vmType = resp?.data?.vm_type || '';
+          }
+        } catch {}
       },
 
       drag(simulation, reduceMotion = false, render = () => {}) {
@@ -1902,6 +1922,7 @@
           status: '',
           soh: null,
           tags: {},
+          vmType: '',
         };
       },
 
@@ -2049,6 +2070,7 @@
           status: '',
           soh: null,
           tags: {},
+          vmType: '',
         },
         styleModal: {
           active: false,

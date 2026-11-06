@@ -56,6 +56,7 @@
   import { BSlider, BSliderTick } from 'buefy';
   import { loadingText } from '@/utils/pageLoader.js';
   import { roleAllowed } from '@/utils/rbac.js';
+  import { isFirecracker } from '@/utils/vmType.js';
   import { consoleLinkAlt, vmScreenshot, vncHref } from './vmScreens.js';
 
   // The running experiment's VNC tab: a tile per VM with a console, its
@@ -80,10 +81,12 @@
     emits: ['info', 'update:zoom'],
 
     computed: {
-      // External/HIL nodes and DNB (do not boot) nodes have no VNC console
-      // to display.
+      // External/HIL nodes, DNB (do not boot) nodes and Firecracker VMs have
+      // no VNC console to display.
       consoleVms() {
-        return this.vms.filter((vm) => !vm.external && !vm.dnb);
+        return this.vms.filter(
+          (vm) => !vm.external && !vm.dnb && !isFirecracker(vm),
+        );
       },
     },
 
