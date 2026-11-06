@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"phenix/api/vm"
 	"phenix/util/mm"
 	"phenix/util/plog"
 	bt "phenix/web/broker/brokertypes"
@@ -187,7 +188,7 @@ func pushFrames(ctx context.Context, wanted map[shotKey][]*Client) {
 				return
 			}
 
-			if !errors.Is(err, mm.ErrVMNotFound) && !errors.Is(err, mm.ErrScreenshotNotFound) {
+			if !errors.Is(err, mm.ErrVMNotFound) && !errors.Is(err, mm.ErrScreenshotNotFound) && !noScreen(err) {
 				plog.Error(plog.TypeSystem, "getting screenshot for WebSocket client", "err", err)
 			}
 
@@ -198,6 +199,12 @@ func pushFrames(ctx context.Context, wanted map[shotKey][]*Client) {
 			c.sendFrame(key, f)
 		}
 	}
+}
+
+// noScreen reports whether a screenshot failed because the VM type has no
+// screen.
+func noScreen(err error) bool {
+	return errors.Is(err, vm.ErrNotSupported)
 }
 
 // sendFrame queues f unless it was the VM's last frame sent or the client no longer shows the VM

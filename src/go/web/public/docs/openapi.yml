@@ -14181,6 +14181,14 @@ components:
           description: "Disk image or disk path used by the VM."
           example: ubuntu.qc2
           type: string
+        vm_type:
+          title: "VM Type"
+          description: >-
+            The minimega VM type. A firecracker VM has no VNC, screenshot, or
+            optical disc. Those operations return 400 for it.
+          example: kvm
+          type: string
+          enum: [kvm, container, firecracker]
         dnb:
           title: "Do Not Boot"
           description: "Whether the VM should remain powered off."

@@ -1618,10 +1618,11 @@
             },
             "vm_type": {
               "default": "kvm",
-              "description": "How minimega runs the node: kvm for a QEMU/KVM virtual machine, or container. Empty means kvm.",
+              "description": "How minimega runs the node: kvm for a QEMU/KVM virtual machine, container, or firecracker for a Linux guest in a jailed Firecracker microVM. Empty means kvm.",
               "enum": [
                 "kvm",
                 "container",
+                "firecracker",
                 ""
               ],
               "examples": [
@@ -1710,6 +1711,15 @@
                     ],
                     "title": "Interface",
                     "type": "string"
+                  },
+                  "read_only": {
+                    "default": false,
+                    "description": "Attach the drive read only, for Firecracker nodes only. All the VMs that use the image share it without a copy, so general.snapshot does not apply to it. phenix injects no files into a read-only first drive.",
+                    "examples": [
+                      true
+                    ],
+                    "title": "Read Only",
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -1720,6 +1730,30 @@
               "minItems": 1,
               "title": "Drives",
               "type": "array"
+            },
+            "initrd": {
+              "description": "Path of the guest initrd on the minimega host, used by Firecracker nodes. Empty boots without an initrd.",
+              "examples": [
+                "/phenix/images/initrd-6.1.img"
+              ],
+              "title": "Initrd",
+              "type": "string"
+            },
+            "kernel": {
+              "description": "Path of the guest kernel on the minimega host. Firecracker nodes need it. Other nodes ignore it.",
+              "examples": [
+                "/phenix/images/vmlinux-6.1"
+              ],
+              "title": "Kernel",
+              "type": "string"
+            },
+            "kernel_args": {
+              "description": "Kernel command line for Firecracker nodes. phenix adds root=/dev/vda1 rw when it sets no root=, or root=/dev/vda ro when the first drive is read only.",
+              "examples": [
+                "console=ttyS0 quiet"
+              ],
+              "title": "Kernel Arguments",
+              "type": "string"
             },
             "memory": {
               "default": 512,
@@ -1754,6 +1788,14 @@
                 "windows"
               ],
               "title": "OS Type",
+              "type": "string"
+            },
+            "scratch": {
+              "description": "Size of a writable scratch drive for Firecracker nodes only, such as 64M: a number of bytes with an optional K, M, G or T suffix (powers of 1024) that is a multiple of 512. minimega adds the drive after the other drives. Empty or 0 adds no drive.",
+              "examples": [
+                "64M"
+              ],
+              "title": "Scratch",
               "type": "string"
             },
             "vcpus": {

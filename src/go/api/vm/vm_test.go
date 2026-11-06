@@ -40,6 +40,7 @@ func TestGetAndList(t *testing.T) {
 			Name:            "web",
 			Description:     "web server",
 			Type:            "VirtualMachine",
+			VMType:          "kvm", // the default of a node that sets none
 			Experiment:      testExp,
 			Host:            "compute2", // its schedule
 			IPv4:            []string{"10.0.0.1", ""},

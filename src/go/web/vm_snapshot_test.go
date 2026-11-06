@@ -232,6 +232,11 @@ func (f *vmSnapshotFiles) GetExperimentSnapshots(string) ([]string, error) {
 	return f.snapshots, f.err
 }
 
+// GetExperimentFiles lists no files, so a snapshot has no firecracker sidecar.
+func (*vmSnapshotFiles) GetExperimentFiles(string, string) (file.Files, error) {
+	return nil, nil
+}
+
 // useVMSnapshotFiles makes the cluster list snapshots, or fail with err, for
 // the rest of the test.
 func useVMSnapshotFiles(t *testing.T, err error, snapshots ...string) {

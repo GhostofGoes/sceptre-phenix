@@ -52,8 +52,17 @@ behavior. Key node fields (see [`examples/topology.yaml`](examples/topology.yaml
 for a complete, copyable two-node topology):
 
 - `type`: `VirtualMachine | Firewall | Router | Switch`
-- `general.hostname`, `general.vm_type` (`kvm` or `container`, default `kvm`),
+- `general.hostname`, `general.vm_type` (`kvm`, `container`, or `firecracker`, default `kvm`),
   `general.do_not_boot`, `general.snapshot`
+- `hardware.kernel` (required for `firecracker`), `hardware.initrd`, `hardware.kernel_args`
+  (phēnix adds `root=/dev/vda1 rw` when it has no `root=`). Firecracker nodes need
+  `os_type: linux`, 1 to 32 vCPUs, and at most 17 devices (drives + scratch + NICs + vsock +
+  entropy; 31 with `advanced: {firecracker-pci: "true"}`). They cannot have `serial` or `qinq` interfaces.
+- Firecracker only: `hardware.drives[].read_only: true` shares the image with all VMs, without a
+  copy. With a read-only first drive, phēnix adds `root=/dev/vda ro` and injects no files, and
+  validation refuses file injections unless `inject_partition` is 0. `hardware.scratch` (such as
+  `64M`, a multiple of 512 bytes) adds a writable scratch drive. Other VM types refuse both.
+  VM operations on Firecracker VMs are in [`references/cli.md`](references/cli.md#firecracker-vms).
 - `hardware.os_type`: `linux | windows | centos | rhel | minirouter | vyatta | vyos | other`
 - `hardware.vcpus`, `hardware.memory`, `hardware.drives[].image` (disk image name/path)
 - `network.interfaces[]`: `name`, `vlan`, `type: ethernet`, `proto: static|dhcp|manual`

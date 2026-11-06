@@ -378,6 +378,10 @@ const SPEC_TITLES = {
   hello_interval: 'Hello interval',
   id: 'ID',
   inject_partition: 'Inject partition',
+  // The boot files and command line of a Firecracker node.
+  initrd: 'Initrd',
+  kernel: 'Kernel',
+  kernel_args: 'Kernel arguments',
   mac: 'MAC address',
   mtu: 'MTU',
   // A route's next hop.
@@ -386,11 +390,14 @@ const SPEC_TITLES = {
   ospf: 'OSPF',
   proto: 'Protocol',
   qinq: 'QinQ',
+  // A Firecracker node's shared drive and its writable scratch drive.
+  read_only: 'Read only',
   retransmission_interval: 'Retransmission interval',
   router_id: 'Router ID',
   ruleset_in: 'Inbound ruleset',
   ruleset_out: 'Outbound ruleset',
   rulesets: 'Firewall rulesets',
+  scratch: 'Scratch drive size',
   src: 'Source',
   udp_port: 'UDP port',
   useUUID: 'Use UUID',

@@ -10,8 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	"pgregory.net/rapid"
 
+	"phenix/api/vm"
+	"phenix/store"
 	"phenix/util/mm"
 	"phenix/util/polltest"
 	"phenix/web/cache"
@@ -349,6 +352,57 @@ func TestGetScreenshotFlightRereadsTheCache(t *testing.T) {
 
 	if shot, err := GetScreenshot("exp", "vm", "200"); err != nil || string(shot) != "cached" {
 		t.Errorf("GetScreenshot(exp, vm, 200) = %q, %v; want the cached screenshot", shot, err)
+	}
+
+	if n := fake.calls.Load(); n != 0 {
+		t.Errorf("minimega was asked for %d screenshots, want 0", n)
+	}
+}
+
+//nolint:paralleltest // replaces minimega, the store and the web cache
+func TestGetScreenshotSkipsFirecracker(t *testing.T) {
+	fake := fakeScreenshots(t, func(int32) ([]byte, error) { return nil, errors.New("minimega was asked") })
+
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	c := store.Config{
+		Version:  "phenix.sandia.gov/v1",
+		Kind:     "Experiment",
+		Metadata: store.ConfigMetadata{Name: "screenshot-exp"},
+		Spec: map[string]any{
+			"experimentName": "screenshot-exp",
+			"topology": map[string]any{
+				"nodes": []map[string]any{
+					{
+						"type":    "VirtualMachine",
+						"general": map[string]any{"hostname": "fc-vm", "vm_type": "firecracker"},
+					},
+				},
+			},
+		},
+		Status: map[string]any{"startTime": "2026-11-05T00:00:00Z"},
+	}
+
+	m := store.NewMockStore(ctrl)
+
+	// The type of every node is cached, so the store is read once for both calls.
+	m.EXPECT().Get(gomock.Any()).DoAndReturn(func(cfg *store.Config) error {
+		*cfg = c
+
+		return nil
+	}).Times(1)
+
+	prev := store.DefaultStore
+	store.DefaultStore = m //nolint:reassign // monkey patching for test
+
+	t.Cleanup(func() { store.DefaultStore = prev }) //nolint:reassign // restore store
+
+	for range 2 {
+		_, err := GetScreenshot("screenshot-exp", "fc-vm", "215")
+		if !errors.Is(err, vm.ErrNotSupported) {
+			t.Fatalf("GetScreenshot(%q) = %v, want %v", "fc-vm", err, vm.ErrNotSupported)
+		}
 	}
 
 	if n := fake.calls.Load(); n != 0 {

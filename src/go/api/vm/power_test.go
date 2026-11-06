@@ -206,6 +206,9 @@ func TestRestart(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// a running VM's type comes from its topology node
+			useExperiment(t, startTime, vmNode("vm1"))
+
 			received := useMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
 				if cmd.Base == "vm info summary" {
 					if test.state == "" {
@@ -284,6 +287,9 @@ func TestShutdown(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var queries atomic.Int32
 
+			// the VM's type comes from its topology node
+			useExperiment(t, startTime, vmNode("vm1"))
+
 			received := useMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
 				if cmd.Base == "vm info summary" {
 					n := min(int(queries.Add(1)), len(test.states)) - 1
@@ -315,6 +321,8 @@ func TestShutdown(t *testing.T) {
 //
 //nolint:paralleltest // replaces minimega
 func TestShutdownKillsAVMThatDoesNotQuit(t *testing.T) {
+	useExperiment(t, startTime, vmNode("vm1"))
+
 	received := useMinimega(t, func(cmd mmtest.Command) []*minicli.Response {
 		if cmd.Base == "vm info summary" {
 			return stateRow("RUNNING")
@@ -705,6 +713,9 @@ func TestOpticalDisc(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// a firecracker VM has no optical disc, so the VM's type is read first
+			useExperiment(t, startTime, vmNode("vm1"))
+
 			received := useMinimega(t, failOn(test.failOn))
 
 			ctx := test.ctx

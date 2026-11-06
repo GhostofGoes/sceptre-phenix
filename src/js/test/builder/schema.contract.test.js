@@ -513,6 +513,7 @@ describe('node spec fields in the Inspector', () => {
       'inject_partition',
       'cache_mode',
       'interface',
+      'read_only',
     ]);
   });
 

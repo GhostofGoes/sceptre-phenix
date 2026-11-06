@@ -10,7 +10,18 @@ import (
 	"time"
 
 	ifaces "phenix/types/interfaces"
+	"phenix/util/firecracker"
 	"phenix/util/plog"
+)
+
+var (
+	// ErrFirecrackerNode is the error that node validation wraps when a
+	// firecracker node sets something that minimega cannot launch.
+	ErrFirecrackerNode = errors.New("firecracker node")
+
+	// ErrFirecrackerOnly is the error that node validation wraps when a node
+	// of another VM type sets a field that only firecracker nodes use.
+	ErrFirecrackerOnly = errors.New("firecracker-only setting")
 )
 
 type Node struct {
@@ -448,11 +459,15 @@ func (g *General) SetDoNotBoot(b bool) {
 }
 
 type Hardware struct {
-	CPUF    string   `json:"cpu"     mapstructure:"cpu"     structs:"cpu"     yaml:"cpu"`
-	VCPUF   int      `json:"vcpus"   mapstructure:"vcpus"   structs:"vcpus"   yaml:"vcpus"`
-	MemoryF int      `json:"memory"  mapstructure:"memory"  structs:"memory"  yaml:"memory"`
-	OSTypeF string   `json:"os_type" mapstructure:"os_type" structs:"os_type" yaml:"os_type"`
-	DrivesF []*Drive `json:"drives"  mapstructure:"drives"  structs:"drives"  yaml:"drives"`
+	CPUF        string   `json:"cpu"                   mapstructure:"cpu"         structs:"cpu"                   yaml:"cpu"`
+	VCPUF       int      `json:"vcpus"                 mapstructure:"vcpus"       structs:"vcpus"                 yaml:"vcpus"`
+	MemoryF     int      `json:"memory"                mapstructure:"memory"      structs:"memory"                yaml:"memory"`
+	OSTypeF     string   `json:"os_type"               mapstructure:"os_type"     structs:"os_type"               yaml:"os_type"`
+	DrivesF     []*Drive `json:"drives"                mapstructure:"drives"      structs:"drives"                yaml:"drives"`
+	KernelF     string   `json:"kernel,omitempty"      mapstructure:"kernel"      structs:"kernel,omitempty"      yaml:"kernel,omitempty"`
+	InitrdF     string   `json:"initrd,omitempty"      mapstructure:"initrd"      structs:"initrd,omitempty"      yaml:"initrd,omitempty"`
+	KernelArgsF string   `json:"kernel_args,omitempty" mapstructure:"kernel_args" structs:"kernel_args,omitempty" yaml:"kernel_args,omitempty"`
+	ScratchF    string   `json:"scratch,omitempty"     mapstructure:"scratch"     structs:"scratch,omitempty"     yaml:"scratch,omitempty"`
 }
 
 func (h *Hardware) CPU() string {
@@ -501,6 +516,52 @@ func (h *Hardware) Drives() []ifaces.NodeDrive {
 	return drives
 }
 
+func (h *Hardware) Kernel() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.KernelF
+}
+
+func (h *Hardware) Initrd() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.InitrdF
+}
+
+func (h *Hardware) KernelArgs() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.KernelArgsF
+}
+
+// Scratch returns the size of the writable scratch drive that minimega adds
+// to a firecracker node, such as 64M, or "" for none.
+func (h *Hardware) Scratch() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.ScratchF
+}
+
+// FirecrackerAppend returns the kernel command line the minimega script sets
+// for a firecracker node: kernel_args, plus root=/dev/vda1 rw when it sets no
+// root=, or root=/dev/vda ro when the first drive is read only.
+func (h *Hardware) FirecrackerAppend() string {
+	return firecracker.KernelArgs(h.KernelArgs(), h.rootReadOnly())
+}
+
+// rootReadOnly reports whether the first drive is read only.
+func (h *Hardware) rootReadOnly() bool {
+	return h != nil && len(h.DrivesF) > 0 && h.DrivesF[0] != nil && h.DrivesF[0].ReadOnly()
+}
+
 func (h *Hardware) SetVCPU(v int) {
 	h.VCPUF = v
 }
@@ -521,10 +582,11 @@ func (h *Hardware) AddDrive(disk string, part int) ifaces.NodeDrive { //nolint:i
 }
 
 type Drive struct {
-	ImageF           string `json:"image"            mapstructure:"image"            structs:"image"            yaml:"image"`
-	IfaceF           string `json:"interface"        mapstructure:"interface"        structs:"interface"        yaml:"interface"`
-	CacheModeF       string `json:"cache_mode"       mapstructure:"cache_mode"       structs:"cache_mode"       yaml:"cache_mode"`
-	InjectPartitionF *int   `json:"inject_partition" mapstructure:"inject_partition" structs:"inject_partition" yaml:"inject_partition"`
+	ImageF           string `json:"image"               mapstructure:"image"            structs:"image"               yaml:"image"`
+	IfaceF           string `json:"interface"           mapstructure:"interface"        structs:"interface"           yaml:"interface"`
+	CacheModeF       string `json:"cache_mode"          mapstructure:"cache_mode"       structs:"cache_mode"          yaml:"cache_mode"`
+	InjectPartitionF *int   `json:"inject_partition"    mapstructure:"inject_partition" structs:"inject_partition"    yaml:"inject_partition"`
+	ReadOnlyF        bool   `json:"read_only,omitempty" mapstructure:"read_only"        structs:"read_only,omitempty" yaml:"read_only,omitempty"`
 }
 
 func (d Drive) Image() string {
@@ -537,6 +599,12 @@ func (d Drive) Interface() string {
 
 func (d Drive) CacheMode() string {
 	return d.CacheModeF
+}
+
+// ReadOnly reports whether minimega attaches the drive read only. All the
+// firecracker VMs that use its image then share it, without a copy.
+func (d Drive) ReadOnly() bool {
+	return d.ReadOnlyF
 }
 
 func (d Drive) InjectPartition() *int {
@@ -630,6 +698,14 @@ func (n Node) validate() error {
 		}
 	}
 
+	if n.GeneralF.VMTypeF == firecracker.VMType {
+		if err := n.validateFirecracker(); err != nil {
+			return err
+		}
+	} else if err := n.validateFirecrackerOnly(); err != nil {
+		return err
+	}
+
 	if n.NetworkF == nil {
 		return nil
 	}
@@ -676,6 +752,171 @@ func (n Node) validate() error {
 	return nil
 }
 
+// validateFirecracker checks what minimega needs to launch a firecracker node.
+// It runs before setDefaults, so an unset os_type, vcpus or snapshot has its
+// default value.
+func (n Node) validateFirecracker() error {
+	hostname := n.GeneralF.HostnameF
+
+	hardware := n.HardwareF
+	if hardware == nil {
+		hardware = new(Hardware)
+	}
+
+	if osType := hardware.OSTypeF; osType != "" && osType != "linux" {
+		return fmt.Errorf("%w: hardware.os_type is %q, but firecracker nodes run only linux", ErrFirecrackerNode, osType)
+	}
+
+	if strings.TrimSpace(hardware.KernelF) == "" {
+		return fmt.Errorf("%w: hardware.kernel is not set, and firecracker nodes boot a kernel file", ErrFirecrackerNode)
+	}
+
+	if vcpus := hardware.VCPUF; vcpus != 0 && !firecracker.VCPUsFit(vcpus) {
+		return fmt.Errorf(
+			"%w: hardware.vcpus is %d, but firecracker nodes have 1 to %d vCPUs",
+			ErrFirecrackerNode, vcpus, firecracker.MaxVCPUs,
+		)
+	}
+
+	scratch, err := firecracker.ParseSize(hardware.Scratch())
+	if err != nil {
+		return fmt.Errorf("%w: hardware.scratch: %w", ErrFirecrackerNode, err)
+	}
+
+	snapshot := n.GeneralF.SnapshotF == nil || *n.GeneralF.SnapshotF
+
+	disks, err := validateFirecrackerDrives(hostname, hardware.DrivesF, snapshot)
+	if err != nil {
+		return err
+	}
+
+	// minimega injects files into disk 0 at launch, which a read-only drive refuses.
+	if files := len(n.InjectionsF) + len(n.DeletionsF); files > 0 && hardware.rootReadOnly() &&
+		hardware.DrivesF[0].GetInjectPartition() != 0 {
+		return fmt.Errorf(
+			"%w: node %s has file injections or deletions, but drive 0 is read_only, and injections need a writable first drive",
+			ErrFirecrackerNode, hostname,
+		)
+	}
+
+	nics, err := n.firecrackerNICs()
+	if err != nil {
+		return err
+	}
+
+	devices := firecracker.NewDevices(
+		disks, nics, scratch > 0, n.AdvancedF[firecracker.EntropyKey], n.AdvancedF[firecracker.PCIKey],
+	)
+
+	if !devices.Fits() {
+		return fmt.Errorf("%w: node %s needs %s", ErrFirecrackerNode, hostname, devices)
+	}
+
+	if len(n.OverridesF) > 0 {
+		plog.Warn(
+			plog.TypeSystem,
+			"firecracker nodes ignore QEMU overrides",
+			"node", hostname,
+			"overrides", len(n.OverridesF),
+		)
+	}
+
+	return nil
+}
+
+// firecrackerNICs checks the interfaces of a firecracker node and returns how
+// many there are.
+func (n Node) firecrackerNICs() (int, error) {
+	if n.NetworkF == nil {
+		return 0, nil
+	}
+
+	var nics int
+
+	for _, iface := range n.NetworkF.InterfacesF {
+		if iface == nil {
+			continue
+		}
+
+		nics++
+
+		if iface.TypeF == "serial" {
+			return 0, fmt.Errorf(
+				"%w: interface %q is a serial interface, and the one serial port of a firecracker node is its console",
+				ErrFirecrackerNode, iface.NameF,
+			)
+		}
+
+		if iface.QinQF {
+			return 0, fmt.Errorf("%w: interface %q uses qinq, which is not supported for firecracker nodes yet",
+				ErrFirecrackerNode, iface.NameF)
+		}
+	}
+
+	return nics, nil
+}
+
+// validateFirecrackerOnly refuses the fields that only firecracker nodes use,
+// which minimega refuses for the other VM types.
+func (n Node) validateFirecrackerOnly() error {
+	if n.HardwareF == nil {
+		return nil
+	}
+
+	for i, drive := range n.HardwareF.DrivesF {
+		if drive != nil && drive.ReadOnly() {
+			return fmt.Errorf(
+				"%w: drive %d of node %s is read_only, which only firecracker nodes support",
+				ErrFirecrackerOnly, i, n.GeneralF.HostnameF,
+			)
+		}
+	}
+
+	if n.HardwareF.Scratch() != "" {
+		return fmt.Errorf(
+			"%w: node %s sets hardware.scratch, which only firecracker nodes support",
+			ErrFirecrackerOnly, n.GeneralF.HostnameF,
+		)
+	}
+
+	return nil
+}
+
+// validateFirecrackerDrives checks the drives of a firecracker node and returns
+// how many there are. A qcow2 image needs a snapshot, unless the drive is read
+// only: minimega converts a read-only image once, into its cache.
+func validateFirecrackerDrives(hostname string, drives []*Drive, snapshot bool) (int, error) {
+	var disks int
+
+	for i, drive := range drives {
+		if drive == nil {
+			continue
+		}
+
+		disks++
+
+		if !snapshot && !drive.ReadOnly() && firecracker.IsQCOW2(drive.ImageF) {
+			return 0, fmt.Errorf(
+				"%w: drive %d image %q is qcow2, and firecracker nodes need a raw image or a read_only drive "+
+					"when general.snapshot is false",
+				ErrFirecrackerNode, i, drive.ImageF,
+			)
+		}
+
+		if drive.IfaceF != "" && drive.IfaceF != "virtio" {
+			plog.Warn(
+				plog.TypeSystem,
+				"firecracker nodes ignore the drive interface and always use virtio",
+				"node", hostname,
+				"drive", i,
+				"interface", drive.IfaceF,
+			)
+		}
+	}
+
+	return disks, nil
+}
+
 func (n *Node) setDefaults(bridge string) {
 	if n.External() {
 		return
@@ -695,7 +936,8 @@ func (n *Node) setDefaults(bridge string) {
 		n.GeneralF.DoNotBootF = &dnb
 	}
 
-	if n.HardwareF.CPUF == "" {
+	// minimega ignores the CPU model of a firecracker VM.
+	if n.HardwareF.CPUF == "" && n.GeneralF.VMTypeF != firecracker.VMType {
 		n.HardwareF.CPUF = "Broadwell"
 	}
 
@@ -800,6 +1042,18 @@ func (n Node) FileDeletions() string {
 	return strings.Join(deletions, ",")
 }
 
+// FileDeletionArgs returns the quoted paths of the node's deletions, each a
+// separate argument, as vm config inject delete takes them.
+func (n Node) FileDeletionArgs() string {
+	deletions := make([]string, len(n.DeletionsF))
+
+	for i, deletion := range n.DeletionsF {
+		deletions[i] = fmt.Sprintf(`"%s"`, deletion.PathF)
+	}
+
+	return strings.Join(deletions, " ")
+}
+
 func (h Hardware) DiskConfig(snapshot string) string {
 	configs := make([]string, len(h.DrivesF))
 
@@ -820,6 +1074,11 @@ func (h Hardware) DiskConfig(snapshot string) string {
 			}
 		} else {
 			config = append(config, d.CacheModeF)
+		}
+
+		// minimega takes ro only as the last field, and only for firecracker VMs.
+		if d.ReadOnly() {
+			config = append(config, "ro")
 		}
 
 		configs[i] = strings.Join(config, ",")

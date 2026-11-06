@@ -113,12 +113,16 @@ type NodeGeneral interface {
 	SetDoNotBoot(bool)
 }
 
-type NodeHardware interface {
+type NodeHardware interface { //nolint:interfacebloat // one getter for each hardware field
 	CPU() string
 	VCPU() int
 	Memory() int
 	OSType() string
 	Drives() []NodeDrive
+	Kernel() string
+	Initrd() string
+	KernelArgs() string
+	Scratch() string
 
 	SetVCPU(int)
 	SetMemory(int)
@@ -131,6 +135,7 @@ type NodeDrive interface {
 	Interface() string
 	CacheMode() string
 	InjectPartition() *int
+	ReadOnly() bool
 
 	SetInjectPartition(*int)
 	SetImage(string)

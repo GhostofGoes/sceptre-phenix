@@ -76,6 +76,9 @@ describe('generated UI schemas', () => {
       'type',
       'general',
       'hardware',
+      'kernel',
+      'initrd',
+      'kernel_args',
       'network',
     ]);
     expect(section).toMatchObject({
@@ -116,6 +119,62 @@ describe('generated UI schemas', () => {
       'labels',
       'annotations',
     ]);
+  });
+
+  // A Firecracker node's kernel, initrd and kernel arguments follow the
+  // Hardware group, and show only while the VM type is firecracker. The
+  // Hardware group itself no longer has them.
+  test("a device's boot fields show only for a Firecracker node", () => {
+    const spec = uiSchemaForKind(builderSchemaV1, 'device').elements.find(
+      (element) => element.scope === '#/properties/spec',
+    ).options.detail;
+    const hardware = spec.elements.find(
+      (element) => element.scope === '#/properties/hardware',
+    );
+    const boot = spec.elements.filter((element) =>
+      String(element.scope).startsWith('#/properties/hardware/properties/'),
+    );
+
+    const hardwareScopes = hardware.options.detail.elements.map(
+      (element) => element.scope,
+    );
+
+    expect(hardware.options.detail).toMatchObject({
+      type: 'Group',
+      label: 'Hardware',
+    });
+    expect(hardwareScopes).toContain('#/properties/os_type');
+    for (const key of ['kernel', 'initrd', 'kernel_args']) {
+      expect(hardwareScopes).not.toContain(`#/properties/${key}`);
+    }
+    expect(boot.map((element) => element.scope)).toEqual([
+      '#/properties/hardware/properties/kernel',
+      '#/properties/hardware/properties/initrd',
+      '#/properties/hardware/properties/kernel_args',
+    ]);
+    for (const element of boot) {
+      expect(element.rule).toEqual({
+        effect: 'SHOW',
+        condition: {
+          type: 'LEAF',
+          scope: '#/properties/general/properties/vm_type',
+          expectedValue: 'firecracker',
+        },
+      });
+    }
+  });
+
+  test('the boot fields have readable labels and help', () => {
+    const spec = schemaForKind(builderSchemaV1, 'device').properties.spec;
+    const { hardware, general } = spec.properties;
+
+    expect(general.properties.vm_type.enum).toContain('firecracker');
+    expect(hardware.properties.kernel.title).toBe('Kernel');
+    expect(hardware.properties.initrd.title).toBe('Initrd');
+    expect(hardware.properties.kernel_args.title).toBe('Kernel arguments');
+    expect(hardware.properties.kernel.description).toContain(
+      'Path of the guest kernel on the minimega host',
+    );
   });
 
   // The same object each time, which JSON Forms does not render again.
