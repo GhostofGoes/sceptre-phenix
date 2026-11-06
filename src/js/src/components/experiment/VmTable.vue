@@ -118,6 +118,9 @@
           width="200"
           height="150" />
       </template>
+      <template v-else-if="isFirecracker(props.row)">
+        <span>{{ NO_CONSOLE_TEXT }}</span>
+      </template>
       <template
         v-else-if="
           (props.row.running && !props.row.busy) ||
@@ -166,6 +169,17 @@
         v-if="props.row.delayed_start && props.row.state == 'BUILDING'"
         >{{ props.row.delayed_start }}</b-tag
       >
+    </b-table-column>
+    <b-table-column
+      :visible="columns.vmType"
+      field="vm_type"
+      label="Type"
+      centered
+      v-slot="props">
+      <template v-if="props.row.external"> EXTERNAL </template>
+      <template v-else>
+        {{ props.row.vm_type }}
+      </template>
     </b-table-column>
     <b-table-column
       :visible="columns.host"
@@ -373,6 +387,7 @@
     vmStateType,
   } from './vmActions.js';
   import { tagCount } from '@/utils/tagCount';
+  import { isFirecracker, NO_CONSOLE_TEXT } from '@/utils/vmType.js';
   import {
     consoleLinkAlt,
     screenshotAlt,
@@ -395,6 +410,8 @@
         vmScreenshot,
         vlanAlias,
         vlanPendingKey,
+        isFirecracker,
+        NO_CONSOLE_TEXT,
       };
     },
     props: {

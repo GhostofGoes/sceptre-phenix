@@ -26,6 +26,9 @@
           <span v-if="vm.host" title="Host">
             <b-icon icon="server" size="is-small" />{{ vm.host }}
           </span>
+          <span title="VM type">
+            <b-icon icon="cube" size="is-small" />{{ vm.vm_type || 'unknown' }}
+          </span>
           <span v-if="vm.running && !stopped" title="Uptime">
             <b-icon icon="clock" size="is-small" />up
             {{ formatUptime(vm.uptime) }}
@@ -169,7 +172,11 @@
           </div>
         </div>
         <div v-else class="column is-5">
-          <div v-if="noScreen" class="vm-no-screen">
+          <div v-if="isFirecracker(vm)" class="vm-no-screen">
+            <b-icon icon="tv" size="is-large" />
+            <p>{{ NO_CONSOLE_TEXT }}</p>
+          </div>
+          <div v-else-if="noScreen" class="vm-no-screen">
             <b-icon :icon="state.icon" size="is-large" />
             <p>No screen: the VM is {{ state.label.toLowerCase() }}</p>
           </div>
@@ -680,6 +687,7 @@
   import { formattingMixin } from '@/utils/formattingMixin.js';
   import { plural, pluralWord } from '@/utils/plural.js';
   import { webSharkInstalled } from '@/utils/webshark.js';
+  import { isFirecracker, NO_CONSOLE_TEXT } from '@/utils/vmType.js';
   import { osTypeInfo } from './osType.js';
   import VmSettingControl from './VmSettingControl.vue';
   import {
@@ -735,6 +743,8 @@
         vlanPendingKey,
         AUTOTUNNEL,
         SETTING_ROWS,
+        isFirecracker,
+        NO_CONSOLE_TEXT,
       };
     },
     props: {
