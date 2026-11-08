@@ -205,14 +205,28 @@ func TestClientWritePanicEndsOnlyTheClient(t *testing.T) {
 
 	c := &Client{conn: <-conns, publish: make(chan any, 1), done: make(chan struct{})}
 
-	go c.write()
+	// write returns after its deferred Stop, which closes c.done before it logs
+	// a failed close frame, so the logs are complete only once write returned.
+	written := make(chan struct{})
+
+	go func() {
+		defer close(written)
+
+		c.write()
+	}()
 
 	c.publish <- panickingMessage{}
 
 	select {
-	case <-c.done:
+	case <-written:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the client was not stopped after a panic while publishing to it")
+		t.Fatal("the client did not stop writing after a panic while publishing to it")
+	}
+
+	select {
+	case <-c.done:
+	default:
+		t.Error("the client was not stopped after a panic while publishing to it")
 	}
 
 	if !strings.Contains(logs.String(), "marshaling panickingMessage") {
