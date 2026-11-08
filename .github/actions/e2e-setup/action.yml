@@ -39,7 +39,8 @@ runs:
 
     - name: Build and start minimega
       id: mm
-      uses: ./phenix/.github/actions/minimega  # zizmor: ignore[self-repository] the phenix under test, not this workflow's ref
+      # the phenix under test, not this workflow's ref
+      uses: ./phenix/.github/actions/minimega  # zizmor: ignore[self-repository]
       with:
         ref: ${{ steps.pins.outputs.minimega }}
         # The job's one Go cache, restored before anything builds.
