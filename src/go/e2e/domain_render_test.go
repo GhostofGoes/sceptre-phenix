@@ -1390,7 +1390,11 @@ func domainCheckSceptreSoap(t *testing.T, c *domainCase) {
 
 		start := d.read(t, domainSceptreStart)
 		domainWantContains(t, "provider sceptre-start.sh", start, "pybennu-power-solver start -c /etc/sceptre/config.ini -e pybennu -d")
-		domainWantContains(t, "provider sceptre-start.sh", start, "ListenAddress 172.16.1.2")
+		// sshd listens on every address: the sceptre app no longer restricts
+		// it to the VLAN interfaces (sceptre-phenix-apps fd6a65c).
+		if strings.Contains(start, "ListenAddress") {
+			t.Errorf("provider sceptre-start.sh still restricts sshd:\n%s", start)
+		}
 	})
 
 	t.Run("rtu-1 serves DNP3 fed by the provider", func(t *testing.T) {
@@ -1412,8 +1416,9 @@ func domainCheckSceptreSoap(t *testing.T, c *domainCase) {
 		d := c.disk(t, "rtu-1")
 		start := d.read(t, domainSceptreStart)
 		domainWantContains(t, "rtu-1 sceptre-start.sh", start, "bennu-watcherd restart")
-		domainWantContains(t, "rtu-1 sceptre-start.sh", start, "ListenAddress 10.117.4.101")
-		domainWantContains(t, "rtu-1 sceptre-start.sh", start, "ListenAddress 172.16.1.4")
+		if strings.Contains(start, "ListenAddress") {
+			t.Errorf("rtu-1 sceptre-start.sh still restricts sshd:\n%s", start)
+		}
 
 		// phenix sets the source, which the app wrote in the experiment's
 		// base directory, to the injection's permissions; minimega copies it
