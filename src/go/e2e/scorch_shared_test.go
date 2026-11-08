@@ -21,6 +21,14 @@ import (
 // experiment scorch` process, the status file a component writes, and readers
 // of what a run leaves.
 
+// scorchClearedFilter is the namespace's `capture pcap filter` once a SCORCH
+// component has reset it. minimega's phenix namespace drops an empty argument,
+// so the mm and pcap components reset the filter to this match-all BPF
+// (MATCH_ALL_FILTER in scorch/mm/mm.py, MATCH_ALL_BPF in scorch/pcap/pcap.py)
+// rather than to "". `clear capture` stops the captures without touching the
+// filter, so after a component has run, "" would mean nothing reset it.
+const scorchClearedFilter = "len >= 0"
+
 // scorchProc is a `phenix experiment scorch` run the test watches while it
 // runs and can signal.
 type scorchProc struct {

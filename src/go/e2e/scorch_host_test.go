@@ -74,9 +74,10 @@ const (
 	scorchHostRxPeer = "schers-n"
 
 	// The erspan component's port and mirror names, and a mirror the test
-	// adds to show erspan leaves other mirrors alone.
+	// adds to show erspan leaves other mirrors alone. The component names its
+	// mirror scorch-<local_interface> (ERSPAN._mirror_name in scorch/erspan).
 	scorchHostERSPANPort   = "erspan1"
-	scorchHostERSPANMirror = "m0"
+	scorchHostERSPANMirror = "scorch-" + scorchHostERSPANPort
 	scorchHostSentinel     = "e2e-sentinel"
 	scorchHostSentinelPort = "schmirout"
 
@@ -233,6 +234,7 @@ spec:
           local_bridge: phenix
           local_ip: 192.0.2.1
           remote_ip: 192.0.2.2
+          local_interface: erspan1
           session_key: 100
           excluded_vlans: [SPARE]
       - name: ersbad
@@ -241,6 +243,7 @@ spec:
           local_bridge: e2e-nobr
           local_ip: 192.0.2.1
           remote_ip: 192.0.2.2
+          local_interface: erspan1
       - name: ccfilt
         type: cc
         metadata:
@@ -619,11 +622,11 @@ func scorchHostCheckCorePause(t *testing.T, env scorchHostEnv, snap scorchHostCo
 		}
 	}
 
-	// Neither component has a filter, so each sets the blank one; whether
+	// Neither component has a filter, so each sets the match-all one; whether
 	// they clear a filter of their own is seen in SCH-08 (pcap) and SCG-02
 	// (mm), where that component sets the filter last.
-	if snap.filter != "" {
-		t.Errorf("during run 1, minimega's capture pcap filter is %q, want it cleared", snap.filter)
+	if snap.filter != scorchClearedFilter {
+		t.Errorf("during run 1, minimega's capture pcap filter is %q, want it cleared to %q", snap.filter, scorchClearedFilter)
 	}
 
 	// SCH-03: netem on h1's tap, tbf on h2's, as minimega's vm info reports.
@@ -907,9 +910,10 @@ func scorchHostCheckFilter(t *testing.T, env scorchHostEnv) {
 	if ok, f := scorchHostPoll(3*time.Second, 250*time.Millisecond, func() (bool, string) {
 		got := strings.TrimSpace(mmText(t, name, "capture pcap filter"))
 
-		return got == "", got
+		return got == scorchClearedFilter, got
 	}); !ok {
-		t.Errorf("while mmfilter's and pcapf's captures run, minimega's capture pcap filter is %q, want it cleared", f)
+		t.Errorf("while mmfilter's and pcapf's captures run, minimega's capture pcap filter is %q, want it cleared to %q",
+			f, scorchClearedFilter)
 	}
 
 	// pcapf also sets the namespace's snaplen, and resets it to minimega's
@@ -967,8 +971,8 @@ func scorchHostCheckFilter(t *testing.T, env scorchHostEnv) {
 		t.Errorf("h3's capture filtered with \"arp\" holds %d UDP, %d ARP and %d ICMP packets, want 0, >= 1 and 0", udp, arp, icmp)
 	}
 
-	if f := strings.TrimSpace(mmText(t, name, "capture pcap filter")); f != "" {
-		t.Errorf("after run %d, minimega's capture pcap filter is %q, want it cleared", run, f)
+	if f := strings.TrimSpace(mmText(t, name, "capture pcap filter")); f != scorchClearedFilter {
+		t.Errorf("after run %d, minimega's capture pcap filter is %q, want it cleared to %q", run, f, scorchClearedFilter)
 	}
 
 	if s := strings.TrimSpace(mmText(t, name, "capture pcap snaplen")); s != "0" {

@@ -523,7 +523,7 @@ func TestScorchNightComponents(t *testing.T) {
 	t.Run("SCN-03 ssh commands and file fetches, trafficgen clients and server", n.checkRemote)
 	t.Run("SCN-03b art fails clearly when goart is missing (REST)", scorchNightCheckArtMissing)
 	t.Run("SCN-03c art honors goartPath, outputPath, env, inputs and the validator", n.checkArtStub)
-	t.Run("SCN-04 ssh fails the stage when its remote work fails", n.checkSSHFail)
+	t.Run("SCN-04 ssh only warns when its remote work fails", n.checkSSHFail)
 	t.Run("SCN-05 providerdata and rtds against a fake provider, RSCAD and Elasticsearch", n.checkProvider)
 	t.Run("SCN-06 collector copies each guest's miniccc log", n.checkCollector)
 }
@@ -784,24 +784,26 @@ func scorchNightCheckTrafficGen(t *testing.T) {
 // ---------------------------------------------------------------------------
 // SCN-04: ssh failures
 
+// checkSSHFail runs ssh2, whose remote command exits 1 and whose second file
+// does not exist. The component only logs both (SSH._run in scorch/ssh/ssh.py:
+// a warning for the exit status, an error for the fetch, and its
+// ssh_metadata_start.json records them), so the stage and the run succeed.
 func (n *scorchNightEnv) checkSSHFail(t *testing.T) {
 	const run = scorchNightRunSSHFail
 
 	scorchNightWantSSH(t)
 
-	if out, err := n.run(t, run); err == nil {
-		t.Errorf("SCORCH run %d (ssh-fail) succeeded, want it to fail on the remote false and the missing file\n%s", run, out)
+	if out, err := n.run(t, run); err != nil {
+		t.Errorf("SCORCH run %d (ssh-fail) failed, want it to succeed and only warn about the remote false and the missing file: %v\n%s",
+			run, err, out)
 	}
 
-	st := scorchNightStage(t, run, "ssh2", "start")
+	st := scorchNightWantStage(t, run, "ssh2", "start")
 
-	for _, want := range []string{
-		"command 'hostname && false' on " + scorchNightG1 + " failed with exit status 1",
-		"fetching '/nonexistent/e2e-file' from " + scorchNightG1 + " failed",
-	} {
-		if !strings.Contains(st.failure(), want) {
-			t.Errorf("ssh2's start stage returned %v, want an error containing %q", st.Return, want)
-		}
+	// The stage's log warns about the failed command; the metadata below
+	// records the failed fetch, whose log line carries the SFTP client's text.
+	if want := "WARNING : remote command exited with status 1 on " + scorchNightG1 + ": hostname && false"; !st.logged(want) {
+		t.Errorf("ssh2's start stage logged %q, want a line containing %q", st.Logs, want)
 	}
 
 	// The other file is still fetched and the metadata still written.
@@ -810,8 +812,38 @@ func (n *scorchNightEnv) checkSSHFail(t *testing.T) {
 	}
 
 	scorchNightCheckSSHStage(t, run, "ssh2", "start", "hostname && false", 1)
+	scorchNightCheckSSHFetchError(t, run, "ssh2", "start", "/nonexistent/e2e-file")
 
 	scorchNightWantRun(t, run, "ssh-fail", "ssh2/loop-0-count-0/ssh_metadata_start.json")
+}
+
+// scorchNightCheckSSHFetchError checks that the metadata an ssh component saved
+// for a stage records the fetch of src as failed.
+func scorchNightCheckSSHFetchError(t *testing.T, run int, cmp, stage, src string) {
+	t.Helper()
+
+	var entries []struct {
+		Data map[string]any `json:"data"`
+	}
+
+	path := filepath.Join(scorchNightDir(run, cmp), "ssh_metadata_"+stage+".json")
+	if !scorchReadJSON(t, path, &entries) {
+		return
+	}
+
+	for _, e := range entries {
+		if e.Data["src"] != src {
+			continue
+		}
+
+		if e.Data["status"] != "error" || e.Data["error"] == "" {
+			t.Errorf("%s: fetch of %s recorded %v, want status error with the error message", path, src, e.Data)
+		}
+
+		return
+	}
+
+	t.Errorf("%s records no fetch of %s: %v", path, src, entries)
 }
 
 // scorchNightCheckSSHStage checks the metadata an ssh component saved for a

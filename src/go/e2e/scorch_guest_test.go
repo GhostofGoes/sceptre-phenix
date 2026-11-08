@@ -470,15 +470,15 @@ func scorchGuestCheckCapture(t *testing.T) {
 	}
 
 	// mmcap sets the namespace's filter last, after pcap1 cleared its own, so a
-	// filter here is mm's 'udp' left behind once its capture runs. mm clears it
-	// just after the capture appears, so allow it a moment. SCH-08 shows pcap
-	// clearing its own filter.
+	// filter here is mm's 'udp' left behind once its capture runs. mm resets it
+	// to the match-all filter just after the capture appears, so allow it a
+	// moment. SCH-08 shows pcap clearing its own filter.
 	if ok, f := scorchHostPoll(3*time.Second, 250*time.Millisecond, func() (bool, string) {
 		got := strings.TrimSpace(mmText(t, scorchGuestName, "capture pcap filter"))
 
-		return got == "", got
+		return got == scorchClearedFilter, got
 	}); !ok {
-		t.Errorf("the namespace's capture filter is %q with every capture started, want it cleared", f)
+		t.Errorf("the namespace's capture filter is %q with every capture started, want it cleared to %q", f, scorchClearedFilter)
 	}
 
 	// mmcap's capture also sets the namespace's snaplen; mm resets it to
@@ -505,8 +505,8 @@ func scorchGuestCheckCapture(t *testing.T) {
 		t.Errorf("minimega captures after run %d: %v, want none", run, caps)
 	}
 
-	if f := strings.TrimSpace(mmText(t, scorchGuestName, "capture pcap filter")); f != "" {
-		t.Errorf("the namespace's capture filter after run %d is %q, want it cleared", run, f)
+	if f := strings.TrimSpace(mmText(t, scorchGuestName, "capture pcap filter")); f != scorchClearedFilter {
+		t.Errorf("the namespace's capture filter after run %d is %q, want it cleared to %q", run, f, scorchClearedFilter)
 	}
 
 	if s := strings.TrimSpace(mmText(t, scorchGuestName, "capture pcap snaplen")); s != "0" {
