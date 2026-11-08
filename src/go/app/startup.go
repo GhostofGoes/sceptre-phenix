@@ -11,9 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	"phenix/store"
 	"phenix/tmpl"
@@ -22,19 +20,13 @@ import (
 	"phenix/util/mm"
 	"phenix/util/notes"
 	"phenix/util/plog"
-	"phenix/util/pubsub"
-
-	"github.com/mitchellh/mapstructure"
 
 	ifaces "phenix/types/interfaces"
 	v1 "phenix/types/version/v1"
 )
 
 const (
-	appNameStartup                = "startup"
-	tunnelConfigPartsPortOnly     = 1
-	tunnelConfigPartsPortHost     = 2
-	tunnelConfigPartsPortHostDest = 3
+	appNameStartup = "startup"
 
 	startupViaCCAnnotation = "phenix/startup-via-cc"
 
@@ -811,128 +803,30 @@ func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 }
 
 func (s Startup) PostStart(ctx context.Context, exp *types.Experiment) error {
-	// A dry run launched no VM to tunnel to, and asking minimega about one
-	// would create the experiment's namespace.
+	// A dry run launched no VM to tunnel to.
 	if s.options.DryRun || exp.DryRun() {
 		return nil
 	}
 
-	start := exp.Status.StartTime()
+	// phenix ui creates the autotunnels, and keeps them for as long as the
+	// experiment runs (web/forward/autotunnel.go). Logging them here tells
+	// whoever started the experiment, which may be another process, what was
+	// asked for and which entries are ignored.
+	tunnels, errs := Autotunnels(exp)
 
-	for _, node := range exp.Spec.Topology().Nodes() {
-		if node.External() {
-			continue
-		}
+	for _, err := range errs {
+		plog.Error(plog.TypeSystem, "invalid phenix/startup-autotunnel annotation", "exp", exp.Metadata.Name, "err", err)
+	}
 
-		// The autotunnel annotation is independent of default apps, so it is
-		// honored regardless of whether default apps are enabled for this node.
-		if annotation, ok := node.GetAnnotation("phenix/startup-autotunnel"); ok {
-			var tunnels []string
-
-			err := mapstructure.Decode(annotation, &tunnels)
-			if err != nil {
-				plog.Error(
-					plog.TypeSystem,
-					"parsing phenix/startup-autotunnel annotation",
-					"exp",
-					exp.Metadata.Name,
-					"vm",
-					node.General().Hostname(),
-					"err",
-					err,
-				)
-			} else {
-				for _, config := range tunnels {
-					tunnel := CreateTunnel{ //nolint:exhaustruct // partial initialization
-						Experiment: exp.Metadata.Name,
-						VM:         node.General().Hostname(),
-						User:       "bot",
-					}
-
-					tokens := strings.Split(config, ":")
-
-					switch len(tokens) {
-					case tunnelConfigPartsPortOnly:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = "127.0.0.1"
-						tunnel.Dport = tokens[0]
-					case tunnelConfigPartsPortHost:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = "127.0.0.1"
-						tunnel.Dport = tokens[1]
-					case tunnelConfigPartsPortHostDest:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = tokens[1]
-						tunnel.Dport = tokens[2]
-					default:
-						plog.Error(
-							plog.TypeSystem,
-							"invalid phenix/startup-autotunnel annotation",
-							"value",
-							config,
-						)
-					}
-
-					if tunnel.Sport == "" {
-						continue
-					}
-
-					// Port forwards live in phenix ui, which subscribes only once it
-					// serves. Any other process, such as `phenix experiment start`,
-					// would drop the request, and exits before the VM's C2 is up.
-					if !pubsub.HasSubscribers(CreateTunnelTopic) {
-						plog.Warn(
-							plog.TypeSystem,
-							"startup autotunnel not created: autotunnels are created only for experiments started through phenix ui",
-							"exp",
-							exp.Metadata.Name,
-							"vm",
-							node.General().Hostname(),
-							"tunnel",
-							config,
-						)
-
-						continue
-					}
-
-					go requestAutotunnel(trackAutotunnelWait(exp.Metadata.Name), start, tunnel)
-				}
-			}
-		}
+	for _, tunnel := range tunnels {
+		plog.Info(
+			plog.TypeSystem,
+			"startup autotunnel requested: phenix ui creates it once the VM's C2 client registers",
+			tunnel.LogArgs()...,
+		)
 	}
 
 	return nil
-}
-
-// requestAutotunnel asks phenix ui for an autotunnel once the VM's C2 client
-// registered, unless the tunnel is to VNC, which needs no miniccc agent.
-func requestAutotunnel(wait *autotunnelWait, start string, msg CreateTunnel) {
-	defer wait.wg.Done()
-
-	if strings.ToUpper(msg.Dport) != "VNC" {
-		err := waitForAutotunnelC2(wait.ctx, msg.Experiment, start, msg.VM)
-		if errors.Is(err, errAutotunnelStopped) || wait.ctx.Err() != nil {
-			plog.Info(
-				plog.TypeSystem,
-				"startup autotunnel not created: the experiment stopped before the C2 client registered",
-				"exp", msg.Experiment, "vm", msg.VM,
-			)
-
-			return
-		}
-
-		if err != nil {
-			plog.Error(
-				plog.TypeSystem,
-				"startup autotunnel not created: waiting for the C2 client",
-				"exp", msg.Experiment, "vm", msg.VM, "err", err,
-			)
-
-			return
-		}
-	}
-
-	pubsub.Publish(CreateTunnelTopic, msg)
 }
 
 func (Startup) Running(ctx context.Context, exp *types.Experiment) error {
@@ -940,101 +834,7 @@ func (Startup) Running(ctx context.Context, exp *types.Experiment) error {
 }
 
 func (Startup) Cleanup(ctx context.Context, exp *types.Experiment) error {
-	// Stop runs the cleanup apps before it clears the experiment's namespace.
-	EndAutotunnelWaits(exp.Metadata.Name)
-
 	return nil
-}
-
-var (
-	// autotunnelC2Timeout bounds the wait for a VM's C2 client before its
-	// autotunnel is created, and autotunnelC2Interval paces the checks.
-	autotunnelC2Timeout  = mm.DefaultC2Timeout //nolint:gochecknoglobals // overridden by tests
-	autotunnelC2Interval = 2 * time.Second     //nolint:gochecknoglobals // overridden by tests
-
-	errAutotunnelStopped = errors.New("experiment stopped")
-
-	// autotunnelWaits holds, per experiment, the goroutines that wait for a
-	// VM's C2 client before they ask phenix ui for its autotunnel.
-	autotunnelWaits   = make(map[string]*autotunnelWait) //nolint:gochecknoglobals // per-process state
-	autotunnelWaitsMu sync.Mutex                         //nolint:gochecknoglobals // guards autotunnelWaits
-)
-
-// autotunnelWait lets the startup app's cleanup stop an experiment's
-// autotunnel waits and wait for them to end. They query minimega in the
-// experiment's namespace, and minimega creates a namespace again for any
-// command that names it once stop has cleared it.
-type autotunnelWait struct {
-	ctx    context.Context //nolint:containedctx // canceled by the experiment's cleanup
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-// trackAutotunnelWait records one more autotunnel wait of the experiment; the
-// waiting goroutine calls wg.Done when it ends.
-func trackAutotunnelWait(exp string) *autotunnelWait {
-	autotunnelWaitsMu.Lock()
-	defer autotunnelWaitsMu.Unlock()
-
-	wait, ok := autotunnelWaits[exp]
-	if !ok {
-		ctx, cancel := context.WithCancel(context.Background())
-		wait = &autotunnelWait{ctx: ctx, cancel: cancel} //nolint:exhaustruct // zero WaitGroup
-		autotunnelWaits[exp] = wait
-	}
-
-	wait.wg.Add(1)
-
-	return wait
-}
-
-// EndAutotunnelWaits cancels the experiment's autotunnel waits in this
-// process and waits for them to end. phenix ui's port forward service calls it
-// from the experiment's stopping hook, before it deletes the experiment's
-// forwards, since the stopping hooks run before the cleanup apps.
-func EndAutotunnelWaits(exp string) {
-	autotunnelWaitsMu.Lock()
-	wait := autotunnelWaits[exp]
-	delete(autotunnelWaits, exp)
-	autotunnelWaitsMu.Unlock()
-
-	if wait == nil {
-		return
-	}
-
-	wait.cancel()
-	wait.wg.Wait()
-}
-
-// waitForAutotunnelC2 waits for vm's C2 client to register, up to
-// autotunnelC2Timeout. It gives up with errAutotunnelStopped once the
-// experiment is no longer stored with the start time PostStart saw, which a
-// stop from another process clears; this process's stop cancels ctx instead.
-func waitForAutotunnelC2(ctx context.Context, exp, start, vm string) error {
-	deadline := time.Now().Add(autotunnelC2Timeout)
-
-	for {
-		if !ExperimentStillStarted(exp, start) {
-			return errAutotunnelStopped
-		}
-
-		began := time.Now()
-
-		err := mm.IsC2ClientActive(mm.C2Context(ctx), mm.C2NS(exp), mm.C2VM(vm), mm.C2Timeout(time.Second))
-		if err == nil || ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		if !errors.Is(err, mm.ErrC2ClientNotActive) || !time.Now().Before(deadline) {
-			return err //nolint:wrapcheck // logged by the caller
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Until(began.Add(autotunnelC2Interval))):
-		}
-	}
 }
 
 // ExperimentStillStarted reports whether the experiment is still stored with

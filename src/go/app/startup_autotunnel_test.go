@@ -6,102 +6,33 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/activeshadow/structs"
-	"github.com/golang/mock/gomock"
-
-	"phenix/store"
 	"phenix/types"
 	"phenix/util/mm"
 	"phenix/util/plog"
-	"phenix/util/pubsub"
+
+	v1 "phenix/types/version/v1"
 )
 
 const autotunnelTestStart = "2026-10-19T00:00:00Z"
 
-// autotunnelTestMM answers the C2 check the startup app makes before it asks
-// phenix ui for an autotunnel, and counts those checks. Any other call panics.
+// autotunnelTestMM fails the test on any minimega call: phenix ui, not the
+// startup app, creates autotunnels.
 type autotunnelTestMM struct {
 	mm.MM
 
-	c2Err  error
-	checks *atomic.Int32
+	t *testing.T
 }
 
 func (m autotunnelTestMM) IsC2ClientActive(...mm.C2Option) error {
-	if m.checks != nil {
-		m.checks.Add(1)
-	}
+	m.t.Error("the startup app asked minimega about a VM's C2 client")
 
-	return m.c2Err
+	return nil
 }
 
-// autotunnelTestStore stands in for the store, which holds the experiment
-// with its start time until a stop clears it.
-type autotunnelTestStore struct {
-	mu    sync.Mutex
-	start string
-}
-
-func (s *autotunnelTestStore) stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.start = ""
-}
-
-func installAutotunnelTestStore(t *testing.T, exp *types.Experiment) *autotunnelTestStore {
-	t.Helper()
-
-	var (
-		spec = structs.MapDefaultCase(exp.Spec, structs.CASESNAKE)
-		s    = &autotunnelTestStore{start: exp.Status.StartTime()}
-		ctrl = gomock.NewController(t)
-		m    = store.NewMockStore(ctrl)
-	)
-
-	m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		if c.Kind != "Experiment" || c.Metadata.Name != exp.Metadata.Name {
-			return store.ErrNotExist
-		}
-
-		c.Spec = spec
-		c.Status = map[string]any{"startTime": s.start}
-
-		return nil
-	}).AnyTimes()
-
-	original := store.DefaultStore
-	t.Cleanup(func() { store.DefaultStore = original }) //nolint:reassign // restore test double
-
-	store.DefaultStore = m //nolint:reassign // install test double
-
-	return s
-}
-
-// shortenAutotunnelWaits makes the startup app check for C2 every few
-// milliseconds and give up after timeout, and ends the test's autotunnel
-// waits before it restores the defaults.
-func shortenAutotunnelWaits(t *testing.T, exp *types.Experiment, timeout time.Duration) {
-	t.Helper()
-
-	interval, limit := autotunnelC2Interval, autotunnelC2Timeout
-
-	t.Cleanup(func() { autotunnelC2Interval, autotunnelC2Timeout = interval, limit })
-
-	autotunnelC2Interval, autotunnelC2Timeout = 5*time.Millisecond, timeout
-
-	t.Cleanup(func() { EndAutotunnelWaits(exp.Metadata.Name) })
-}
-
-// syncBuffer is a [bytes.Buffer] the log handler may write from the startup
-// app's goroutines while the test reads it.
+// syncBuffer is a [bytes.Buffer] the log handler may write to while the test
+// reads it.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -132,47 +63,22 @@ func captureAutotunnelLogs(t *testing.T) *syncBuffer {
 	return logs
 }
 
-func installAutotunnelTestMM(t *testing.T, fake mm.MM) {
+func installAutotunnelTestMM(t *testing.T) {
 	t.Helper()
 
 	original := mm.DefaultMM
 	t.Cleanup(func() { mm.DefaultMM = original }) //nolint:reassign // restore test double
 
-	mm.DefaultMM = fake //nolint:reassign // install test double
+	mm.DefaultMM = autotunnelTestMM{t: t} //nolint:reassign // install test double
 }
 
-// subscribeAutotunnels stands in for phenix ui's port forward service.
-func subscribeAutotunnels(t *testing.T) chan any {
-	t.Helper()
-
-	ch := pubsub.Subscribe(CreateTunnelTopic)
-
-	t.Cleanup(func() {
-		done := make(chan struct{})
-
-		// keep reading, in case an unexpected Publish is blocked on ch
-		go func() {
-			for {
-				select {
-				case <-ch:
-				case <-done:
-					return
-				}
-			}
-		}()
-
-		pubsub.Unsubscribe(CreateTunnelTopic, ch)
-		close(done)
-	})
-
-	return ch
-}
-
-func newAutotunnelExperiment(t *testing.T, tunnel string) *types.Experiment {
+// newAutotunnelExperiment returns a started experiment whose VM web carries
+// the autotunnel annotation value.
+func newAutotunnelExperiment(t *testing.T, annotation any) *types.Experiment {
 	t.Helper()
 
 	node := newStartupTestNode(t, "web", "linux", true, 1)
-	node.AnnotationsF = map[string]any{"phenix/startup-autotunnel": []string{tunnel}}
+	node.AnnotationsF = map[string]any{AutotunnelAnnotation: annotation}
 
 	exp, _ := newStartupTestExperiment(t, node, nil)
 	exp.Status.SetStartTime(autotunnelTestStart)
@@ -180,131 +86,130 @@ func newAutotunnelExperiment(t *testing.T, tunnel string) *types.Experiment {
 	return exp
 }
 
-// waitForLog waits for the startup app's goroutine to log want.
-func waitForLog(t *testing.T, logs *syncBuffer, want string) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-
-	for !strings.Contains(logs.String(), want) {
-		if time.Now().After(deadline) {
-			t.Fatalf("no log containing %q; logs:\n%s", want, logs.String())
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestStartupAutotunnelWithoutPhenixUI covers `phenix experiment start`: no
-// process will create the autotunnel, so the startup app warns that it was not
-// created.
-func TestStartupAutotunnelWithoutPhenixUI(t *testing.T) {
-	if pubsub.HasSubscribers(CreateTunnelTopic) {
-		t.Fatal("something in the test binary already subscribes to autotunnels")
+func TestAutotunnels(t *testing.T) {
+	tunnel := func(sport, dhost, dport string) Autotunnel {
+		return Autotunnel{Experiment: "exp1", VM: "web", Sport: sport, Dhost: dhost, Dport: dport}
 	}
 
-	installAutotunnelTestMM(t, autotunnelTestMM{})
-
-	logs := captureAutotunnelLogs(t)
-
-	if err := (Startup{}).PostStart(context.Background(), newAutotunnelExperiment(t, "8080")); err != nil {
-		t.Fatalf("running startup PostStart: %v", err)
-	}
-
-	for _, want := range []string{
-		"startup autotunnel not created: autotunnels are created only for experiments started through phenix ui",
-		"exp=exp1",
-		"vm=web",
-		"tunnel=8080",
-	} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("logs lack %q:\n%s", want, logs.String())
-		}
-	}
-}
-
-func TestStartupAutotunnelPublishesToPhenixUI(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		tunnel string
-		c2Err  error
-		want   *CreateTunnel // nil when nothing may be published
+		name       string
+		annotation any
+		want       []Autotunnel
+		errs       []string
 	}{
 		{
-			name:   "port only",
-			tunnel: "8080",
-			want: &CreateTunnel{
-				Experiment: "exp1", VM: "web", Sport: "8080", Dhost: "127.0.0.1", Dport: "8080", User: "bot",
+			name:       "every form",
+			annotation: []any{"8080", "8081:9090", "8082:10.0.0.5:80", "5901:VNC"},
+			want: []Autotunnel{
+				tunnel("8080", "127.0.0.1", "8080"),
+				tunnel("8081", "127.0.0.1", "9090"),
+				tunnel("8082", "10.0.0.5", "80"),
+				tunnel("5901", "127.0.0.1", "VNC"),
 			},
 		},
 		{
-			name:   "host and port",
-			tunnel: "8080:10.0.0.5:80",
-			want: &CreateTunnel{
-				Experiment: "exp1", VM: "web", Sport: "8080", Dhost: "10.0.0.5", Dport: "80", User: "bot",
+			name:       "invalid entries are skipped",
+			annotation: []string{"a:b:c:d", "http", "8080:http", "0", "8080::80", "9000"},
+			want:       []Autotunnel{tunnel("9000", "127.0.0.1", "9000")},
+			errs: []string{
+				`entry "a:b:c:d": want sport`,
+				`entry "http": invalid source port`,
+				`entry "8080:http": invalid destination port`,
+				`entry "0": invalid source port`,
+				`entry "8080::80": empty destination host`,
 			},
 		},
 		{
-			name:   "VNC needs no C2",
-			tunnel: "5901:VNC",
-			c2Err:  mm.ErrC2ClientNotActive,
-			want: &CreateTunnel{
-				Experiment: "exp1", VM: "web", Sport: "5901", Dhost: "127.0.0.1", Dport: "VNC", User: "bot",
+			name:       "a repeated destination is skipped",
+			annotation: []string{"8080", "9080:8080", "9081:127.0.0.1:8080"},
+			want:       []Autotunnel{tunnel("8080", "127.0.0.1", "8080")},
+			errs: []string{
+				`entry "9080:8080": forwards to the destination of entry "8080"`,
+				`entry "9081:127.0.0.1:8080": forwards to the destination of entry "8080"`,
 			},
 		},
 		{
-			name:   "C2 never active",
-			tunnel: "8080",
-			c2Err:  mm.ErrC2ClientNotActive,
+			name:       "not a list",
+			annotation: map[string]any{"port": 8080},
+			errs:       []string{"vm web: parsing phenix/startup-autotunnel annotation"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installAutotunnelTestMM(t, autotunnelTestMM{c2Err: tc.c2Err})
+			got, errs := Autotunnels(newAutotunnelExperiment(t, tc.annotation))
 
-			var (
-				exp  = newAutotunnelExperiment(t, tc.tunnel)
-				logs = captureAutotunnelLogs(t)
-				ch   = subscribeAutotunnels(t)
-			)
-
-			installAutotunnelTestStore(t, exp)
-			shortenAutotunnelWaits(t, exp, 50*time.Millisecond)
-
-			if err := (Startup{}).PostStart(context.Background(), exp); err != nil {
-				t.Fatalf("running startup PostStart: %v", err)
+			if len(got) != len(tc.want) {
+				t.Fatalf("Autotunnels() = %+v, want %+v", got, tc.want)
 			}
 
-			if tc.want == nil {
-				waitForLog(t, logs, "startup autotunnel not created: waiting for the C2 client")
-
-				select {
-				case got := <-ch:
-					t.Fatalf("published %+v although the C2 client never became active", got)
-				default:
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("Autotunnels()[%d] = %+v, want %+v", i, got[i], tc.want[i])
 				}
-
-				return
 			}
 
-			select {
-			case got := <-ch:
-				if got != *tc.want {
-					t.Fatalf("published %+v, want %+v", got, *tc.want)
+			if len(errs) != len(tc.errs) {
+				t.Fatalf("Autotunnels() errors = %v, want %d containing %q", errs, len(tc.errs), tc.errs)
+			}
+
+			for i, err := range errs {
+				if !strings.Contains(err.Error(), tc.errs[i]) {
+					t.Errorf("Autotunnels() error %d = %v, want it to contain %q", i, err, tc.errs[i])
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("no autotunnel published")
-			}
-
-			if strings.Contains(logs.String(), "startup autotunnel not created") {
-				t.Errorf("unexpected warning:\n%s", logs.String())
 			}
 		})
 	}
 }
 
+func TestAutotunnelsSkipExternalNodes(t *testing.T) {
+	exp := newAutotunnelExperiment(t, []string{"8080"})
+
+	node, _ := exp.Spec.Topology().Nodes()[0].(*v1.Node)
+	node.ExternalF = boolPtr(true)
+
+	if got, errs := Autotunnels(exp); len(got) != 0 || len(errs) != 0 {
+		t.Errorf("Autotunnels() of an external node = %+v, %v; want none", got, errs)
+	}
+}
+
+func TestAutotunnelDstPort(t *testing.T) {
+	for dport, want := range map[string]int{"8080": 8080, "VNC": 5900, "vnc": 5900} {
+		if got := (Autotunnel{Dport: dport}).DstPort(); got != want {
+			t.Errorf("DstPort() of %q = %d, want %d", dport, got, want)
+		}
+	}
+}
+
+// TestStartupPostStartLogsAutotunnels covers what the startup app does for
+// autotunnels, whichever process starts the experiment: it logs each entry
+// phenix ui will create, and each it ignores, and asks minimega nothing.
+func TestStartupPostStartLogsAutotunnels(t *testing.T) {
+	installAutotunnelTestMM(t)
+
+	logs := captureAutotunnelLogs(t)
+
+	if err := (Startup{}).PostStart(context.Background(), newAutotunnelExperiment(t, []string{"8080", "http"})); err != nil {
+		t.Fatalf("running startup PostStart: %v", err)
+	}
+
+	for _, want := range []string{
+		"startup autotunnel requested: phenix ui creates it once the VM's C2 client registers",
+		"exp=exp1 vm=web sport=8080 dhost=127.0.0.1 dport=8080",
+		"invalid phenix/startup-autotunnel annotation",
+		`entry \"http\": invalid source port`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("logs lack %q:\n%s", want, logs.String())
+		}
+	}
+
+	if err := (Startup{}).Cleanup(context.Background(), newAutotunnelExperiment(t, []string{"8080"})); err != nil {
+		t.Errorf("running startup Cleanup: %v", err)
+	}
+}
+
 // TestStartupAutotunnelSkipsDryRuns is a regression test: the startup app
 // asked minimega about a dry run's VM, which made minimega create the
-// experiment's namespace.
+// experiment's namespace. A dry run gets no autotunnels.
 func TestStartupAutotunnelSkipsDryRuns(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -315,16 +220,12 @@ func TestStartupAutotunnelSkipsDryRuns(t *testing.T) {
 		{name: "dry-run start time", start: autotunnelTestStart + "-DRYRUN"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			checks := new(atomic.Int32)
-			installAutotunnelTestMM(t, autotunnelTestMM{checks: checks})
+			installAutotunnelTestMM(t)
 
-			exp := newAutotunnelExperiment(t, "8080")
+			logs := captureAutotunnelLogs(t)
+
+			exp := newAutotunnelExperiment(t, []string{"8080"})
 			exp.Status.SetStartTime(tc.start)
-
-			ch := subscribeAutotunnels(t)
-
-			installAutotunnelTestStore(t, exp)
-			shortenAutotunnelWaits(t, exp, time.Minute)
 
 			app := new(Startup)
 			if err := app.Init(DryRun(tc.dryRun)); err != nil {
@@ -335,105 +236,9 @@ func TestStartupAutotunnelSkipsDryRuns(t *testing.T) {
 				t.Fatalf("running startup PostStart: %v", err)
 			}
 
-			select {
-			case got := <-ch:
-				t.Fatalf("published %+v for a dry run", got)
-			case <-time.After(100 * time.Millisecond):
-			}
-
-			if n := checks.Load(); n != 0 {
-				t.Fatalf("asked minimega about a dry run's VM %d times", n)
+			if strings.Contains(logs.String(), "startup autotunnel") {
+				t.Errorf("logged an autotunnel for a dry run:\n%s", logs.String())
 			}
 		})
 	}
-}
-
-// waitForChecks waits until the startup app checked for C2 at least n times.
-func waitForChecks(t *testing.T, checks *atomic.Int32, n int32) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-
-	for checks.Load() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("the startup app checked for C2 %d times, want at least %d", checks.Load(), n)
-		}
-
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// requireNoMoreChecks fails when the startup app checks for C2 again.
-func requireNoMoreChecks(t *testing.T, checks *atomic.Int32, ch chan any) {
-	t.Helper()
-
-	n := checks.Load()
-
-	select {
-	case got := <-ch:
-		t.Fatalf("published %+v for a stopped experiment", got)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	if got := checks.Load(); got != n {
-		t.Fatalf("the startup app checked for C2 %d more times after the stop", got-n)
-	}
-}
-
-// TestStartupCleanupEndsAutotunnelWaits is a regression test: an autotunnel
-// kept waiting for its VM's C2 client after the experiment stopped, and each
-// check made minimega create the namespace stop had just cleared.
-func TestStartupCleanupEndsAutotunnelWaits(t *testing.T) {
-	checks := new(atomic.Int32)
-	installAutotunnelTestMM(t, autotunnelTestMM{c2Err: mm.ErrC2ClientNotActive, checks: checks})
-
-	var (
-		exp  = newAutotunnelExperiment(t, "8080")
-		logs = captureAutotunnelLogs(t)
-		ch   = subscribeAutotunnels(t)
-	)
-
-	installAutotunnelTestStore(t, exp)
-	shortenAutotunnelWaits(t, exp, time.Minute)
-
-	if err := (Startup{}).PostStart(context.Background(), exp); err != nil {
-		t.Fatalf("running startup PostStart: %v", err)
-	}
-
-	waitForChecks(t, checks, 2)
-
-	// Stop runs the cleanup apps before it clears the namespace, so the
-	// wait must have ended when the startup app's cleanup returns.
-	if err := (Startup{}).Cleanup(context.Background(), exp); err != nil {
-		t.Fatalf("running startup Cleanup: %v", err)
-	}
-
-	requireNoMoreChecks(t, checks, ch)
-	waitForLog(t, logs, "the experiment stopped before the C2 client registered")
-}
-
-// TestStartupAutotunnelWaitEndsWhenStoppedElsewhere covers a stop from
-// another process, such as phenix experiment stop, whose cleanup cannot reach
-// this process's waits: the stored start time it clears ends them.
-func TestStartupAutotunnelWaitEndsWhenStoppedElsewhere(t *testing.T) {
-	checks := new(atomic.Int32)
-	installAutotunnelTestMM(t, autotunnelTestMM{c2Err: mm.ErrC2ClientNotActive, checks: checks})
-
-	var (
-		exp  = newAutotunnelExperiment(t, "8080")
-		logs = captureAutotunnelLogs(t)
-		ch   = subscribeAutotunnels(t)
-	)
-
-	stored := installAutotunnelTestStore(t, exp)
-	shortenAutotunnelWaits(t, exp, time.Minute)
-
-	if err := (Startup{}).PostStart(context.Background(), exp); err != nil {
-		t.Fatalf("running startup PostStart: %v", err)
-	}
-
-	waitForChecks(t, checks, 2)
-	stored.stop()
-	waitForLog(t, logs, "the experiment stopped before the C2 client registered")
-	requireNoMoreChecks(t, checks, ch)
 }
