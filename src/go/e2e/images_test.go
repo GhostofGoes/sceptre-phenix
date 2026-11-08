@@ -205,12 +205,11 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 	"ntp": {
 		vcpus: 1, memory: 1024,
 		checks: []imageCheck{
-			commandsPresent("ntp installed", "ntpd", "ntpq"),
+			// The recipe installs chrony (phenix image create -P chrony).
+			commandsPresent("chrony installed", "chronyd", "chronyc"),
 			{
-				// Either daemon: is-active prints a state per unit, so only
-				// its exit status combines across the two.
-				name:   "ntp service",
-				script: "systemctl is-active -q ntp.service || systemctl is-active -q ntpsec.service && echo active",
+				name:   "chrony service",
+				script: "systemctl is-active chrony.service",
 				want:   "active",
 			},
 		},
