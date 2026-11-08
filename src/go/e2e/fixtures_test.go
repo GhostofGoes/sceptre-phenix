@@ -197,11 +197,21 @@ func waitNBDPartition(t *testing.T, part string) {
 	sys := filepath.Join("/sys/block", filepath.Base(nbdDevice))
 
 	eventually(t, 10*time.Second, 100*time.Millisecond, part+" to appear", func() (bool, string) {
-		_ = run("blockdev", "--rereadpt", nbdDevice)
-
 		_, err := os.Stat(part)
+		if err != nil {
+			_ = run("blockdev", "--rereadpt", nbdDevice)
+			_, err = os.Stat(part)
+		}
+
 		if err == nil {
-			return true, ""
+			// A rescan's udev change event can make the kernel rescan again,
+			// which drops and re-adds the partition: wait for udev to finish
+			// and see that the partition is still there.
+			_ = run("udevadm", "settle", "--timeout=10")
+
+			if _, err = os.Stat(part); err == nil {
+				return true, ""
+			}
 		}
 
 		size, sizeErr := os.ReadFile(filepath.Join(sys, "size")) //nolint:gosec // fixed sysfs path
