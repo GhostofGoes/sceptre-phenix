@@ -1099,15 +1099,17 @@ func builtinMakeP3Image(t *testing.T) {
 }
 
 // ===========================================================================
-// Real guests: startup, ntp, serial, tap, soh and scorch on two ntp.qc2 guests
+// Real guests: startup, ntp, serial, tap, soh and scorch on two e2e.qc2 guests
 
 // builtinGuestNodes are two real guests on VLAN LAN (behind the tap app's
-// tap as their gateway) with a serial interface each on VLAN SERIAL.
+// tap as their gateway) with a serial interface each on VLAN SERIAL. They boot
+// the tools image, whose ntpsec the ntp app's ntpd server and client configure:
+// the ntp recipe now builds chrony.
 func builtinGuestNodes() []builtinNode {
 	guest := func(host, addr, serial string, mtu int, netExtra string) builtinNode {
 		return builtinNode{
 			host:   host,
-			image:  cfg.guest,
+			image:  cfg.tools,
 			memory: 1024,
 			ifaces: []builtinIface{
 				{name: "eth0", vlan: "LAN", addr: addr, gw: "10.10.0.200", dns: []string{"10.10.0.53"}, mtu: mtu},
@@ -1240,7 +1242,7 @@ func builtinGuestApps() string {
 // TestBuiltinGuestApps boots two real guests once and checks every built-in
 // app on them (ST-01, ST-09, NT-01, SE-01, TA-01, SO-01, SC-01..SC-05).
 func TestBuiltinGuestApps(t *testing.T) {
-	requireImage(t, cfg.guest)
+	requireImage(t, cfg.tools)
 	builtinInstallComponent(t)
 	builtinCleanTaps(t)
 
@@ -1271,8 +1273,7 @@ func TestBuiltinGuestApps(t *testing.T) {
 	t.Run("ST-01 startup configured each guest", func(t *testing.T) { builtinCheckStartupGuests(t, name) })
 	t.Run("ST-09 startup sets the interface MTU", func(t *testing.T) { builtinCheckMTU(t, name) })
 	t.Run("NT-01 ntp renders and injects server and client configs", func(t *testing.T) { builtinCheckNTPFiles(t, exp) })
-	// ntp.qc2 has no socat, which the serial app runs; TestBuiltinSerialLink
-	// checks the link itself on the tools image.
+	// TestBuiltinSerialLink checks the serial link itself.
 	t.Run("SE-01 serial units in the guests", func(t *testing.T) { builtinCheckSerial(t, name, false) })
 	t.Run("TA-01 tap app tap is on the VLAN in its own namespace", func(t *testing.T) { builtinCheckTapApp(t, exp) })
 	t.Run("SO-01 SOH post-start results", func(t *testing.T) { builtinCheckSOHGuests(t, name, out) })
@@ -2094,13 +2095,14 @@ const builtinVrouterApp = `
 // enforces the firewall chain, leases DHCP addresses and resolves the DNS
 // record, and SOH reaches the router over C2 by UUID.
 func TestBuiltinRouter(t *testing.T) {
-	requireImage(t, cfg.guest)
+	requireImage(t, cfg.tools)
 	requireImage(t, cfg.router)
 
 	const name = "e2e-ba-rtr"
 
+	// The tools image has isc-dhcp-client, which the noble ntp image lacks.
 	guest := func(host string, iface builtinIface) builtinNode {
-		return builtinNode{host: host, image: cfg.guest, memory: 1024, ifaces: []builtinIface{iface}}
+		return builtinNode{host: host, image: cfg.tools, memory: 1024, ifaces: []builtinIface{iface}}
 	}
 
 	topo := builtinTopology(
