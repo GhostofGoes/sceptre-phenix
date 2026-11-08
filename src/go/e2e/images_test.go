@@ -554,7 +554,7 @@ var imageProfiles = map[string]imageProfile{ //nolint:gochecknoglobals // test t
 				script: "test -x /opt/zeek/bin/zeek && test -x /opt/zeek/bin/zeekctl && echo ok",
 				want:   "ok",
 			},
-			{name: "Zeek LTS 8.0", script: "dpkg-query -W -f '${Version}' zeek-lts-core | cut -d. -f1,2", want: "8.0"},
+			{name: "Zeek 8.0", script: "/opt/zeek/bin/zeek --version | awk '{print $3}' | cut -d. -f1,2", want: "8.0"},
 			{
 				name:   "site policy parses",
 				script: "cd /tmp && /opt/zeek/bin/zeek -a /opt/zeek/share/zeek/site/local.zeek && echo ok",
