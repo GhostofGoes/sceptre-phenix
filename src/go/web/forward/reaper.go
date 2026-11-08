@@ -133,10 +133,23 @@ func reapForwards() {
 			running[l.Exp] = up
 		}
 
-		if !up || !forwardExists(l) {
+		switch {
+		case !up:
+			plog.Info(plog.TypeSystem, "port forward removed: the experiment is not running", forwardLogArgs(l)...)
+			deleteForward(l)
+		case !forwardExists(l):
+			plog.Warn(plog.TypeSystem, "port forward dropped: its minimega tunnel is gone", forwardLogArgs(l)...)
 			deleteForward(l)
 		}
 	}
+}
+
+// forwardLogArgs returns a forward's structured log fields.
+func forwardLogArgs(l ft.Listener, extra ...any) []any {
+	return append([]any{
+		"exp", l.Exp, "vm", l.VM, "sport", l.SrcPort, "dhost", l.DstHost, "dport", l.DstPort,
+		"owner", l.Owner, "clusterHost", l.ClusterHost, "clusterPort", l.ClusterPort,
+	}, extra...)
 }
 
 // experimentRunning reports whether the experiment is running for real. If the

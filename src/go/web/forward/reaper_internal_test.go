@@ -82,16 +82,16 @@ func TestDeleteExperimentForwardsKeepsTheReaperOutOfTheExperiment(t *testing.T) 
 	}
 }
 
-// TestStopExperimentForwardsEndsAutotunnelWaitsFirst is a regression test:
-// the stopping hooks run before the cleanup apps, whose startup app ended the
+// TestStopExperimentForwardsEndsAutotunnelsFirst is a regression test: the
+// stopping hooks run before the cleanup apps, whose startup app ended the
 // autotunnel waits, so a wait that saw its VM's C2 client while the SCORCH
 // hook waited for canceled runs created a forward after the stopping hook had
-// dropped the experiment's forwards.
-func TestStopExperimentForwardsEndsAutotunnelWaitsFirst(t *testing.T) {
+// dropped the experiment's forwards. The hook now ends the autotunnels first.
+func TestStopExperimentForwardsEndsAutotunnelsFirst(t *testing.T) {
 	l := ft.Listener{Exp: "stopping", VM: "vm", DstHost: "127.0.0.1", DstPort: 22, Owner: "admin"}
 
 	forwardsMu.Lock()
-	originalForwards, originalEnd := forwards, endAutotunnelWaits
+	originalForwards, originalEnd := forwards, endExperimentAutotunnels
 	forwards = map[string]ft.Listener{l.ToKey(): l}
 	forwardsMu.Unlock()
 
@@ -99,7 +99,7 @@ func TestStopExperimentForwardsEndsAutotunnelWaitsFirst(t *testing.T) {
 		forwardsMu.Lock()
 		defer forwardsMu.Unlock()
 
-		forwards, endAutotunnelWaits = originalForwards, originalEnd
+		forwards, endExperimentAutotunnels = originalForwards, originalEnd
 	})
 
 	var (
@@ -107,7 +107,7 @@ func TestStopExperimentForwardsEndsAutotunnelWaitsFirst(t *testing.T) {
 		forwardAtEnded bool
 	)
 
-	endAutotunnelWaits = func(exp string) {
+	endExperimentAutotunnels = func(exp string) {
 		forwardsMu.Lock()
 		defer forwardsMu.Unlock()
 
@@ -123,7 +123,7 @@ func TestStopExperimentForwardsEndsAutotunnelWaitsFirst(t *testing.T) {
 
 	if len(ended) != 1 || ended[0] != "stopping" || !forwardAtEnded {
 		t.Errorf(
-			"autotunnel waits ended for %q, forward still there %t; want them ended for stopping first",
+			"autotunnels ended for %q, forward still there %t; want them ended for stopping first",
 			ended, forwardAtEnded,
 		)
 	}

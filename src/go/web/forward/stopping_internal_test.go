@@ -34,12 +34,13 @@ func (m stoppingMM) CreateTunnel(...mm.Option) error {
 // TestCreatePortForwardRefusesAnExperimentBeingStopped is a regression test:
 // the forward service could still hold an autotunnel the startup app handed
 // it before the stopping hook ended the waits, and created the forward and
-// its minimega tunnel after the hook had dropped the experiment's forwards.
+// its minimega tunnel after the hook had dropped the experiment's forwards. A
+// forward requested while the hook ends the autotunnels is refused too.
 func TestCreatePortForwardRefusesAnExperimentBeingStopped(t *testing.T) {
 	installExperimentStore(t, map[string]string{"stopping-exp": "2026-10-19T00:00:00Z"}, nil)
 
 	forwardsMu.Lock()
-	originalForwards, originalEnd, originalMM := forwards, endAutotunnelWaits, mm.DefaultMM
+	originalForwards, originalEnd, originalMM := forwards, endExperimentAutotunnels, mm.DefaultMM
 	forwards = make(map[string]ft.Listener)
 	mm.DefaultMM = stoppingMM{t: t} //nolint:reassign // install test double
 	forwardsMu.Unlock()
@@ -50,14 +51,14 @@ func TestCreatePortForwardRefusesAnExperimentBeingStopped(t *testing.T) {
 		forwardsMu.Lock()
 		defer forwardsMu.Unlock()
 
-		forwards, endAutotunnelWaits = originalForwards, originalEnd
+		forwards, endExperimentAutotunnels = originalForwards, originalEnd
 		mm.DefaultMM = originalMM //nolint:reassign // restore default
 	})
 
 	var during error
 
-	endAutotunnelWaits = func(exp string) {
-		// The service handles an autotunnel handed over before the waits ended.
+	endExperimentAutotunnels = func(exp string) {
+		// A forward requested while the hook ends the autotunnels.
 		during = createPortForward(exp, "vm", "8080", "", "22", "admin")
 	}
 
@@ -100,11 +101,11 @@ func TestStopOfAChangedRunEndsTheStoppingMark(t *testing.T) {
 	starts := map[string]string{name: "2026-10-19T00:00:00Z"}
 	installExperimentStore(t, starts, nil)
 
-	original := endAutotunnelWaits
-	endAutotunnelWaits = func(string) {}
+	original := endExperimentAutotunnels
+	endExperimentAutotunnels = func(string) {}
 
 	t.Cleanup(func() {
-		endAutotunnelWaits = original
+		endExperimentAutotunnels = original
 
 		experimentStopped(name)
 	})

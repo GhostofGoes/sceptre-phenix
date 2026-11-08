@@ -152,6 +152,7 @@ All notable changes to this project will be documented in this file.
 - **User Apps**: Query VMs only from post-start, outside dry runs.
 - **Startup Autotunnels**: Log when the autotunnel annotation cannot take effect.
 - **Startup Autotunnels**: End C2 waits at stop; skip dry runs.
+- **Startup Autotunnels**: `phenix ui` keeps every running experiment's autotunnels, CLI-started ones and those running when it starts too, waits for a VM's C2 client for as long as the experiment runs instead of 5 minutes, re-creates an autotunnel whose tunnel drops (guest reboot, restart, redeploy), adopts a tunnel an earlier `phenix ui` left open, and logs each step.
 - **Port Forwards**: Refuse forwards to an experiment being stopped.
 - **Linux Interface MTU**: Apply topology interface MTUs on Linux guests.
 - **Default App Order**: Run default apps in their documented order.

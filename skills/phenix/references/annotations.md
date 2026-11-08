@@ -23,7 +23,7 @@ reconfigure and start fail with `node <hostname>: annotation
 phenix/default-apps is "no", want true or false`. Unlike
 `phenix/startup-via-cc` below, an unrecognized string is an error, not true.
 
-## `phenix/startup-autotunnel` (`startup` app, `post-start` stage)
+## `phenix/startup-autotunnel` (`phenix ui`, while the experiment runs)
 
 A list of strings, each describing a port forward to auto-create for the node
 once it boots, e.g. `["8080", "8080:9090", "8080:10.0.0.5:9090"]`. Each entry
@@ -37,16 +37,34 @@ is `sport[:dhost]:dport`:
 
 Malformed entries are logged and skipped.
 
-The forwards are created by `phenix ui`, owned by the user `bot`, and only for
-experiments `phenix ui` starts itself (from the web UI or the REST API). Each
-non-VNC forward waits up to five minutes for the node's C2 client to register
-under the node's hostname, and is logged and skipped if it does not; a stop of
-the experiment ends the wait. Dry runs get no autotunnels. An
-experiment started any other way, such as with `phenix experiment start`, gets
-no autotunnels: the startup app logs the warning `startup autotunnel not
-created: autotunnels are created only for experiments started through phenix
-ui`, naming the experiment, the VM and the entry. Create those forwards from
-the UI or with `POST /api/v1/experiments/{exp}/vms/{name}/forwards` instead.
+The forwards are created and kept by `phenix ui`, owned by the user `bot`, for
+every running experiment whose topology carries the annotation, whichever
+process started it: `phenix ui` reads the running experiments from the store
+every 5 seconds (`src/go/web/forward/autotunnel.go`). The startup app only logs
+each entry at `post-start` (`startup autotunnel requested: phenix ui creates it
+once the VM's C2 client registers`), and each entry it ignores (`invalid
+phenix/startup-autotunnel annotation`): one that does not parse, has a
+non-numeric port, or repeats an earlier entry's VM, destination host and
+destination port. No autotunnel is created while no `phenix ui` runs.
+
+Each non-VNC forward waits for the node's C2 client to register under the
+node's hostname for as long as the experiment runs, so a VM delayed until a
+user starts it, or one that boots slowly, still gets it. `phenix ui` logs
+`startup autotunnel waiting for the C2 client` when the wait begins and
+`startup autotunnel still waiting for the C2 client` every 5 minutes after,
+and checks every 15 seconds instead of every pass once the wait passes 5
+minutes. A forward whose minimega tunnel goes away (a guest reboot, `phenix vm
+restart`, a redeploy or restored snapshot, anything that reconnects the VM's
+miniccc client) is dropped (`port forward dropped: its minimega tunnel is
+gone`) and created again once the C2 client is back (`startup autotunnel
+down`, `re-creating`, `created ... recreated=true`). After a `phenix ui`
+restart it adopts the minimega tunnel the earlier process left open. A stop
+ends the waits and drops the forwards (`startup autotunnel removed: the
+experiment stopped`, or `not created: the experiment stopped before the C2
+client registered`). Dry runs get no autotunnels. A VM shut down and started
+again from QUIT gets no C2 client back from minimega, so its autotunnels wait
+until the experiment stops. Create other forwards from the UI or with `POST
+/api/v1/experiments/{exp}/vms/{name}/forwards`.
 
 ## `phenix/startup-via-cc` (`startup` app, `pre-start` stage)
 

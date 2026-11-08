@@ -28,19 +28,6 @@ type Action string
 // AppFactory is a function that returns a new app struct.
 type AppFactory func() App
 
-// CreateTunnelTopic is the pubsub topic the startup app publishes CreateTunnel
-// requests to. Only phenix ui subscribes to it.
-const CreateTunnelTopic = "create-tunnel"
-
-type CreateTunnel struct {
-	Experiment string
-	VM         string
-	Sport      string
-	Dhost      string
-	Dport      string
-	User       string
-}
-
 type TriggerPublication struct {
 	Experiment string
 	Verb       string
