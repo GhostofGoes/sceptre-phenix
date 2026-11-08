@@ -12,7 +12,7 @@ on:
   # tests) and the E2E setup reach the runners; src/js, the docs and the
   # examples do not. The nightly schedule runs regardless.
   push:
-    branches: ['main', 'ci-e2e-minimega']
+    branches: ['main']
     paths:
       - 'src/go/**'
       - '.github/e2e/**'
