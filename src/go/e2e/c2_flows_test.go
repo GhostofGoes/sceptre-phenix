@@ -76,7 +76,7 @@ const (
 	// no client.
 	c2fNotActiveTimeout = 8 * time.Second
 
-	// c2fReaperWait covers two ticks of phenix's 10 s port forward reaper
+	// c2fReaperWait covers several ticks of phenix's 5 s port forward reaper
 	// (web/forward/forward.go forwardTickerInterval).
 	c2fReaperWait = 25 * time.Second
 
@@ -94,6 +94,11 @@ const (
 	// autotunnel must exist.
 	c2fAutotunnelWait = time.Minute
 
+	// c2fAutotunnelProgress is how often phenix ui logs that a startup
+	// autotunnel still waits for its VM's C2 client
+	// (web/forward/autotunnel.go autotunnelProgressInterval).
+	c2fAutotunnelProgress = phenixmm.DefaultC2Timeout
+
 	// c2fPowerCycleWatch is how long the power-cycle characterization waits
 	// for C2 to return after a VM is started again from QUIT; a fresh boot
 	// registers in about 95 s.
@@ -103,7 +108,7 @@ const (
 	c2fTopologyCommand = `exec sh -c 'echo cmd-ok > /tmp/e2e-cmd; cat /tmp/e2e-cmd'`
 
 	c2fForwardOwnerREST = "global-admin" // the user phenix ui assigns without authentication
-	c2fForwardOwnerBot  = "bot"          // the owner of startup autotunnels (app/startup.go)
+	c2fForwardOwnerBot  = "bot"          // the owner of startup autotunnels (app/autotunnel.go)
 	c2fLoopback         = "127.0.0.1"
 )
 
@@ -146,7 +151,7 @@ type c2fRESTVM struct {
 //   - c2d: inject_partition 0, so its startup scripts arrive over C2;
 //   - c2v: the phenix/startup-via-cc annotation, same delivery;
 //   - h1: a hollow VM with no C2 agent, and a startup autotunnel that
-//     phenix ui gives up on.
+//     phenix ui keeps waiting for.
 //
 // c2b, c2p, c2d and c2v have a `c2` delay on c2a, so c2a boots alone.
 func TestC2Flows(t *testing.T) {
@@ -175,14 +180,12 @@ func TestC2Flows(t *testing.T) {
 	apiOK(t, http.MethodPost, "/experiments/"+exp.name+"/start", nil, nil)
 	exp.waitRunning(time.Minute, "c2a", "h1")
 
-	// phenix gives up on c2a's startup autotunnel (C2-07a) when c2a's cc
-	// client has not registered DefaultC2Timeout (5 min, util/mm/option.go)
-	// after PostStart, and five guests booting together on the runner's 4
-	// vCPUs took about 4.5 min. So the other guests wait in BUILDING for c2a
-	// (c2fAfterC2a): phenix starts them at its first C2 check after c2a
-	// registered, and runs PostStart, and with it the autotunnel's wait, only
-	// after that (handleDelayedVMs, api/experiment/experiment.go). Nothing
-	// they are checked for has a deadline.
+	// Five guests booting together on the runner's 4 vCPUs took about
+	// 4.5 min, so the other guests wait in BUILDING for c2a (c2fAfterC2a):
+	// phenix starts them at its first C2 check after c2a registered, and runs
+	// PostStart only after that (handleDelayedVMs,
+	// api/experiment/experiment.go). Nothing they are checked for has a
+	// deadline.
 	later := []string{"c2b", "c2p", "c2d", "c2v"}
 
 	env := &c2fEnv{exp: exp, uiLog: uiLog}
@@ -253,38 +256,47 @@ func TestC2Flows(t *testing.T) {
 	t.Run("C2-05 cc mount through REST", func(t *testing.T) { c2fCheckMountREST(t, env) })
 	t.Run("C2-06e port forward survives the reaper", func(t *testing.T) { c2fCheckForwardSurvives(t, env) })
 	t.Run("C2-06h REST port forward delete", func(t *testing.T) { c2fCheckForwardDelete(t, env) })
-	t.Run("C2-06 the reaper drops a forward whose tunnel is gone", func(t *testing.T) { c2fCheckReaperDrops(t, env, "c2a") })
-	t.Run("C2-07c startup autotunnel waits for C2, then gives up", func(t *testing.T) {
-		c2fCheckAutotunnelGivesUp(t, env, "h1")
+	t.Run("C2-06 the reaper drops a forward whose tunnel is gone, and phenix ui re-creates the autotunnel", func(t *testing.T) {
+		c2fCheckReaperDrops(t, env, "c2a")
+	})
+	t.Run("C2-07c startup autotunnel keeps waiting for C2", func(t *testing.T) {
+		c2fCheckAutotunnelKeepsWaiting(t, env, "h1")
 	})
 	t.Run("C2-05f stop cleans up mounts, forwards and the namespace", func(t *testing.T) { c2fCheckStop(t, env) })
 }
 
 // TestC2CLIStartAndReboot covers what only a CLI-started experiment and a
-// power cycle show: that a CLI start warns and creates no startup autotunnel,
-// C2 across a guest reboot, and C2 after a VM goes QUIT and is started again.
+// power cycle show: that phenix ui creates the startup autotunnels of a CLI
+// start, C2 and the autotunnel across a guest reboot, and C2 after a VM goes
+// QUIT and is started again.
 func TestC2CLIStartAndReboot(t *testing.T) {
 	requireImage(t, cfg.guest)
 
 	c2fCleanupHost(t, c2fCLIExp)
 
-	exp := newExperiment(t, c2fCLIExp, topology(
-		c2fGuest("c2a", "10.41.0.1", `
+	autotunnel := `
     annotations:
-      phenix/startup-autotunnel: ["8080"]`, ""),
-		c2fGuest("c2b", "10.41.0.2", "", ""),
+      phenix/startup-autotunnel: ["8080"]`
+
+	exp := newExperiment(t, c2fCLIExp, topology(
+		c2fGuest("c2a", "10.41.0.1", autotunnel, ""),
+		c2fGuest("c2b", "10.41.0.2", autotunnel, ""),
 	), "")
 
-	// Should a tunnel to c2a exist after all, close it: the CLI stop in the
-	// teardown does not run the stop hook of the phenix ui holding its forward.
-	t.Cleanup(func() { c2fCloseTunnels(t, exp.name, "c2a") })
+	// phenix ui holds the autotunnels, and only a stop in phenix ui runs the
+	// stopping hook that drops them before the namespace is cleared.
+	delayStopRESTOnCleanup(t, exp)
+
+	// Runs first; see TestC2Flows.
+	t.Cleanup(func() { c2fCloseTunnels(t, exp.name, "c2a", "c2b") })
 
 	start := time.Now()
+	uiLog := fileSize(c2fUILog())
 
 	startOut := exp.start()
 	exp.waitRunning(time.Minute, "c2a", "c2b")
 
-	env := &c2fEnv{exp: exp, startOut: startOut}
+	env := &c2fEnv{exp: exp, uiLog: uiLog, startOut: startOut}
 
 	if !t.Run("guests register with C2", func(t *testing.T) {
 		env.uuids, env.hist = c2fWaitClients(t, exp.name, map[string]string{"c2a": "c2a", "c2b": "c2b"}, guestBootTimeout)
@@ -296,9 +308,12 @@ func TestC2CLIStartAndReboot(t *testing.T) {
 
 	var bootID string
 
-	t.Run("C2-08a vm restart resets the guest in place", func(t *testing.T) { bootID = c2fCheckReset(t, env, "c2b") })
 	t.Run("C2-07b startup autotunnel of a CLI-started experiment", func(t *testing.T) { c2fCheckCLIAutotunnel(t, env) })
+	t.Run("C2-08a vm restart resets the guest in place", func(t *testing.T) { bootID = c2fCheckReset(t, env, "c2b") })
 	t.Run("C2-08a C2 survives a guest reboot", func(t *testing.T) { c2fCheckRebootC2(t, env, "c2b", bootID) })
+	t.Run("C2-09 startup autotunnel is re-created after a guest reboot", func(t *testing.T) {
+		c2fCheckAutotunnelRecreated(t, env, "c2b", env.uiLog)
+	})
 	t.Run("C2-08b C2 after shutdown and start", func(t *testing.T) {
 		c2fCharacterizePowerCycle(t, env, "c2b")
 	})
@@ -330,8 +345,13 @@ func TestC2AutotunnelStopBeforeRegistration(t *testing.T) {
 		return strings.Contains(log, "'startup' default app (post-start)"), "not logged yet"
 	})
 
-	// The wait asks minimega every 2 s or so; let it ask a few times.
-	time.Sleep(5 * time.Second)
+	// phenix ui checks the VM's C2 client every 5 s; let it check a few times.
+	eventually(t, time.Minute, time.Second, "phenix ui to wait for the C2 client", func() (bool, string) {
+		log := delayLogSince(t, delayUILog(), uiLog)
+
+		return strings.Contains(log, "startup autotunnel waiting for the C2 client"), "not logged yet"
+	})
+	time.Sleep(10 * time.Second)
 
 	apiOK(t, http.MethodPost, "/experiments/"+name+"/stop", nil, nil)
 
@@ -342,8 +362,9 @@ func TestC2AutotunnelStopBeforeRegistration(t *testing.T) {
 			"not logged yet"
 	})
 
-	// The wait would otherwise go on for up to 5 minutes (the C2 timeout),
-	// asking minimega about the VM and so creating its namespace again.
+	// The wait would otherwise go on for as long as phenix ui thinks the
+	// experiment runs, asking minimega about the VM and so creating its
+	// namespace again.
 	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(time.Second) {
 		if ns, ok := mmNamespaces(t)[name]; ok {
 			t.Fatalf("minimega has namespace %s again after the stop: %v", name, ns)
@@ -1362,40 +1383,49 @@ func c2fCheckAutotunnel(t *testing.T, env *c2fEnv, vm string) {
 	c2fWaitFetch(t, port, "e2e-"+vm)
 }
 
-// c2fCheckAutotunnelGivesUp checks the startup autotunnel of vm, which has no
-// C2 agent: phenix ui waits DefaultC2Timeout from PostStart for its cc client,
-// then logs that it gave up and creates no forward. It must run before the
-// stop, which ends the wait before it can give up.
-func c2fCheckAutotunnelGivesUp(t *testing.T, env *c2fEnv, vm string) {
+// c2fCheckAutotunnelKeepsWaiting checks the startup autotunnel of vm, which
+// has no C2 agent: phenix ui logs that it waits for the VM's cc client, and,
+// c2fAutotunnelProgress later, that it still waits, rather than giving up as
+// it did after DefaultC2Timeout, and creates no forward. A VM delayed until a
+// user starts it registers whenever that is. It must run before the stop,
+// which ends the wait.
+func c2fCheckAutotunnelKeepsWaiting(t *testing.T, env *c2fEnv, vm string) {
 	t.Helper()
 
 	const (
-		postStart = "'startup' default app (post-start)"
-		gaveUp    = "startup autotunnel not created: waiting for the C2 client"
-		// slack covers the log line of PostStart, written once it returned,
-		// against the wait it started.
-		slack = 5 * time.Second
+		waiting = "startup autotunnel waiting for the C2 client"
+		still   = "startup autotunnel still waiting for the C2 client"
+		// slack covers phenix ui's 5 s passes.
+		slack = 10 * time.Second
 	)
 
 	ns := env.exp.name
 
-	started := c2fLogLines(c2fUILog(), env.uiLog, postStart)
-	if len(started) == 0 {
-		t.Fatalf("the phenix ui log has no %q line since %s started", postStart, ns)
-	}
+	var first string
 
-	ranAt, err := c2fLogTime(started[0])
+	eventually(t, time.Minute, 2*time.Second, "phenix ui to wait for the C2 client of "+vm, func() (bool, string) {
+		lines := c2fLogLines(c2fUILog(), env.uiLog, waiting, "exp="+ns, "vm="+vm)
+		if len(lines) == 0 {
+			return false, "not logged yet"
+		}
+
+		first = lines[0]
+
+		return true, ""
+	})
+
+	began, err := c2fLogTime(first)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var line string
 
-	eventually(t, max(time.Until(ranAt.Add(phenixmm.DefaultC2Timeout+time.Minute)), time.Second), 2*time.Second,
-		"phenix ui to give up on the startup autotunnel of "+vm, func() (bool, string) {
-			lines := c2fLogLines(c2fUILog(), env.uiLog, gaveUp, "exp="+ns, "vm="+vm)
+	eventually(t, max(time.Until(began.Add(c2fAutotunnelProgress+time.Minute)), time.Second), 2*time.Second,
+		"phenix ui to log that it still waits for the C2 client of "+vm, func() (bool, string) {
+			lines := c2fLogLines(c2fUILog(), env.uiLog, still, "exp="+ns, "vm="+vm)
 			if len(lines) == 0 {
-				return false, fmt.Sprintf("PostStart ran at %s", ranAt.Format(time.TimeOnly))
+				return false, "began waiting at " + began.Format(time.TimeOnly)
 			}
 
 			line = lines[0]
@@ -1408,9 +1438,13 @@ func c2fCheckAutotunnelGivesUp(t *testing.T, env *c2fEnv, vm string) {
 		t.Fatal(err)
 	}
 
-	if waited := at.Sub(ranAt); waited < phenixmm.DefaultC2Timeout-slack {
-		t.Errorf("phenix ui gave up on the autotunnel of %s %v after PostStart, want its %v C2 wait:\n%s",
-			vm, waited.Round(time.Second), phenixmm.DefaultC2Timeout, line)
+	if waited := at.Sub(began); waited < c2fAutotunnelProgress-slack {
+		t.Errorf("phenix ui logged that it still waits for %s %v after it began, want %v:\n%s",
+			vm, waited.Round(time.Second), c2fAutotunnelProgress, line)
+	}
+
+	if lines := c2fLogLines(c2fUILog(), env.uiLog, "startup autotunnel not created", "exp="+ns, "vm="+vm); len(lines) != 0 {
+		t.Errorf("phenix ui gave up on the startup autotunnel of %s:\n%s", vm, strings.Join(lines, "\n"))
 	}
 
 	// minimega cannot list the tunnels of a VM without a cc client (ron
@@ -1492,13 +1526,15 @@ func c2fCheckForwardDelete(t *testing.T, env *c2fEnv) {
 }
 
 // c2fCheckReaperDrops closes vm's autotunnel in minimega behind phenix's
-// back: phenix reaps the forward before it lists forwards.
+// back, as a guest reboot does: phenix's reaper drops the forward, and phenix
+// ui creates the autotunnel again, which carries data again.
 func c2fCheckReaperDrops(t *testing.T, env *c2fEnv, vm string) {
 	t.Helper()
 
 	var (
-		ns = env.exp.name
-		id string
+		ns     = env.exp.name
+		id     string
+		offset = fileSize(c2fUILog())
 	)
 
 	for _, row := range mmTable(t, ns, "cc tunnel list "+vm) {
@@ -1513,42 +1549,60 @@ func c2fCheckReaperDrops(t *testing.T, env *c2fEnv, vm string) {
 
 	mm(t, ns, fmt.Sprintf("cc tunnel close %s %s", vm, id))
 
-	for _, l := range c2fForwards(t, ns, vm) {
-		if l.DstPort == c2fGuestPort {
-			t.Errorf("phenix still lists %+v after its minimega tunnel was closed", l)
-		}
-	}
+	// Listing the forwards reaps them, but phenix ui may have created the
+	// autotunnel again by then, so its log tells.
+	_ = c2fForwards(t, ns, vm)
+
+	eventually(t, c2fReaperWait, time.Second, "phenix to drop the forward to "+vm, func() (bool, string) {
+		lines := c2fLogLines(c2fUILog(), offset, "port forward dropped: its minimega tunnel is gone",
+			"exp="+ns, "vm="+vm, "owner="+c2fForwardOwnerBot)
+
+		return len(lines) > 0, "not logged yet"
+	})
+
+	c2fCheckAutotunnelRecreated(t, env, vm, offset)
 }
 
-// c2fCheckCLIAutotunnel checks the documented limit of startup autotunnels
-// (skills/phenix/references/annotations.md): only phenix ui creates port
-// forwards, so `phenix experiment start` warns that it creates none
-// (app/startup.go Startup.PostStart) and c2a gets no tunnel, while the REST
-// start of TestC2Flows gets its autotunnel (C2-07a). No process can create the
-// tunnel later, so this needs no wait.
-func c2fCheckCLIAutotunnel(t *testing.T, env *c2fEnv) {
+// c2fCheckAutotunnelRecreated checks that phenix ui logged, since the ui log
+// offset, that it created vm's startup autotunnel again, and that the new
+// tunnel carries data from the guest's server, which it restarts.
+func c2fCheckAutotunnelRecreated(t *testing.T, env *c2fEnv, vm string, offset int64) {
 	t.Helper()
-
-	const warning = "startup autotunnel not created: autotunnels are created only for experiments started through phenix ui"
 
 	ns := env.exp.name
 
-	warned := false
+	eventually(t, c2fAutotunnelWait, 2*time.Second, "phenix ui to create the autotunnel to "+vm+" again", func() (bool, string) {
+		lines := c2fLogLines(c2fUILog(), offset, "startup autotunnel created", "exp="+ns, "vm="+vm, "recreated=true")
 
-	for line := range strings.SplitSeq(env.startOut, "\n") {
-		warned = warned || strings.Contains(line, warning) && strings.Contains(line, "vm=c2a")
-	}
+		return len(lines) > 0, "not logged yet"
+	})
 
-	if !warned {
-		t.Errorf("phenix experiment start does not warn that c2a's startup autotunnel is not created:\n%s", env.startOut)
-	}
+	c2fStartServer(t, ns, vm)
+	c2fCheckAutotunnel(t, env, vm)
+}
 
-	if _, ok := c2fFindTunnel(t, ns, "c2a", c2fGuestPort); ok {
-		t.Errorf("a CLI-started experiment got a tunnel to c2a:%d: %v", c2fGuestPort, mmTable(t, ns, "cc tunnel list c2a"))
-	}
+// c2fCheckCLIAutotunnel checks the startup autotunnels of a CLI-started
+// experiment: `phenix experiment start` logs each as requested
+// (app/startup.go Startup.PostStart), and phenix ui, which finds them in the
+// store, creates them once each VM's C2 client registers.
+func c2fCheckCLIAutotunnel(t *testing.T, env *c2fEnv) {
+	t.Helper()
 
-	if got := c2fForwards(t, ns, "c2a"); len(got) != 0 {
-		t.Errorf("phenix ui lists forwards of c2a in a CLI-started experiment: %+v", got)
+	const requested = "startup autotunnel requested: phenix ui creates it once the VM's C2 client registers"
+
+	for _, vm := range []string{"c2a", "c2b"} {
+		logged := false
+
+		for line := range strings.SplitSeq(env.startOut, "\n") {
+			logged = logged || strings.Contains(line, requested) && strings.Contains(line, "vm="+vm)
+		}
+
+		if !logged {
+			t.Errorf("phenix experiment start does not log the startup autotunnel of %s:\n%s", vm, env.startOut)
+		}
+
+		c2fStartServer(t, env.exp.name, vm)
+		c2fCheckAutotunnel(t, env, vm)
 	}
 }
 
@@ -1886,7 +1940,7 @@ func c2fCheckStop(t *testing.T, env *c2fEnv) {
 
 	// And a port forward: the stop must drop it before it clears the
 	// namespace, since phenix ui's reaper asks minimega about the tunnels of
-	// the forwards it holds every 10 s, which would create the namespace again.
+	// the forwards it holds every 5 s, which would create the namespace again.
 	ws := recordWS(t)
 	q := url.Values{"src": {"9002"}, "host": {c2fLoopback}, "dst": {strconv.Itoa(c2fGuestPort)}}
 
@@ -2208,11 +2262,11 @@ func c2fCleanupHost(t *testing.T, exp string) {
 
 // c2fCloseTunnels closes every minimega tunnel of the given VMs, then lists
 // their forwards through phenix ui, which reaps each forward whose tunnel is
-// gone. phenix ui then holds no forward whose 10 s reaper could query, and so
-// re-create, the namespace while a CLI stop clears it: the CLI drops forwards
+// gone, for a teardown that falls back to a CLI stop: the CLI drops forwards
 // only in its own process, and the reaper leaves the experiment alone only
-// once the stop is stored. It does nothing once the namespace is gone and
-// never fails the test.
+// once the stop is stored. phenix ui creates startup autotunnels again at its
+// next pass, so only a REST stop is sure to leave the namespace cleared. It
+// does nothing once the namespace is gone and never fails the test.
 func c2fCloseTunnels(t *testing.T, ns string, vms ...string) {
 	t.Helper()
 
