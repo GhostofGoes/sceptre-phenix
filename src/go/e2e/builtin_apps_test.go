@@ -2317,8 +2317,19 @@ func builtinCheckDHCP(t *testing.T, name string) {
 	if !resolves(got["dns"]) {
 		eventually(t, time.Minute, 5*time.Second, "rd to resolve ra.e2e.local through rtr's DNS", func() (bool, string) {
 			dns := builtinGuest(t, name, "rd", builtinCheck{"dns", "getent hosts ra.e2e.local"})["dns"]
+			if resolves(dns) {
+				return true, ""
+			}
 
-			return resolves(dns), fmt.Sprintf("getent hosts ra.e2e.local = %q, want 10.10.0.1", dns)
+			// The resolver setup decides where dhclient puts the leased DNS
+			// server: /etc/resolv.conf, or systemd-resolved when it is enabled.
+			diag := builtinGuest(t, name, "rd", builtinCheck{"resolver", strings.Join([]string{
+				"ls -l /etc/resolv.conf", "cat /etc/resolv.conf",
+				"systemctl is-enabled systemd-resolved", "systemctl is-active systemd-resolved",
+				"resolvectl dns", "grep ^hosts: /etc/nsswitch.conf",
+			}, " 2>&1; ") + " 2>&1"})["resolver"]
+
+			return false, fmt.Sprintf("getent hosts ra.e2e.local = %q, want 10.10.0.1; resolver: %s", dns, diag)
 		})
 	}
 
