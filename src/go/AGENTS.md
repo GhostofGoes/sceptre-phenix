@@ -95,4 +95,7 @@ Follow the Go wiki [TestComments](https://go.dev/wiki/TestComments) in Go tests:
 `.github/workflows/ci.yml` generates artifacts, runs `make check`, executes
 race-enabled tests, runs `make deadcode`, and checks the Go example in
 `examples/go/`. Go changes can also trigger `.github/workflows/e2e.yml`
-because browser smoke tests build and run the backend. Keep workflow paths, Go/tool versions, and local commands aligned.
+because browser smoke tests build and run the backend, and
+`.github/workflows/e2e-minimega.yml`, which runs the `e2e` build-tagged tests
+in `e2e/` against a real minimega; `go test ./...` does not build them. Keep
+workflow paths, Go/tool versions, and local commands aligned.

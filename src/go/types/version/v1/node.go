@@ -1,17 +1,30 @@
 package v1
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	ifaces "phenix/types/interfaces"
+	"phenix/util/mm"
+	"phenix/util/mm/mmcli"
 	"phenix/util/plog"
 )
+
+// DoNotBootReasonAnnotation records why the startup app set a node's
+// do_not_boot, so the flag can be cleared when the reason goes away. A
+// do_not_boot without it was set by the user and is kept.
+const DoNotBootReasonAnnotation = "phenix/do-not-boot-reason"
 
 type Node struct {
 	AnnotationsF map[string]any    `json:"annotations" mapstructure:"annotations" structs:"annotations" yaml:"annotations"`
@@ -348,22 +361,28 @@ func (n Node) Delayed() string {
 		return ""
 	}
 
-	if n.DelayF.TimerF != "" {
-		return "timer:" + n.DelayF.TimerF
-	}
-
+	// Report the delay that experiment start enforces when several are set:
+	// a user delay wins over a C2 delay, which wins over a timer.
 	if n.DelayF.UserF {
 		return "user"
 	}
 
-	if len(n.DelayF.C2F) > 0 {
-		hosts := make([]string, len(n.DelayF.C2F))
+	// Experiment start skips an empty C2 hostname, so a C2 delay of empty
+	// hostnames alone leaves the timer, if any, in force.
+	var hosts []string
 
-		for i, host := range n.DelayF.C2F {
-			hosts[i] = host.Hostname()
+	for _, host := range n.DelayF.C2F {
+		if host.Hostname() != "" {
+			hosts = append(hosts, host.Hostname())
 		}
+	}
 
+	if len(hosts) > 0 {
 		return "cc:" + strings.Join(hosts, ",")
+	}
+
+	if n.DelayF.TimerF != "" {
+		return "timer:" + n.DelayF.TimerF
 	}
 
 	return ""
@@ -614,6 +633,37 @@ func (n Node) validate() error {
 		)
 	}
 
+	if n.DelayF != nil && n.DelayF.TimerF != "" {
+		// Timer() reads an unparsable duration as 0, which would start the
+		// VM right away instead of delaying it.
+		if d, err := time.ParseDuration(n.DelayF.TimerF); err != nil || d < 0 {
+			return fmt.Errorf(
+				"delay timer %q is not a valid duration; use a number with a unit, such as 30s or 5m",
+				n.DelayF.TimerF,
+			)
+		}
+	}
+
+	if err := CheckInjections(n.Injections()); err != nil {
+		return err
+	}
+
+	if err := CheckDeletions(n.Deletions()); err != nil {
+		return err
+	}
+
+	if err := CheckAdvanced(n.AdvancedF); err != nil {
+		return err
+	}
+
+	if err := CheckCommands(n.CommandsF); err != nil {
+		return err
+	}
+
+	if err := n.checkScriptWords(); err != nil {
+		return err
+	}
+
 	if n.NetworkF == nil {
 		return nil
 	}
@@ -751,42 +801,548 @@ func (c C2Delay) UseUUID() bool {
 	return c.UseUUIDF
 }
 
-func (n Node) FileInjects(baseDir string) string {
-	injects := make([]string, len(n.InjectionsF))
+// FileInjects returns the injections of the node as the src:dst pairs of the
+// minimega script's `disk inject ... files` line. It refuses an injection
+// without a source, naming the node, which fails the script's rendering.
+func (n Node) FileInjects(baseDir string) (string, error) {
+	pairs, err := InjectPairs(baseDir, n.Injections())
+	if err != nil {
+		return "", fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
 
-	for i, inject := range n.InjectionsF {
-		if strings.HasPrefix(inject.SrcF, "/") {
-			injects[i] = fmt.Sprintf(`"%s":"%s"`, inject.SrcF, inject.DstF)
-		} else {
-			injects[i] = fmt.Sprintf(`"%s/%s":"%s"`, baseDir, inject.SrcF, inject.DstF)
+	return strings.Join(pairs, " "), nil
+}
+
+// CheckInjections refuses a null injection and one that names no source. A
+// relative source is resolved against the experiment's base directory, so an
+// empty one, such as the null src of an app's output, would be rendered as
+// that directory, and minimega would copy all of it into the VM. It also
+// refuses a source or destination minimega's disk inject would get wrong (see
+// checkDiskPath).
+func CheckInjections(injections []ifaces.NodeInjection) error {
+	for i, inject := range injections {
+		if j, ok := inject.(*Injection); inject == nil || (ok && j == nil) {
+			return fmt.Errorf("injection %d is null", i+1)
 		}
 
-		if inject.PermissionsF != "" && len(inject.PermissionsF) <= 4 {
-			if perms, err := strconv.ParseInt(inject.PermissionsF, 8, 64); err == nil {
-				// Update file permissions on local disk before it gets injected into
-				// disk image.
-				_ = os.Chmod(inject.SrcF, os.FileMode(perms)) //nolint:gosec // integer overflow conversion int64 -> uint32
+		if inject.Src() == "" {
+			return fmt.Errorf("injection to %q has no source", inject.Dst())
+		}
+
+		if err := checkDiskPath("source", inject.Src(), ':', false); err != nil {
+			return fmt.Errorf("injection to %q: %w", inject.Dst(), err)
+		}
+
+		if err := checkDiskPath("destination", inject.Dst(), ':', true); err != nil {
+			return fmt.Errorf("injection of %q: %w", inject.Src(), err)
+		}
+
+		if perms := inject.Permissions(); perms != "" {
+			if _, err := injectionMode(perms); err != nil {
+				return fmt.Errorf("injection to %q: %w", inject.Dst(), err)
 			}
 		}
 	}
 
-	return strings.Join(injects, " ")
+	return nil
 }
 
-func (n Node) FileDeletions() string {
+// CheckDeletions refuses a null deletion, one that names no path, which
+// minimega would read as the whole disk partition, and a path minimega's disk
+// inject would get wrong (see checkDiskPath).
+func CheckDeletions(deletions []ifaces.NodeDeletion) error {
+	for i, del := range deletions {
+		if d, ok := del.(*Deletion); del == nil || (ok && d == nil) {
+			return fmt.Errorf("deletion %d is null", i+1)
+		}
+
+		if del.Path() == "" {
+			return fmt.Errorf("deletion %d has no path", i+1)
+		}
+
+		if err := checkDiskPath("deletion path", del.Path(), ',', true); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkDiskPath refuses a path of an injection or a deletion that minimega's
+// `disk inject` would not get as written: one with a control character, which
+// could also end the line of the minimega script; with a '$', which minimega
+// expands from its own environment; or with sep, where minimega splits its
+// argument: at the ':' between an injection's source and destination, and at
+// the ',' between deletions. A path in the VM must not contain a ".."
+// element: minimega joins it to where it mounted the VM's disk on the host,
+// as root, so the path could reach the host's own files.
+func checkDiskPath(kind, path string, sep rune, inVM bool) error {
+	switch {
+	case strings.ContainsFunc(path, unicode.IsControl):
+		return fmt.Errorf("%s %q contains a control character", kind, path)
+	case strings.ContainsRune(path, '$'):
+		return fmt.Errorf("%s %q contains '$', which minimega expands", kind, path)
+	case strings.ContainsRune(path, sep):
+		return fmt.Errorf("%s %q contains %q, where minimega splits its disk inject argument", kind, path, sep)
+	case inVM && slices.Contains(strings.Split(path, "/"), ".."):
+		return fmt.Errorf("%s %q contains '..', which would leave the VM's disk", kind, path)
+	}
+
+	return nil
+}
+
+// InjectPairs returns injections as the quoted src:dst pairs of a minimega
+// `disk inject ... files` command, the same for the start-time script and for
+// a redeploy that replicates injections. A relative source is relative to
+// baseDir, the experiment's base directory. An injection with permissions
+// gets a source with them (see injectionSource), since minimega copies the
+// source's mode. It refuses the injections CheckInjections refuses, and two
+// that give one source in baseDir different permissions (see sourceModes).
+func InjectPairs(baseDir string, injections []ifaces.NodeInjection) ([]string, error) {
+	if err := CheckInjections(injections); err != nil {
+		return nil, err
+	}
+
+	pairs := make([]string, len(injections))
+	modes := make(sourceModes)
+
+	for i, inject := range injections {
+		src := injectionPath(baseDir, inject.Src())
+
+		if perms := inject.Permissions(); perms != "" {
+			mode, err := injectionMode(perms)
+			if err != nil {
+				return nil, fmt.Errorf("injection to %q: %w", inject.Dst(), err)
+			}
+
+			if err := modes.claim(baseDir, src, mode, fmt.Sprintf("the injection to %q", inject.Dst())); err != nil {
+				return nil, err
+			}
+
+			src, err = injectionSource(baseDir, src, mode)
+			if err != nil {
+				return nil, fmt.Errorf("injection to %q: %w", inject.Dst(), err)
+			}
+		}
+
+		pairs[i] = `"` + mmcli.Escape(src) + `":"` + mmcli.Escape(inject.Dst()) + `"`
+	}
+
+	return pairs, nil
+}
+
+// CheckInjectionModes refuses injections into the nodes the start-time
+// minimega script injects into that give one source in the experiment's base
+// directory, baseDir, different permissions: phenix sets them on that file
+// itself as it renders the script, and minimega injects into every node once
+// the script is rendered, so each node would get the mode set last.
+// Injections InjectPairs refuses are left for it to report.
+func CheckInjectionModes(baseDir string, nodes []ifaces.NodeSpec) error {
+	modes := make(sourceModes)
+
+	for _, node := range nodes {
+		if !scriptInjectsInto(node) {
+			continue
+		}
+
+		for _, inject := range node.Injections() {
+			if j, ok := inject.(*Injection); inject == nil || (ok && j == nil) || inject.Permissions() == "" {
+				continue
+			}
+
+			mode, err := injectionMode(inject.Permissions())
+			if err != nil {
+				continue
+			}
+
+			what := fmt.Sprintf("node %s's injection to %q", node.General().Hostname(), inject.Dst())
+
+			if err := modes.claim(baseDir, injectionPath(baseDir, inject.Src()), mode, what); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// scriptInjectsInto reports whether the start-time minimega script injects
+// files into node: a node minimega launches from a snapshot of its first
+// drive, with an inject partition.
+func scriptInjectsInto(node ifaces.NodeSpec) bool {
+	if n, ok := node.(*Node); node == nil || (ok && n == nil) || node.External() {
+		return false
+	}
+
+	if dnb := node.General().DoNotBoot(); dnb != nil && *dnb {
+		return false
+	}
+
+	if snapshot := node.General().Snapshot(); snapshot == nil || !*snapshot {
+		return false
+	}
+
+	drives := node.Hardware().Drives()
+	if len(drives) == 0 {
+		return false
+	}
+
+	if d, ok := drives[0].(*Drive); drives[0] == nil || (ok && d == nil) {
+		return false
+	}
+
+	part := drives[0].InjectPartition()
+
+	return part == nil || *part != 0
+}
+
+// injectionPath returns the path of an injection's source: a relative one is
+// relative to baseDir, the experiment's base directory.
+func injectionPath(baseDir, src string) string {
+	if !strings.HasPrefix(src, "/") {
+		return baseDir + "/" + src
+	}
+
+	return src
+}
+
+// sourceModes records, by resolved path, the permissions injections give the
+// sources in the experiment's base directory. phenix sets them on such a
+// source itself (see injectionSource), so two injections that give one source
+// different permissions would both inject it with the mode set last.
+type sourceModes map[string]sourceMode
+
+type sourceMode struct {
+	mode os.FileMode
+	what string // the injection, such as `the injection to "/etc/x"`
+}
+
+// claim records that the injection what gives src mode, and refuses a
+// different mode another injection gave the same source in baseDir. A source
+// that does not resolve is left for injectionSource to report.
+func (m sourceModes) claim(baseDir, src string, mode os.FileMode, what string) error {
+	resolved, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return nil //nolint:nilerr // injectionSource reports it
+	}
+
+	base, err := filepath.EvalSymlinks(baseDir)
+	if err != nil || !isWithin(base, resolved) {
+		return nil //nolint:nilerr // only a source in the base directory is changed in place
+	}
+
+	if prior, ok := m[resolved]; ok && prior.mode != mode {
+		return fmt.Errorf(
+			"%s and %s give source %s permissions %04o and %04o; phenix sets them on that file in the "+
+				"experiment's base directory itself, so both would get the mode set last",
+			prior.what, what, src, prior.mode, mode,
+		)
+	}
+
+	m[resolved] = sourceMode{mode: mode, what: what}
+
+	return nil
+}
+
+// injectionMode parses an injection's permissions: an octal mode of the
+// permission bits alone, such as 0644.
+func injectionMode(perms string) (os.FileMode, error) {
+	mode, err := strconv.ParseUint(perms, 8, 32)
+	if err != nil || len(perms) > 4 || mode > uint64(fs.ModePerm) {
+		return 0, fmt.Errorf("permissions %q are not an octal mode from 0000 to 0777, such as 0644", perms)
+	}
+
+	return os.FileMode(mode), nil
+}
+
+// injectionSource returns the file minimega injects from src with mode,
+// since minimega copies a source's mode into the VM. phenix runs as root, so
+// it changes the mode only of a source in the experiment's base directory,
+// which phenix and its apps write, and injects a copy, which it writes there
+// with mode, of a regular file anywhere else, instead of changing the mode of
+// a host file the topology names. It leaves a missing source for minimega to
+// report.
+func injectionSource(baseDir, src string, mode os.FileMode) (string, error) {
+	resolved, err := filepath.EvalSymlinks(src)
+	if errors.Is(err, fs.ErrNotExist) {
+		return src, nil
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("resolving source %s: %w", src, err)
+	}
+
+	if base, err := filepath.EvalSymlinks(baseDir); err == nil && isWithin(base, resolved) {
+		if err := os.Chmod(resolved, mode); err != nil {
+			return "", fmt.Errorf("setting the permissions of source %s: %w", src, err)
+		}
+
+		return src, nil
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("reading source %s: %w", src, err)
+	}
+
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf(
+			"source %s is outside the experiment's base directory and not a regular file, so phenix cannot apply the "+
+				"injection's permissions to a copy of it", src,
+		)
+	}
+
+	sum := sha256.Sum256([]byte(resolved))
+	staged := filepath.Join(baseDir, "injections", fmt.Sprintf("%x-%04o-%s", sum[:6], mode, filepath.Base(resolved)))
+
+	if err := copyFileWithMode(resolved, staged, mode); err != nil {
+		return "", fmt.Errorf("copying source %s to apply the injection's permissions: %w", src, err)
+	}
+
+	return staged, nil
+}
+
+// isWithin reports whether path is dir or below it; both are clean.
+func isWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+// copyFileWithMode copies src to dst, which it replaces, with mode.
+func copyFileWithMode(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		return err //nolint:wrapcheck // wrapped by the caller
+	}
+
+	in, err := os.Open(src) //nolint:gosec // the topology names the file to inject
+	if err != nil {
+		return err //nolint:wrapcheck // wrapped by the caller
+	}
+
+	defer func() { _ = in.Close() }()
+
+	out, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".*")
+	if err != nil {
+		return err //nolint:wrapcheck // wrapped by the caller
+	}
+
+	defer func() { _ = os.Remove(out.Name()) }()
+
+	_, err = io.Copy(out, in)
+	if err == nil {
+		err = out.Chmod(mode)
+	}
+
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err == nil {
+		err = os.Rename(out.Name(), dst)
+	}
+
+	return err //nolint:wrapcheck // wrapped by the caller
+}
+
+// trimLine drops the whitespace a value of a minimega script line ends with,
+// such as the line break a YAML block scalar (`|` or `>`) ends with, which
+// the script line ends anyway.
+func trimLine(value string) string {
+	return strings.TrimRightFunc(value, unicode.IsSpace)
+}
+
+// CheckAdvanced refuses an advanced setting with a control character other
+// than the whitespace it ends with (see trimLine). The minimega script
+// renders each setting as its own `vm config <key> <value>` line, unquoted so
+// a value can hold several arguments, so a line break would start another
+// minimega command.
+func CheckAdvanced(advanced map[string]string) error {
+	for _, key := range slices.Sorted(maps.Keys(advanced)) {
+		if strings.ContainsFunc(key+trimLine(advanced[key]), unicode.IsControl) {
+			return fmt.Errorf("advanced setting %q contains a control character", key)
+		}
+	}
+
+	return nil
+}
+
+// AdvancedConfig returns the node's advanced settings for the minimega
+// script, without the whitespace they end with. It refuses the settings
+// CheckAdvanced refuses, naming the node, which fails the script's rendering.
+func (n Node) AdvancedConfig() (map[string]string, error) {
+	if err := CheckAdvanced(n.AdvancedF); err != nil {
+		return nil, fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
+	advanced := make(map[string]string, len(n.AdvancedF))
+
+	for key, value := range n.AdvancedF {
+		advanced[key] = trimLine(value)
+	}
+
+	return advanced, nil
+}
+
+// CheckCommands refuses a C2 command with a control character other than the
+// whitespace it ends with (see trimLine). The minimega C2 script renders each
+// command as its own `cc <command>` line, unquoted so a command can hold
+// several arguments, so a line break would start another minimega command.
+func CheckCommands(commands []string) error {
+	for i, command := range commands {
+		if strings.ContainsFunc(trimLine(command), unicode.IsControl) {
+			return fmt.Errorf("command %d %q contains a control character", i+1, command)
+		}
+	}
+
+	return nil
+}
+
+// CCCommands returns the node's C2 commands for the minimega C2 script,
+// without the whitespace they end with. It refuses the commands
+// CheckCommands refuses, naming the node, which fails the script's rendering.
+func (n Node) CCCommands() ([]string, error) {
+	if err := CheckCommands(n.CommandsF); err != nil {
+		return nil, fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
+	commands := make([]string, len(n.CommandsF))
+
+	for i, command := range n.CommandsF {
+		commands[i] = trimLine(command)
+	}
+
+	return commands, nil
+}
+
+// CheckScriptWord refuses value, a node's what, when it is not empty and a
+// minimega script cannot hold it unquoted, as one argument or as one
+// comma-separated item of one (see mm.CheckArgument). A line break, for
+// example, would end the script's line, so the rest would run as its own
+// minimega command, such as `shell`.
+func CheckScriptWord(what, value string) error {
+	if value == "" {
+		return nil
+	}
+
+	if err := mm.CheckArgument(value); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+
+	return nil
+}
+
+// checkScriptWords refuses a hostname, VM type, CPU, drive or interface of
+// the node that the minimega scripts write unquoted and CheckScriptWord
+// refuses.
+func (n Node) checkScriptWords() error {
+	for _, word := range [][2]string{
+		{"hostname", n.General().Hostname()},
+		{"VM type", n.General().VMType()},
+		{"CPU", n.Hardware().CPU()},
+	} {
+		if err := CheckScriptWord(word[0], word[1]); err != nil {
+			return err
+		}
+	}
+
+	if n.HardwareF != nil {
+		for i, drive := range n.HardwareF.DrivesF {
+			if err := drive.checkScriptWords(i); err != nil {
+				return err
+			}
+		}
+	}
+
+	if n.NetworkF != nil {
+		for _, iface := range n.NetworkF.InterfacesF {
+			if err := iface.checkScriptWords(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// ScriptWord returns value, the node's what, for a minimega script, which
+// writes it unquoted. It refuses a value CheckScriptWord refuses, naming the
+// node, which fails the script's rendering.
+func (n Node) ScriptWord(what, value string) (string, error) {
+	if err := CheckScriptWord(what, value); err != nil {
+		return "", fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
+	return value, nil
+}
+
+// DiskConfig returns the node's drives as the argument of the minimega
+// script's `vm config disk` line (see Hardware.DiskConfig), naming the node in
+// an error, which fails the script's rendering.
+func (n Node) DiskConfig(snapshot string) (string, error) {
+	if n.HardwareF == nil {
+		return "", nil
+	}
+
+	config, err := n.HardwareF.DiskConfig(snapshot)
+	if err != nil {
+		return "", fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
+	return config, nil
+}
+
+// InterfaceConfig returns the node's interfaces as the argument of the
+// minimega script's `vm config net` line (see Network.InterfaceConfig), naming
+// the node in an error, which fails the script's rendering.
+func (n Node) InterfaceConfig() (string, error) {
+	if n.NetworkF == nil {
+		return "", nil
+	}
+
+	config, err := n.NetworkF.InterfaceConfig()
+	if err != nil {
+		return "", fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
+	return config, nil
+}
+
+// FileDeletions returns the deletions of the node as the quoted paths of the
+// minimega script's `disk inject ... delete files` line. It refuses the
+// deletions CheckDeletions refuses, naming the node, which fails the script's
+// rendering.
+func (n Node) FileDeletions() (string, error) {
+	if err := CheckDeletions(n.Deletions()); err != nil {
+		return "", fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+	}
+
 	deletions := make([]string, len(n.DeletionsF))
 
 	for i, deletion := range n.DeletionsF {
-		deletions[i] = fmt.Sprintf(`"%s"`, deletion.PathF)
+		deletions[i] = `"` + mmcli.Escape(deletion.PathF) + `"`
 	}
 
-	return strings.Join(deletions, ",")
+	return strings.Join(deletions, ","), nil
 }
 
-func (h Hardware) DiskConfig(snapshot string) string {
+// DiskConfig returns the drives as the argument of a minimega `vm config
+// disk` command, with snapshot, when set, in place of the first drive's
+// image. It refuses a drive whose image, interface or cache mode
+// CheckScriptWord refuses, since the minimega scripts write the argument
+// unquoted.
+func (h Hardware) DiskConfig(snapshot string) (string, error) {
 	configs := make([]string, len(h.DrivesF))
 
 	for i, d := range h.DrivesF {
+		if d == nil {
+			return "", fmt.Errorf("drive %d is null", i+1)
+		}
+
+		if err := d.checkScriptWords(i); err != nil {
+			return "", err
+		}
+
 		config := []string{d.ImageF}
 
 		if i == 0 && snapshot != "" {
@@ -808,7 +1364,27 @@ func (h Hardware) DiskConfig(snapshot string) string {
 		configs[i] = strings.Join(config, ",")
 	}
 
-	return strings.Join(configs, " ")
+	return strings.Join(configs, " "), nil
+}
+
+// checkScriptWords refuses the image, interface or cache mode of drive i, from
+// 0, when CheckScriptWord refuses it.
+func (d *Drive) checkScriptWords(i int) error {
+	if d == nil {
+		return nil
+	}
+
+	for _, word := range [][2]string{
+		{"image", d.ImageF},
+		{"interface", d.IfaceF},
+		{"cache mode", d.CacheModeF},
+	} {
+		if err := CheckScriptWord(fmt.Sprintf("drive %d %s", i+1, word[0]), word[1]); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (d Drive) GetInjectPartition() int {

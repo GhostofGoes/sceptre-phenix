@@ -369,13 +369,26 @@ func UpdateExperiment(w http.ResponseWriter, r *http.Request) error {
 	aliases := exp.Spec.VLANs().Aliases()
 
 	if len(vlans) > 0 {
-		for alias, id := range vlans {
-			if _, ok := aliases[alias]; ok {
-				aliases[alias] = id
+		for _, alias := range slices.Sorted(maps.Keys(vlans)) {
+			if _, ok := aliases[alias]; !ok {
+				continue
+			}
+
+			// 0 leaves the choice of the VLAN ID to minimega again.
+			if vlans[alias] == 0 {
+				aliases[alias] = 0
+
+				continue
+			}
+
+			// SetVLANAlias checks the ID as phenix vlan set does, and pins it
+			// in aliases, which is the spec's own map.
+			if err := exp.Spec.SetVLANAlias(alias, vlans[alias], true); err != nil {
+				err := weberror.NewWebError(err, "unable to set VLAN %s of experiment %s", alias, name)
+
+				return err.SetStatus(http.StatusBadRequest)
 			}
 		}
-
-		exp.Spec.VLANs().SetAliases(aliases)
 
 		err := exp.WriteToStore(false)
 		if err != nil {
@@ -686,7 +699,12 @@ func StopExperiment(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// triggerRunning runs an app's running stage for TriggerExperimentApps.
+var triggerRunning = experiment.TriggerRunning //nolint:gochecknoglobals // overridden by tests
+
 // TriggerExperimentApps - POST /experiments/{name}/trigger[?apps=<foo,bar,baz>].
+//
+//nolint:funlen // handler
 func TriggerExperimentApps(w http.ResponseWriter, r *http.Request) {
 	var (
 		ctx  = r.Context()
@@ -713,7 +731,17 @@ func TriggerExperimentApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A stop cancels and waits for the triggered runs it knows of.
+	done, ok := startTrigger(name)
+	if !ok {
+		http.Error(w, fmt.Sprintf("experiment %s is stopping", name), http.StatusConflict)
+
+		return
+	}
+
 	go func() {
+		defer done()
+
 		var (
 			md   = make(map[string]any)
 			apps = strings.Split(appsFilter, ",")
@@ -724,10 +752,6 @@ func TriggerExperimentApps(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for _, a := range apps {
-			pubsub.Publish("trigger-app", app.TriggerPublication{ //nolint:exhaustruct // partial initialization
-				Experiment: name, App: a, State: "start",
-			})
-
 			k := fmt.Sprintf("%s/%s", name, a)
 
 			// We don't want to use the HTTP request's context here.
@@ -735,17 +759,29 @@ func TriggerExperimentApps(w http.ResponseWriter, r *http.Request) {
 			ctx = app.SetContextTriggerUI(ctx)
 			ctx = app.SetContextMetadata(ctx, md)
 
-			commonMu.Lock()
-			cancelers[k] = append(cancelers[k], cancel)
-			commonMu.Unlock()
+			removeCanceler := addCanceler(k, cancel)
 
-			err := experiment.TriggerRunning(ctx, name, a)
+			// A stop marks the experiment stopping before it takes the
+			// cancelers, so it either takes this one or is seen here.
+			if cache.IsExperimentStopping(name) {
+				removeCanceler()
+				cancel()
+
+				return
+			}
+
+			pubsub.Publish("trigger-app", app.TriggerPublication{ //nolint:exhaustruct // partial initialization
+				Experiment: name, App: a, State: "start",
+			})
+
+			err := triggerRunning(ctx, name, a)
+
+			// The run is over. Drop only this trigger's canceler: an earlier
+			// trigger of the app may still run.
+			removeCanceler()
+			cancel()
+
 			if err != nil {
-				cancel() // avoid leakage
-				commonMu.Lock()
-				delete(cancelers, k)
-				commonMu.Unlock()
-
 				humanized := putil.HumanizeError(
 					err,
 					"Unable to trigger running stage for %s app in %s experiment",
@@ -824,8 +860,7 @@ func CancelTriggeredExperimentApps(w http.ResponseWriter, r *http.Request) {
 			k := fmt.Sprintf("%s/%s", name, a)
 
 			commonMu.Lock()
-			cancels := cancelers[k]
-			delete(cancelers, k)
+			cancels := takeCancelers(k)
 			commonMu.Unlock()
 
 			for _, cancel := range cancels {
@@ -1051,10 +1086,15 @@ func GetExperimentCaptures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		captures = mm.GetExperimentCaptures(mm.NS(name))
-		allowed  []mm.Capture
-	)
+	captures, err := experiment.Captures(name)
+	if err != nil {
+		plog.Error(plog.TypeSystem, "getting captures for experiment", "exp", name, "err", err)
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
+
+	var allowed []mm.Capture
 
 	for _, capture := range captures {
 		if role.Allowed("experiments/captures", "list", capture.VM) {
@@ -1159,6 +1199,12 @@ func GetExperimentFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 
 		return
+	}
+
+	// The file is named by the route; the path query parameter, which the UI
+	// sends, also carries a subdirectory.
+	if path == "" {
+		path = file
 	}
 
 	contents, err := experiment.File(name, path)
@@ -1290,7 +1336,11 @@ func GetVMs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vms, err := vm.List(expName)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, vm.ErrPartialList):
+		plog.Warn(plog.TypeSystem, "listing the VMs the other hosts listed", "exp", expName, "err", err)
+	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return
@@ -1481,7 +1531,14 @@ func UpdateVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.GetClusterHost() != nil {
-		opts = append(opts, vm.UpdateWithHost(req.GetHost()))
+		host, err := clusterHostName(req.GetHost())
+		if err != nil {
+			http.Error(w, err.Error(), clusterHostStatus(err))
+
+			return
+		}
+
+		opts = append(opts, vm.UpdateWithHost(host))
 	}
 
 	if req.GetSnapshotOption() != nil {
@@ -1490,6 +1547,13 @@ func UpdateVM(w http.ResponseWriter, r *http.Request) {
 
 	if err := vm.Update(opts...); err != nil {
 		plog.Error(plog.TypeSystem, "updating VM", "err", err)
+
+		if errors.Is(err, mm.ErrInvalidVMLabel) || errors.Is(err, mm.ErrUnsafeArgument) || errors.Is(err, vm.ErrInvalidDisk) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+
 		http.Error(w, "unable to update VM", http.StatusInternalServerError)
 
 		return
@@ -1572,6 +1636,28 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 	resp := &proto.VMList{Total: req.GetTotal()} //nolint:exhaustruct // partial initialization
 	resp.Vms = make([]*proto.VM, int(req.GetTotal()))
 
+	// Resolve every host before any VM changes, listing the cluster hosts once.
+	var (
+		resolveHost = clusterHostResolver()
+		hosts       = make([]string, len(req.GetVms()))
+	)
+
+	for index, vmRequest := range req.GetVms() {
+		if vmRequest.GetClusterHost() == nil ||
+			!role.Allowed("vms", "patch", fmt.Sprintf("%s/%s", expName, vmRequest.GetName())) {
+			continue
+		}
+
+		host, err := resolveHost(vmRequest.GetHost())
+		if err != nil {
+			http.Error(w, err.Error(), clusterHostStatus(err))
+
+			return
+		}
+
+		hosts[index] = host
+	}
+
 	for index, vmRequest := range req.GetVms() {
 		// Skip any vms that are not allowed to be updated
 		if !role.Allowed("vms", "patch", fmt.Sprintf("%s/%s", expName, vmRequest.GetName())) {
@@ -1612,7 +1698,7 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if vmRequest.GetClusterHost() != nil {
-			opts = append(opts, vm.UpdateWithHost(vmRequest.GetHost()))
+			opts = append(opts, vm.UpdateWithHost(hosts[index]))
 		}
 
 		if vmRequest.GetSnapshotOption() != nil {
@@ -1621,6 +1707,13 @@ func UpdateVMs(w http.ResponseWriter, r *http.Request) {
 
 		if err := vm.Update(opts...); err != nil {
 			plog.Error(plog.TypeSystem, "updating VM", "err", err)
+
+			if errors.Is(err, mm.ErrInvalidVMLabel) || errors.Is(err, mm.ErrUnsafeArgument) || errors.Is(err, vm.ErrInvalidDisk) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
 			http.Error(w, "unable to update VM", http.StatusInternalServerError)
 
 			return
@@ -1707,14 +1800,15 @@ func DeleteVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !exp.Running() {
+	// A dry run has no VMs in minimega.
+	if !exp.Running() || exp.DryRun() {
 		http.Error(w, "experiment not running", http.StatusBadRequest)
 
 		return
 	}
 
 	if err := mm.KillVM(mm.NS(expName), mm.VMName(name)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -1767,6 +1861,13 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(expName); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
+
 	if err := cache.LockVMForStarting(expName, name); err != nil {
 		plog.Error(
 			plog.TypeSystem,
@@ -1789,18 +1890,18 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/start", "update", fullName),
-		bt.NewResource("experiment/vm", name, "starting"),
+		bt.NewResource("experiment/vm", fullName, "starting"),
 		nil,
 	)
 
 	if err := mm.StartVM(mm.NS(expName), mm.VMName(name)); err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -1809,7 +1910,7 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
@@ -1822,7 +1923,7 @@ func StartVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/start", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStarting"),
+			bt.NewResource("experiment/vm", fullName, "errorStarting"),
 			nil,
 		)
 
@@ -1893,6 +1994,13 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(expName); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
+
 	if err := cache.LockVMForStopping(expName, name); err != nil {
 		plog.Error(
 			plog.TypeSystem,
@@ -1915,18 +2023,18 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/stop", "update", fullName),
-		bt.NewResource("experiment/vm", name, "stopping"),
+		bt.NewResource("experiment/vm", fullName, "stopping"),
 		nil,
 	)
 
 	if err := mm.StopVM(mm.NS(expName), mm.VMName(name)); err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -1935,7 +2043,7 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
@@ -1948,7 +2056,7 @@ func StopVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		broker.Broadcast(
 			bt.NewRequestPolicy("vms/stop", "update", fullName),
-			bt.NewResource("experiment/vm", name, "errorStopping"),
+			bt.NewResource("experiment/vm", fullName, "errorStopping"),
 			nil,
 		)
 
@@ -2034,12 +2142,12 @@ func RestartVM(w http.ResponseWriter, r *http.Request) {
 
 	broker.Broadcast(
 		bt.NewRequestPolicy("vms/restart", "update", fullName),
-		bt.NewResource("experiment/vm", name, "restarting"),
+		bt.NewResource("experiment/vm", fullName, "restarting"),
 		nil,
 	)
 
 	if err := vm.Restart(expName, name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2139,7 +2247,7 @@ func ShutdownVM(w http.ResponseWriter, r *http.Request) {
 	defer cache.UnlockVM(expName, name)
 
 	if err := vm.Shutdown(expName, name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2234,7 +2342,7 @@ func ResetVM(w http.ResponseWriter, r *http.Request) {
 	defer cache.UnlockVM(expName, name)
 
 	if err := vm.ResetDiskState(expName, name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2310,6 +2418,28 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse a bad request before the redeploying event and the sleep below.
+	reqBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	req, err := redeployRequest(reqBody, inject)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(expName); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
+
 	if err := cache.LockVMForRedeploying(expName, name); err != nil {
 		plog.Error(
 			plog.TypeSystem,
@@ -2339,7 +2469,7 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 
 	v, err := vm.Get(expName, name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2365,38 +2495,11 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(redeployed)
 
-		body, err := io.ReadAll(r.Body)
-		if err != nil && !errors.Is(err, io.EOF) {
-			redeployed <- err
-
-			return
-		}
-
 		opts := []vm.RedeployOption{
-			vm.CPU(v.CPUs),
-			vm.Memory(v.RAM),
-			vm.Disk(v.Disk),
-			vm.Inject(inject),
-		}
-
-		// `body` will be nil if err above was EOF.
-		if body != nil {
-			var req proto.VMRedeployRequest
-
-			// Update VM struct with values from POST request body.
-			err := unmarshaler.Unmarshal(body, &req)
-			if err != nil {
-				redeployed <- err
-
-				return
-			}
-
-			opts = []vm.RedeployOption{
-				vm.CPU(int(req.GetCpus())),
-				vm.Memory(int(req.GetRam())),
-				vm.Disk(req.GetDisk()),
-				vm.Inject(req.GetInjects()),
-			}
+			vm.CPU(int(req.GetCpus())),
+			vm.Memory(int(req.GetRam())),
+			vm.Disk(req.GetDisk()),
+			vm.Inject(req.GetInjects()),
 		}
 
 		if err := vm.Redeploy(expName, name, opts...); err != nil {
@@ -2421,7 +2524,13 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 			nil,
 		)
 
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+
+		if errors.Is(err, vm.ErrInvalidDisk) || errors.Is(err, vm.ErrNotRedeployable) {
+			status = http.StatusBadRequest
+		}
+
+		http.Error(w, err.Error(), status)
 
 		return
 	}
@@ -2462,6 +2571,25 @@ func RedeployVM(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body) //nolint:gosec // XSS via taint analysis
 }
 
+// redeployRequest returns the redeploy a request body asks for. An empty body
+// keeps the VM's settings: no CPUs, memory or disk keep what the VM has, and
+// the replicate-injects query parameter decides whether its injections are
+// replayed. The disk must not come from vm.Get, which reports the backing
+// image of a disk snapshot, so the VM would boot without phenix's injections.
+func redeployRequest(body []byte, inject bool) (*proto.VMRedeployRequest, error) {
+	if len(body) == 0 {
+		return &proto.VMRedeployRequest{Injects: inject}, nil //nolint:exhaustruct // partial initialization
+	}
+
+	var req proto.VMRedeployRequest
+
+	if err := unmarshaler.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("parsing redeploy request: %w", err)
+	}
+
+	return &req, nil
+}
+
 // GetScreenshot - GET /experiments/{exp}/vms/{name}/screenshot.png.
 func GetScreenshot(w http.ResponseWriter, r *http.Request) {
 	var (
@@ -2498,7 +2626,9 @@ func GetScreenshot(w http.ResponseWriter, r *http.Request) {
 
 	screenshot, err := util.GetScreenshot(exp, name, size)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// minimega screenshots only a running VM, not a paused or powered-off
+		// one, which answers 409.
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2541,7 +2671,13 @@ func GetVMCaptures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	captures := mm.GetVMCaptures(mm.NS(exp), mm.VMName(name))
+	captures, err := vm.Captures(exp, name)
+	if err != nil {
+		plog.Error(plog.TypeSystem, "getting captures for VM", "exp", exp, "vm", name, "err", err)
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
 
 	body, err := marshaler.Marshal(&proto.CaptureList{Captures: util.CapturesToProtobuf(captures)})
 	if err != nil {
@@ -2600,7 +2736,17 @@ func StartVMCapture(w http.ResponseWriter, r *http.Request) {
 
 	if err := vm.StartCapture(exp, name, int(req.GetInterface()), req.GetFilename()); err != nil {
 		plog.Error(plog.TypeSystem, "starting capture for VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+
+		status := vmErrorStatus(err)
+
+		if errors.Is(err, mm.ErrInvalidFileName) || errors.Is(err, vm.ErrInvalidCaptureInterface) {
+			status = http.StatusBadRequest
+		} else if notRunning := experiment.RequireRunning(exp); notRunning != nil {
+			// The VMs of a stopped experiment are not running either.
+			err, status = notRunning, vmErrorStatus(notRunning)
+		}
+
+		http.Error(w, err.Error(), status)
 
 		return
 	}
@@ -2698,7 +2844,7 @@ func StopVMCaptures(w http.ResponseWriter, r *http.Request) {
 			"err",
 			err,
 		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2745,6 +2891,13 @@ func StartCaptureSubnet(w http.ResponseWriter, r *http.Request) {
 			exp,
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(exp); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2815,6 +2968,13 @@ func StopCaptureSubnet(w http.ResponseWriter, r *http.Request) {
 			exp,
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(exp); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -2965,6 +3125,19 @@ func SnapshotVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := mm.CheckFileName("snapshot name", req.GetFilename()); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	// A stopped experiment is refused like the other VM routes refuse it.
+	if err := experiment.RequireRunning(exp); err != nil {
+		http.Error(w, err.Error(), vmErrorStatus(err))
+
+		return
+	}
+
 	if err := cache.LockVMForSnapshotting(exp, name); err != nil {
 		plog.Error(
 			plog.TypeSystem,
@@ -2991,36 +3164,25 @@ func SnapshotVM(w http.ResponseWriter, r *http.Request) {
 		nil,
 	)
 
-	status := make(chan string)
-
-	go func() {
-		for {
-			s := <-status
-
-			if s == "completed" {
-				return
-			}
-
-			progress, err := strconv.ParseFloat(s, 64)
-			if err == nil {
-				plog.Debug(plog.TypeSystem, "snapshot percent complete", statusKeyPercent, progress)
-
-				status := map[string]any{
-					statusKeyPercent: progress / percentDivisor,
-				}
-
-				marshalled, _ := json.Marshal(status)
-
-				broker.Broadcast(
-					bt.NewRequestPolicy("vms/snapshots", "create", fullName),
-					bt.NewResource("experiment/vm/snapshot", exp+"/"+name, "progress"),
-					marshalled,
-				)
-			}
+	// vm.Snapshot calls cb on this goroutine while it waits for the save, so the
+	// callback can broadcast progress directly.
+	cb := func(s string) {
+		// The final "completed" is not a progress value.
+		progress, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return
 		}
-	}()
 
-	cb := func(s string) { status <- s }
+		plog.Debug(plog.TypeSystem, "snapshot percent complete", statusKeyPercent, progress)
+
+		marshalled, _ := json.Marshal(map[string]any{statusKeyPercent: progress / percentDivisor})
+
+		broker.Broadcast(
+			bt.NewRequestPolicy("vms/snapshots", "create", fullName),
+			bt.NewResource("experiment/vm/snapshot", exp+"/"+name, "progress"),
+			marshalled,
+		)
+	}
 
 	if err := vm.Snapshot(exp, name, req.GetFilename(), cb); err != nil {
 		broker.Broadcast(
@@ -3029,8 +3191,15 @@ func SnapshotVM(w http.ResponseWriter, r *http.Request) {
 			nil,
 		)
 
+		status := vmErrorStatus(err)
+
+		if errors.Is(err, vm.ErrNoDiskSnapshot) || errors.Is(err, vm.ErrMultiDiskSnapshot) ||
+			errors.Is(err, mm.ErrInvalidFileName) {
+			status = http.StatusBadRequest
+		}
+
 		plog.Error(plog.TypeSystem, "snapshotting VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), status)
 
 		return
 	}
@@ -3126,7 +3295,7 @@ func RestoreVM(w http.ResponseWriter, r *http.Request) {
 		)
 
 		plog.Error(plog.TypeSystem, "restoring VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -3259,27 +3428,19 @@ func CommitVM(w http.ResponseWriter, r *http.Request) {
 		body,
 	)
 
-	status := make(chan float64)
+	// Progress is broadcast from the callback itself, as CommitToDisk calls back
+	// from its own goroutines, which may still run after it returns.
+	cb := func(s float64) {
+		plog.Debug(plog.TypeSystem, "VM commit percent complete", statusKeyPercent, s)
 
-	go func() {
-		for s := range status {
-			plog.Debug(plog.TypeSystem, "VM commit percent complete", statusKeyPercent, s)
+		marshalled, _ := json.Marshal(map[string]any{statusKeyPercent: s})
 
-			status := map[string]any{
-				statusKeyPercent: s,
-			}
-
-			marshalled, _ := json.Marshal(status)
-
-			broker.Broadcast(
-				bt.NewRequestPolicy("vms/commit", "create", fullName),
-				bt.NewResource("experiment/vm/commit", expName+"/"+name, "progress"),
-				marshalled,
-			)
-		}
-	}()
-
-	cb := func(s float64) { status <- s }
+		broker.Broadcast(
+			bt.NewRequestPolicy("vms/commit", "create", fullName),
+			bt.NewResource("experiment/vm/commit", expName+"/"+name, "progress"),
+			marshalled,
+		)
+	}
 
 	if _, err = vm.CommitToDisk(expName, name, filename, cb); err != nil {
 		broker.Broadcast(
@@ -3289,7 +3450,7 @@ func CommitVM(w http.ResponseWriter, r *http.Request) {
 		)
 
 		plog.Error(plog.TypeSystem, "committing VM", "exp", expName, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -3404,6 +3565,13 @@ func CreateVMMemorySnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 
 		filename = req.GetFilename()
+
+		// Refused before the lock and the "committing" broadcast below.
+		if err := mm.CheckFileName("memory snapshot name", filename); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
 	}
 
 	if err := cache.LockVMForMemorySnapshotting(exp, name); err != nil {
@@ -3441,37 +3609,25 @@ func CreateVMMemorySnapshot(w http.ResponseWriter, r *http.Request) {
 		body,
 	)
 
-	status := make(chan string)
-
-	go func() {
-		defer close(status)
-
-		for {
-			s := <-status
-			if s == "failed" || s == "completed" {
-				return
-			}
-
-			progress, err := strconv.ParseFloat(s, 64)
-			if err == nil {
-				status := map[string]any{
-					statusKeyPercent: progress,
-				}
-
-				plog.Info(plog.TypeSystem, "memory snapshot percent complete", statusKeyPercent, progress)
-
-				marshalled, _ := json.Marshal(status)
-
-				broker.Broadcast(
-					bt.NewRequestPolicy("vms/memorySnapshot", "create", fullName),
-					bt.NewResource("experiment/vm/memorySnapshot", exp+"/"+name, "progress"),
-					marshalled,
-				)
-			}
+	// Progress is broadcast from the callback itself: MemorySnapshot sends no
+	// final "failed" or "completed" when it refuses before its poll starts, so
+	// nothing may wait for one.
+	cb := func(s string) {
+		progress, err := strconv.ParseFloat(s, 64)
+		if err != nil { // "failed" or "completed"
+			return
 		}
-	}()
 
-	cb := func(s string) { status <- s }
+		plog.Info(plog.TypeSystem, "memory snapshot percent complete", statusKeyPercent, progress)
+
+		marshalled, _ := json.Marshal(map[string]any{statusKeyPercent: progress})
+
+		broker.Broadcast(
+			bt.NewRequestPolicy("vms/memorySnapshot", "create", fullName),
+			bt.NewResource("experiment/vm/memorySnapshot", exp+"/"+name, "progress"),
+			marshalled,
+		)
+	}
 
 	if _, err = vm.MemorySnapshot(exp, name, filename, cb); err != nil {
 		broker.Broadcast(
@@ -3481,7 +3637,7 @@ func CreateVMMemorySnapshot(w http.ResponseWriter, r *http.Request) {
 		)
 
 		plog.Error(plog.TypeSystem, "memory snapshot for VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -3756,6 +3912,15 @@ func GetScenarios(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body) //nolint:gosec // XSS via taint analysis
 }
 
+// clusterHostJSON is a host GET /hosts lists: Name is its display name, and
+// MinimegaName the name minimega gives it, which VM schedules hold, so the UI
+// can tell which host a scheduled VM is on.
+type clusterHostJSON struct {
+	mm.Host
+
+	MinimegaName string `json:"minimega_name"`
+}
+
 // GetClusterHosts - GET /hosts.
 func GetClusterHosts(w http.ResponseWriter, r *http.Request) {
 	var (
@@ -3782,15 +3947,23 @@ func GetClusterHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := []mm.Host{}
+	allowed := []clusterHostJSON{}
 
 	for _, host := range hosts {
+		// Display names drop the suffixes container deployments add, such as
+		// -minimega; schedules keep the name minimega gives the host, which
+		// clusterHostName maps a display name back to.
+		minimegaName := host.Name
+		host.Name = common.TrimHostnameSuffixes(host.Name)
+
 		if role.Allowed("hosts", "list", host.Name) {
-			allowed = append(allowed, host)
+			allowed = append(allowed, clusterHostJSON{Host: host, MinimegaName: minimegaName})
 		}
 	}
 
-	marshalled, err := json.Marshal(mm.Cluster{Hosts: allowed})
+	marshalled, err := json.Marshal(struct {
+		Hosts []clusterHostJSON `json:"hosts"`
+	}{allowed})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -4068,7 +4241,7 @@ func ChangeOpticalDisc(w http.ResponseWriter, r *http.Request) {
 	err := vm.ChangeOpticalDisc(exp, name, isoPath)
 	if err != nil {
 		plog.Error(plog.TypeSystem, "changing disc for VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}
@@ -4124,7 +4297,7 @@ func EjectOpticalDisc(w http.ResponseWriter, r *http.Request) {
 	err := vm.EjectOpticalDisc(exp, name)
 	if err != nil {
 		plog.Error(plog.TypeSystem, "ejecting disc for VM", "exp", exp, "vm", name, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), vmErrorStatus(err))
 
 		return
 	}

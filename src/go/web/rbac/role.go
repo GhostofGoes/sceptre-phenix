@@ -18,6 +18,7 @@ import (
 var (
 	ErrResourceNameExists  = errors.New("resource name for role exists")
 	ErrResourceNameInvalid = errors.New("invalid resource name for role")
+	ErrRoleWithoutSpec     = errors.New("role has no spec")
 )
 
 type Role struct {
@@ -183,6 +184,12 @@ func (r Role) policiesForResource(resource string) []Policy {
 func (r *Role) mapPolicies() error {
 	if r.mappedPolicies != nil {
 		return nil
+	}
+
+	// The zero role, which a request that skipped authentication carries,
+	// allows nothing.
+	if r.Spec == nil {
+		return ErrRoleWithoutSpec
 	}
 
 	r.mappedPolicies = make(map[string][]Policy)

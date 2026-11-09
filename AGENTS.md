@@ -294,7 +294,11 @@ image, documentation, or topology details.
 GitHub Actions is path-scoped: `ci.yml` generates, lints, and tests Go and
 checks the Go example; `frontend.yml` runs knip and Vitest; `e2e.yml` builds
 UI/backend for each auth mode and runs the Playwright tests, for changes that
-can affect the browser (its path filters); `examples.yml` checks the Python
+can affect the browser (its path filters); `e2e-minimega.yml` runs the
+`src/go/e2e/` tests against a real minimega and KVM guests, one runner per shard
+of `.github/e2e/shards.json`, when `src/go/` or the E2E setup changes and
+nightly, and the apps and images repositories call it (see
+`src/go/e2e/README.md`); `examples.yml` checks the Python
 example; `packages.yml` builds the Docker image (Buildx with the GHA layer
 cache), JIT UI image, and Debian package; `podman.yml` builds the same
 `docker/Dockerfile` with Podman on each push to `main` and on pull requests that

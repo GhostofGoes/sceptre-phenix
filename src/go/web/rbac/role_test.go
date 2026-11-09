@@ -112,3 +112,18 @@ func TestRoleAllowed(t *testing.T) {
 		})
 	}
 }
+
+// TestZeroRoleAllowsNothing is a regression test: Allowed panicked on the
+// zero role, the role of a request that skipped authentication, such as one
+// whose path ends in /login.
+func TestZeroRoleAllowsNothing(t *testing.T) {
+	var role Role
+
+	if role.Allowed("experiments", "get", "exp1") {
+		t.Error("the zero role may get experiment exp1")
+	}
+
+	if role.Allowed("experiments", "list") {
+		t.Error("the zero role may list experiments")
+	}
+}

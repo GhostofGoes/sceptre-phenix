@@ -177,16 +177,21 @@ func TestUpdateRenameRunsRenameHooks(t *testing.T) {
 			stages, hookErr = nil, test.hookErr
 
 			m := store.NewMockStore(gomock.NewController(t))
+			// Update reads the old name, and a rename checks that the new name
+			// is free.
 			m.EXPECT().Get(gomock.Any()).DoAndReturn(func(c *store.Config) error {
+				if c.Metadata.Name != "old" {
+					return store.ErrNotExist
+				}
+
 				*c = stored("old")
 
 				return nil
-			})
+			}).AnyTimes()
 
 			if test.as == "old" {
 				m.EXPECT().Update(gomock.Any()).Return(nil)
 			} else {
-				m.EXPECT().Update(gomock.Any()).Return(store.ErrNotExist)
 				m.EXPECT().Create(gomock.Any()).Return(nil)
 				m.EXPECT().Delete(gomock.Any()).DoAndReturn(func(c *store.Config) error {
 					if c.Metadata.Name != "old" {

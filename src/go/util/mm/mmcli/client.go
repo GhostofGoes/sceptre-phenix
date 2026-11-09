@@ -216,8 +216,47 @@ func streamEnded(c *miniclient.Conn, count int) error {
 	return fmt.Errorf("running minimega command: %w", err)
 }
 
-// guard forwards responses from the shared connection, reporting a truncated or
-// empty stream as an error rather than as a successful empty result.
+// encodeErrPrefix starts the error miniclient records when it cannot write a
+// request. It then closes the response stream at once, so minimega never got
+// the command.
+const encodeErrPrefix = "local command gob encode"
+
+// unsent reports whether the command that ended c's stream after count
+// responses was never written. A connection to a minimega that has since exited
+// or restarted fails this way, as the write finds the socket closed.
+func unsent(c *miniclient.Conn, count int) bool {
+	if count > 0 {
+		return false
+	}
+
+	err := c.Error()
+
+	return err != nil && strings.HasPrefix(err.Error(), encodeErrPrefix)
+}
+
+// forward relays the responses of cmdStr run on c to out, and returns how many
+// there were and the error, if any, that ended the stream.
+func forward(c *miniclient.Conn, cmdStr string, out chan<- *miniclient.Response) (int, error) {
+	var count int
+
+	for resp := range c.Run(cmdStr) {
+		count++
+
+		out <- resp
+	}
+
+	return count, streamEnded(c, count)
+}
+
+// guard runs cmdStr on the shared connection c and forwards its responses,
+// reporting a truncated or empty stream as an error rather than as a successful
+// empty result.
+//
+// redial is set when c was dialed by an earlier command. minimega closing c
+// since then goes unnoticed until a command fails to write on it, so guard
+// sends a command that was never written once more, on the connection redial
+// returns. It never resends a command that was written: minimega may have run
+// it even though no answer came back.
 //
 // release is called once the terminal error has been read, before markDead,
 // which takes mu itself. It must not be called any earlier: miniclient closes
@@ -228,7 +267,8 @@ func streamEnded(c *miniclient.Conn, count int) error {
 // and miniclient's reader behind it, for the life of the process.
 func guard(
 	c *miniclient.Conn,
-	in chan *miniclient.Response,
+	cmdStr string,
+	redial func() (*miniclient.Conn, error),
 	release func(),
 ) chan *miniclient.Response {
 	out := make(chan *miniclient.Response)
@@ -236,15 +276,17 @@ func guard(
 	go func() {
 		defer close(out)
 
-		var count int
+		count, err := forward(c, cmdStr, out)
 
-		for resp := range in {
-			count++
-
-			out <- resp
+		if err != nil && redial != nil && unsent(c, count) {
+			fresh, dialErr := redial()
+			if dialErr != nil {
+				err = dialErr
+			} else {
+				c = fresh
+				_, err = forward(c, cmdStr, out)
+			}
 		}
-
-		err := streamEnded(c, count)
 
 		release()
 
@@ -272,6 +314,8 @@ func Run(c *Command) chan *miniclient.Response {
 
 	mu.Lock()
 
+	prev := mm
+
 	active, err := conn()
 	if err != nil {
 		mu.Unlock()
@@ -279,9 +323,20 @@ func Run(c *Command) chan *miniclient.Response {
 		return wrapErr(err)
 	}
 
+	var redial func() (*miniclient.Conn, error)
+
+	if active == prev {
+		// guard calls this with mu still held
+		redial = func() (*miniclient.Conn, error) {
+			mmDead = true
+
+			return conn()
+		}
+	}
+
 	// mu is held until guard has read the terminal error, so no other command
 	// can reach Conn.err in between
-	return guard(active, active.Run(cmdStr), mu.Unlock)
+	return guard(active, cmdStr, redial, mu.Unlock)
 }
 
 // runWithTimeout runs a command on a connection of its own, so that abandoning

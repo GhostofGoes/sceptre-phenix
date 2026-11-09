@@ -1,35 +1,45 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"phenix/store"
 	"phenix/tmpl"
 	"phenix/types"
 	"phenix/util"
-	"phenix/util/common"
 	"phenix/util/mm"
 	"phenix/util/notes"
 	"phenix/util/plog"
-	"phenix/util/pubsub"
-
-	"github.com/mitchellh/mapstructure"
 
 	ifaces "phenix/types/interfaces"
+	v1 "phenix/types/version/v1"
 )
 
 const (
-	appNameStartup                = "startup"
-	tunnelConfigPartsPortOnly     = 1
-	tunnelConfigPartsPortHost     = 2
-	tunnelConfigPartsPortHostDest = 3
+	appNameStartup = "startup"
 
 	startupViaCCAnnotation = "phenix/startup-via-cc"
+
+	// startupC2ExecVerb runs a startup script over C2. Experiments stored by
+	// older phenix versions hold startupC2LegacyExecVerb commands instead.
+	startupC2ExecVerb       = "exec"
+	startupC2LegacyExecVerb = "exec-once"
+
+	// DoNotBootReasonAnnotation records why the startup app set a node's
+	// do_not_boot, so the flag can be cleared when the reason goes away. A
+	// do_not_boot without it was set by the user and is kept.
+	DoNotBootReasonAnnotation = v1.DoNotBootReasonAnnotation
+	dnbReasonMissingImage     = "missing disk image"
 
 	linuxHostnameInjectDst  = "/etc/phenix/startup/1_hostname-start.sh"
 	linuxTimezoneInjectDst  = "/etc/phenix/startup/2_timezone-start.sh"
@@ -46,7 +56,9 @@ const (
 	windowsSchedulerDst        = "ProgramData/Microsoft/Windows/Start Menu/Programs/Startup/startup_scheduler.cmd"
 )
 
-type Startup struct{}
+type Startup struct {
+	options Options
+}
 
 type startupC2Executor string
 
@@ -61,7 +73,13 @@ type commandSetter interface {
 
 var startupMMFullPath = mm.GetMMFullPath //nolint:gochecknoglobals // overridden by tests
 
-func (Startup) Init(...Option) error {
+// statImage reads a node's disk image file; tests replace it to report errors
+// root never gets, such as a denied directory.
+var statImage = os.Stat //nolint:gochecknoglobals // overridden by tests
+
+func (s *Startup) Init(opts ...Option) error {
+	s.options = NewOptions(opts...)
+
 	return nil
 }
 
@@ -90,7 +108,15 @@ func startupViaCCEnabled(node ifaces.NodeSpec) bool {
 		default:
 			return true
 		}
-	case int, int64, float64:
+	// One case per type: in a case listing several, v is an any, which equals
+	// 0 only for an int, so a 0 read from the store, a float64, read as true.
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case uint64:
+		return v != 0
+	case float64:
 		return v != 0
 	default:
 		return true
@@ -154,10 +180,32 @@ func addWindowsStartupWrapperInjects(node ifaces.NodeSpec, startupDir string, su
 	return nil
 }
 
+// checkStartupC2Dir checks that an experiment name can name the directory,
+// relative to minimega's files directory, that its startup scripts are staged
+// in. An empty name, "." or ".." would stage them in, and point the globs that
+// delete them at, the files directory itself or its parent, and a glob
+// metacharacter would make the globs match other experiments' directories.
+func checkStartupC2Dir(expName string) error {
+	switch {
+	case expName == "":
+		return errors.New("experiment name required")
+	case expName == "." || expName == ".." || strings.ContainsAny(expName, `/\*?[`):
+		return fmt.Errorf(
+			"experiment name %q cannot name the directory its C2 startup scripts are staged in", expName,
+		)
+	}
+
+	return nil
+}
+
 // addStartupC2Script stages a generated startup script and queues its C2 commands.
 func addStartupC2Script(exp *types.Experiment, node ifaces.NodeSpec, filename string, executor startupC2Executor) error {
+	if err := checkStartupC2Dir(exp.Spec.ExperimentName()); err != nil {
+		return fmt.Errorf("staging startup C2 script for node %s: %w", node.General().Hostname(), err)
+	}
+
 	send, exec, relPath := startupC2Commands(exp, filename, executor)
-	if err := stageStartupC2Script(filename, relPath); err != nil {
+	if err := stageStartupC2Script(filename, relPath, executor); err != nil {
 		return fmt.Errorf("staging startup C2 script for node %s: %w", node.General().Hostname(), err)
 	}
 
@@ -167,8 +215,9 @@ func addStartupC2Script(exp *types.Experiment, node ifaces.NodeSpec, filename st
 	return nil
 }
 
-// stageStartupC2Script copies a generated startup script into minimega's file path.
-func stageStartupC2Script(src, relPath string) error {
+// stageStartupC2Script copies a generated startup script into minimega's file
+// path. A Linux script gets a guard that makes it run at most once per boot.
+func stageStartupC2Script(src, relPath string, executor startupC2Executor) error {
 	dst := startupMMFullPath(relPath)
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
@@ -180,6 +229,11 @@ func stageStartupC2Script(src, relPath string) error {
 		return fmt.Errorf("reading startup script: %w", err)
 	}
 
+	if executor != startupC2Windows {
+		guard := startupC2RunOnceGuard(startupC2RanDir, linuxBootIDFile, startupC2ScriptKind(relPath))
+		content = insertAfterShebang(content, guard)
+	}
+
 	if err := os.WriteFile(dst, content, 0o600); err != nil {
 		return fmt.Errorf("writing startup C2 script: %w", err)
 	}
@@ -187,7 +241,83 @@ func stageStartupC2Script(src, relPath string) error {
 	return nil
 }
 
-// startupC2Commands builds the minimega send and exec commands for a startup script.
+const (
+	// startupC2RanDir holds, in the guest, the boot ID of the boot each Linux
+	// startup script delivered over C2 last ran in.
+	startupC2RanDir = "/run/phenix/startup-c2"
+	linuxBootIDFile = "/proc/sys/kernel/random/boot_id"
+)
+
+// startupC2RunOnceGuard returns shell lines that end a Linux startup script
+// delivered over C2 when it already ran in the guest's current boot. minimega
+// gives a cc exec to a miniccc client each time it connects, and miniccc
+// reconnects after missed heartbeats, a pause or a memory snapshot restore;
+// the interfaces script would then take the guest's links down and flush their
+// addresses in the middle of the experiment. The guard records the kernel's
+// boot ID rather than relying on /run being cleared, so a reboot runs the
+// script again either way. Without a boot ID the script runs every time.
+func startupC2RunOnceGuard(dir, bootIDFile, kind string) string {
+	return fmt.Sprintf(`
+# phenix: minimega runs this script again whenever miniccc reconnects; run it
+# at most once per boot.
+phenix_boot_id=$(cat %[2]s 2>/dev/null)
+if [ -n "$phenix_boot_id" ]; then
+    phenix_ran=%[1]s/%[3]s.boot
+    if [ "$(cat "$phenix_ran" 2>/dev/null)" = "$phenix_boot_id" ]; then
+        exit 0
+    fi
+    mkdir -p %[1]s && echo "$phenix_boot_id" > "$phenix_ran"
+fi
+`, dir, bootIDFile, kind)
+}
+
+// startupC2ScriptKind returns the kind of a staged startup script, such as
+// "interfaces" for <hostname>-interfaces.sh.
+func startupC2ScriptKind(name string) string {
+	base := path.Base(name)
+
+	for _, suffix := range startupC2ScriptSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(strings.TrimPrefix(suffix, "-"), path.Ext(suffix))
+		}
+	}
+
+	return strings.TrimSuffix(base, path.Ext(base))
+}
+
+// insertAfterShebang inserts lines into a script after its #! line, if it
+// has one, or else at its top.
+func insertAfterShebang(script []byte, lines string) []byte {
+	var shebang []byte
+
+	if bytes.HasPrefix(script, []byte("#!")) {
+		end := bytes.IndexByte(script, '\n')
+		if end < 0 {
+			end = len(script) - 1
+		}
+
+		shebang, script = script[:end+1], script[end+1:]
+	}
+
+	out := make([]byte, 0, len(shebang)+len(lines)+1+len(script))
+	out = append(out, shebang...)
+
+	if len(shebang) > 0 && shebang[len(shebang)-1] != '\n' {
+		out = append(out, '\n')
+	}
+
+	out = append(out, lines...)
+
+	return append(out, script...)
+}
+
+// startupC2Commands builds the minimega send and exec commands for a startup
+// script. It uses exec, not exec-once: phenix queues the commands before any
+// guest connects, and minimega marks an exec-once command sent when it is
+// queued, even with no client connected, so no guest would run it. minimega
+// sends an exec to each client when it connects, so the script runs at every
+// boot, as an injected one does. A client also connects again within a boot,
+// so a staged Linux script ends early when it already ran in that boot.
 func startupC2Commands(exp *types.Experiment, filename string, executor startupC2Executor) (string, string, string) {
 	var (
 		relPath   = path.Join(exp.Spec.ExperimentName(), filepath.Base(filename))
@@ -198,35 +328,33 @@ func startupC2Commands(exp *types.Experiment, filename string, executor startupC
 
 	switch executor {
 	case startupC2Windows:
-		return send, fmt.Sprintf("exec cmd /c 'powershell.exe -noprofile -executionpolicy bypass -file %s'", guestPath), relPath
+		exec := fmt.Sprintf(
+			"%s cmd /c 'powershell.exe -noprofile -executionpolicy bypass -file %s'",
+			startupC2ExecVerb, guestPath,
+		)
+
+		return send, exec, relPath
 	case startupC2Linux:
 		fallthrough
 	default:
-		return send, "exec bash " + guestPath, relPath
+		return send, startupC2ExecVerb + " bash " + guestPath, relPath
 	}
 }
 
-// removeStartupC2Commands removes previously generated startup C2 commands for idempotency.
+// removeStartupC2Commands removes previously generated startup C2 commands for
+// idempotency, including those generated under a hostname the node no longer
+// has, which would otherwise run before the current ones.
 func removeStartupC2Commands(exp *types.Experiment, node ifaces.NodeSpec) {
 	setter, ok := node.(commandSetter)
 	if !ok {
 		return
 	}
 
-	stale := make(map[string]struct{})
-	for _, filename := range startupC2ScriptNames(node.General().Hostname()) {
-		for _, executor := range []startupC2Executor{startupC2Linux, startupC2Windows} {
-			send, exec, _ := startupC2Commands(exp, filename, executor)
-			stale[send] = struct{}{}
-			stale[exec] = struct{}{}
-		}
-	}
-
 	commands := node.Commands()
 	filtered := make([]string, 0, len(commands))
 
 	for _, command := range commands {
-		if _, ok := stale[command]; ok {
+		if isStartupC2Command(exp, command) {
 			continue
 		}
 
@@ -236,15 +364,77 @@ func removeStartupC2Commands(exp *types.Experiment, node ifaces.NodeSpec) {
 	setter.SetCommands(filtered)
 }
 
-// startupC2ScriptNames returns the generated startup script names for a node.
-func startupC2ScriptNames(hostname string) []string {
-	return []string{
-		hostname + "-hostname.sh",
-		hostname + "-timezone.sh",
-		hostname + "-interfaces.sh",
-		hostname + "-domain.sh",
-		hostname + "-startup.ps1",
+// isStartupC2Command reports whether command sends or runs a startup script
+// the startup app staged for one of the experiment's nodes, under any hostname.
+func isStartupC2Command(exp *types.Experiment, command string) bool {
+	// No file name contains a NUL, so it marks where the name goes.
+	const name = "\x00"
+
+	for _, executor := range []startupC2Executor{startupC2Linux, startupC2Windows} {
+		send, exec, _ := startupC2Commands(exp, name, executor)
+
+		// Experiments stored before the scripts ran with exec hold the
+		// exec-once form of the command.
+		legacy := startupC2LegacyExecVerb + strings.TrimPrefix(exec, startupC2ExecVerb)
+
+		for _, form := range []string{send, exec, legacy} {
+			prefix, suffix, _ := strings.Cut(form, name)
+
+			if len(command) < len(prefix)+len(suffix) ||
+				!strings.HasPrefix(command, prefix) || !strings.HasSuffix(command, suffix) {
+				continue
+			}
+
+			if isStartupC2ScriptName(command[len(prefix) : len(command)-len(suffix)]) {
+				return true
+			}
+		}
 	}
+
+	return false
+}
+
+// isStartupC2ScriptName reports whether name is the file name of a startup
+// script the startup app generates for some hostname.
+func isStartupC2ScriptName(name string) bool {
+	if strings.ContainsAny(name, "/ \t") {
+		return false
+	}
+
+	for _, suffix := range startupC2ScriptSuffixes {
+		if len(name) > len(suffix) && strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// startupC2ScriptSuffixes follow a node's hostname in the names of the
+// startup scripts generated for it.
+var startupC2ScriptSuffixes = []string{ //nolint:gochecknoglobals // constant list
+	"-hostname.sh",
+	"-timezone.sh",
+	"-interfaces.sh",
+	"-domain.sh",
+	"-startup.ps1",
+}
+
+// StagedStartupScripts returns minimega file globs, relative to its files
+// directory, that match every startup script the startup app stages there for
+// C2 delivery to the given experiment's nodes.
+func StagedStartupScripts(expName string) ([]string, error) {
+	if err := checkStartupC2Dir(expName); err != nil {
+		return nil, err
+	}
+
+	globs := make([]string, 0, len(startupC2ScriptSuffixes))
+
+	for _, suffix := range startupC2ScriptSuffixes {
+		globs = append(globs, path.Join(expName, "*"+suffix))
+	}
+
+	return globs, nil
 }
 
 // removeStartupInjections removes only injections owned by the startup app.
@@ -291,7 +481,6 @@ func removeInjectionDestinations(node ifaces.NodeSpec, dsts map[string]struct{})
 func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 	var (
 		startupDir = exp.Spec.BaseDir() + "/startup"
-		imageDir   = common.PhenixBase + "/images/"
 
 		// detect duplicate IPs within a VLAN (VLAN|IP --> hostname)
 		ips = make(map[string]string)
@@ -374,16 +563,58 @@ func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 			)
 		}
 
-		// Check if user provided an absolute path to image. If not, prepend path
-		// with default image path.
+		// A relative image path is relative to minimega's files directory
+		// (its -filepath), which is not necessarily <phenix base>/images.
 		imagePath := drives[0].Image()
 
 		if !filepath.IsAbs(imagePath) {
-			imagePath = imageDir + imagePath
+			imagePath = startupMMFullPath(imagePath)
+		}
+
+		_, statErr := statImage(imagePath)
+
+		// A path through a regular file (ENOTDIR) names no image either.
+		missingImage := errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR)
+
+		if statErr != nil && !missingImage {
+			// Any other error, such as a file name that is too long, would leave
+			// the node to boot and minimega to fail its launch. minimega, which
+			// may run as another user, may still read a path phenix may not, and
+			// a node that does not boot needs no image.
+			if dnb := node.General().DoNotBoot(); !errors.Is(statErr, fs.ErrPermission) && (dnb == nil || !*dnb) {
+				return fmt.Errorf(
+					"node %q: checking disk image %q: %w", node.General().Hostname(), imagePath, statErr,
+				)
+			}
+
+			plog.Warn(
+				plog.TypeSystem,
+				"cannot check disk image",
+				"node", node.General().Hostname(),
+				"image", imagePath,
+				"err", statErr,
+			)
+
+			notes.AddWarnings(ctx, false, fmt.Errorf(
+				"node %q: cannot check disk image %q: %w", node.General().Hostname(), imagePath, statErr,
+			))
+		}
+
+		// A node this app marked do-not-boot only because its image was missing
+		// boots again once the image exists; a user's do-not-boot is kept.
+		if reason, ok := node.GetAnnotation(DoNotBootReasonAnnotation); ok && reason == dnbReasonMissingImage && statErr == nil {
+			node.General().SetDoNotBoot(false)
+			delete(node.Annotations(), DoNotBootReasonAnnotation)
 		}
 
 		// check if the disk image is present, if not set do not boot to true and warn user
-		if _, err := os.Stat(imagePath); os.IsNotExist(err) {
+		if missingImage {
+			// Record the reason only when this app sets the flag, so a node the
+			// user already marked do-not-boot stays down once the image exists.
+			if dnb := node.General().DoNotBoot(); dnb == nil || !*dnb {
+				node.AddAnnotation(DoNotBootReasonAnnotation, dnbReasonMissingImage)
+			}
+
 			node.General().SetDoNotBoot(true)
 			plog.Warn(
 				plog.TypeSystem,
@@ -407,8 +638,10 @@ func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 			removeStartupInjections(node)
 		}
 
-		// if type is router, skip it and continue
-		if strings.EqualFold(node.Type(), "Router") {
+		// Skip routers other than minirouters; vrouter's config sets the
+		// hostname of a Vyatta or VyOS router.
+		if strings.EqualFold(node.Type(), "Router") &&
+			!strings.EqualFold(node.Hardware().OSType(), osMinirouter) {
 			continue
 		}
 
@@ -430,6 +663,24 @@ func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 		}
 
 		switch strings.ToLower(node.Hardware().OSType()) {
+		case osMinirouter:
+			// minirouter configures the interfaces itself, but nothing else
+			// replaces the image's hostname "phenix", which hostname-mode C2
+			// (SOH, delay.c2, autotunnel) does not match.
+			hostnameFile := startupDir + "/" + node.General().Hostname() + "-hostname.sh"
+
+			addStartupInject(node, hostnameFile, linuxHostnameInjectDst, suppressStartupInjects)
+
+			err := tmpl.CreateFileFromTemplate("linux_hostname.tmpl", node.General().Hostname(), hostnameFile)
+			if err != nil {
+				return fmt.Errorf("generating minirouter hostname script: %w", err)
+			}
+
+			if useC2 {
+				if err := addStartupC2Script(exp, node, hostnameFile, startupC2Linux); err != nil {
+					return err
+				}
+			}
 		case osLinux, "rhel", "centos":
 			var (
 				hostnameFile = startupDir + "/" + node.General().Hostname() + "-hostname.sh"
@@ -551,77 +802,28 @@ func (s Startup) PreStart(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
-func (Startup) PostStart(ctx context.Context, exp *types.Experiment) error {
-	for _, node := range exp.Spec.Topology().Nodes() {
-		if node.External() {
-			continue
-		}
+func (s Startup) PostStart(ctx context.Context, exp *types.Experiment) error {
+	// A dry run launched no VM to tunnel to.
+	if s.options.DryRun || exp.DryRun() {
+		return nil
+	}
 
-		// The autotunnel annotation is independent of default apps, so it is
-		// honored regardless of whether default apps are enabled for this node.
-		if annotation, ok := node.GetAnnotation("phenix/startup-autotunnel"); ok {
-			var tunnels []string
+	// phenix ui creates the autotunnels, and keeps them for as long as the
+	// experiment runs (web/forward/autotunnel.go). Logging them here tells
+	// whoever started the experiment, which may be another process, what was
+	// asked for and which entries are ignored.
+	tunnels, errs := Autotunnels(exp)
 
-			err := mapstructure.Decode(annotation, &tunnels)
-			if err != nil {
-				plog.Error(
-					plog.TypeSystem,
-					"parsing phenix/startup-autotunnel annotation",
-					"exp",
-					exp.Metadata.Name,
-					"vm",
-					node.General().Hostname(),
-					"err",
-					err,
-				)
-			} else {
-				for _, config := range tunnels {
-					tunnel := CreateTunnel{ //nolint:exhaustruct // partial initialization
-						Experiment: exp.Metadata.Name,
-						VM:         node.General().Hostname(),
-						User:       "bot",
-					}
+	for _, err := range errs {
+		plog.Error(plog.TypeSystem, "invalid phenix/startup-autotunnel annotation", "exp", exp.Metadata.Name, "err", err)
+	}
 
-					tokens := strings.Split(config, ":")
-
-					switch len(tokens) {
-					case tunnelConfigPartsPortOnly:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = "127.0.0.1"
-						tunnel.Dport = tokens[0]
-					case tunnelConfigPartsPortHost:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = "127.0.0.1"
-						tunnel.Dport = tokens[1]
-					case tunnelConfigPartsPortHostDest:
-						tunnel.Sport = tokens[0]
-						tunnel.Dhost = tokens[1]
-						tunnel.Dport = tokens[2]
-					default:
-						plog.Error(
-							plog.TypeSystem,
-							"invalid phenix/startup-autotunnel annotation",
-							"value",
-							config,
-						)
-					}
-
-					if tunnel.Sport != "" {
-						go func(exp, vm string, msg CreateTunnel) {
-							switch strings.ToUpper(msg.Dport) {
-							case "VNC": // doesn't require miniccc agent
-								pubsub.Publish("create-tunnel", msg)
-							default:
-								err := mm.IsC2ClientActive(mm.C2NS(exp), mm.C2VM(vm))
-								if err == nil {
-									pubsub.Publish("create-tunnel", msg)
-								}
-							}
-						}(exp.Metadata.Name, node.General().Hostname(), tunnel)
-					}
-				}
-			}
-		}
+	for _, tunnel := range tunnels {
+		plog.Info(
+			plog.TypeSystem,
+			"startup autotunnel requested: phenix ui creates it once the VM's C2 client registers",
+			tunnel.LogArgs()...,
+		)
 	}
 
 	return nil
@@ -633,4 +835,18 @@ func (Startup) Running(ctx context.Context, exp *types.Experiment) error {
 
 func (Startup) Cleanup(ctx context.Context, exp *types.Experiment) error {
 	return nil
+}
+
+// ExperimentStillStarted reports whether the experiment is still stored with
+// the given start time, which a stop clears and a later start replaces. An
+// app's wait polls it to notice a stop from another process, which cannot
+// cancel this process's context. If the store can't tell, it reports true.
+func ExperimentStillStarted(name, start string) bool {
+	exp := types.Experiment{Metadata: store.ConfigMetadata{Name: name}} //nolint:exhaustruct // loaded below
+
+	if err := exp.Reload(); err != nil {
+		return !errors.Is(err, store.ErrNotExist)
+	}
+
+	return exp.Status != nil && exp.Status.StartTime() == start
 }

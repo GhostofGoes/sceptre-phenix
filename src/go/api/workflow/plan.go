@@ -144,7 +144,7 @@ func planCreate(spec Spec, branch string, existing []string) (Plan, error) {
 	switch {
 	case name == "":
 		return Plan{Action: ActionNone, Experiment: "", Reason: reasonNoCreate}, nil
-	case !config.NameRegex.MatchString(name) || strings.EqualFold(name, experiment.ReservedName):
+	case !config.NameRegex.MatchString(name) || experiment.CheckName(name) != nil:
 		return Plan{}, fmt.Errorf("%w: auto.create %q is not a valid experiment name", ErrInvalidSpec, name)
 	case slices.Contains(existing, name):
 		return Plan{}, fmt.Errorf(

@@ -148,9 +148,9 @@ func Disk(d string) RedeployOption {
 	}
 }
 
-// Inject sets whether or not files will be injected into the redeployed VM. If
-// true, and `Disk` is set, and the current VM has file injections configured,
-// the redeployed VM will have the same files injected.
+// Inject sets whether the disk snapshot of the redeployed VM is recreated, from
+// `Disk` or else the node's image, with the node's injections and deletions
+// applied to it again, as at experiment start.
 func Inject(i bool) RedeployOption {
 	return func(o *redeployOptions) {
 		o.inject = i
