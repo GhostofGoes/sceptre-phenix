@@ -26,6 +26,12 @@ restrict -6 default kod notrap nomodify nopeer noquery{{ if not .Server }} noser
 # Local users may interrogate the ntp server more closely.
 restrict 127.0.0.1
 restrict ::1
+{{- if .Source }}
+
+# Accept replies from the configured server: ntpsec drops them under a
+# default that refuses service, and restrict source covers only pool entries.
+restrict {{ .Source }} notrap nomodify noquery
+{{- end }}
 
 # Needed for adding pool entries
 restrict source notrap nomodify noquery
