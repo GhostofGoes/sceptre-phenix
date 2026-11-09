@@ -2073,7 +2073,9 @@ func builtinRouterNode(image string, memory int) builtinNode {
 	}
 }
 
-// builtinVrouterApp configures DHCP on LAN3 and a DNS record on rtr.
+// builtinVrouterApp configures DHCP on LAN3 and a DNS record on rtr. The
+// record is under .test: systemd-resolved, which the noble guests run, sends
+// .local names only to multicast DNS, never to rtr's server.
 const builtinVrouterApp = `
   - name: vrouter
     hosts:
@@ -2088,7 +2090,7 @@ const builtinVrouterApp = `
           dnsServers:
           - 10.40.0.254
         dns:
-          "10.10.0.1": ra.e2e.local`
+          "10.10.0.1": ra.e2e.test`
 
 // TestBuiltinRouter boots a minirouter between three real guests (VR-02,
 // SO-04): minirouter applies vrouter's config, routes between the VLANs,
@@ -2216,7 +2218,7 @@ func builtinCheckRouterGuest(t *testing.T, name string) {
 		builtinCheck{"addresses", "ip -4 -o addr show scope global | awk '{print $4}' | sort | tr '\\n' ' '"},
 		builtinCheck{"dhcp range", "grep -c 'dhcp-range=set:10.40.0.254,10.40.0.100,10.40.0.110$' /etc/dnsmasq.conf"},
 		builtinCheck{"dhcp router", "grep -c 'option:router, 10.40.0.254$' /etc/dnsmasq.conf"},
-		builtinCheck{"dns record", "grep -cx 'host-record=ra.e2e.local,10.10.0.1' /etc/dnsmasq.conf"},
+		builtinCheck{"dns record", "grep -cx 'host-record=ra.e2e.test,10.10.0.1' /etc/dnsmasq.conf"},
 		builtinCheck{"chain drop", "iptables -S lan2-in | grep -- '-j DROP'"},
 		builtinCheck{"chain default", "iptables -S lan2-in | grep -cx -- '-A lan2-in -j ACCEPT'"},
 		builtinCheck{
@@ -2301,7 +2303,7 @@ func builtinCheckDHCP(t *testing.T, name string) {
 		builtinCheck{"address", "ip -4 -o addr show scope global | awk '{print $4}'"},
 		builtinCheck{"default route", "ip route show default | grep -c 'default via 10.40.0.254'"},
 		builtinCheck{"ping ra", "ping -c 3 -W 2 10.10.0.1 >/dev/null && echo ok"},
-		builtinCheck{"dns", "getent hosts ra.e2e.local"},
+		builtinCheck{"dns", "getent hosts ra.e2e.test"},
 	)
 
 	builtinWantGuest(t, "rd", got, map[string]string{"address": addr + "/24", "default route": "1", "ping ra": "ok"})
@@ -2311,12 +2313,12 @@ func builtinCheckDHCP(t *testing.T, name string) {
 	resolves := func(out string) bool {
 		f := strings.Fields(out)
 
-		return len(f) >= 2 && f[0] == "10.10.0.1" && slices.Contains(f[1:], "ra.e2e.local")
+		return len(f) >= 2 && f[0] == "10.10.0.1" && slices.Contains(f[1:], "ra.e2e.test")
 	}
 
 	if !resolves(got["dns"]) {
-		eventually(t, time.Minute, 5*time.Second, "rd to resolve ra.e2e.local through rtr's DNS", func() (bool, string) {
-			dns := builtinGuest(t, name, "rd", builtinCheck{"dns", "getent hosts ra.e2e.local"})["dns"]
+		eventually(t, time.Minute, 5*time.Second, "rd to resolve ra.e2e.test through rtr's DNS", func() (bool, string) {
+			dns := builtinGuest(t, name, "rd", builtinCheck{"dns", "getent hosts ra.e2e.test"})["dns"]
 			if resolves(dns) {
 				return true, ""
 			}
@@ -2329,7 +2331,7 @@ func builtinCheckDHCP(t *testing.T, name string) {
 				"resolvectl dns", "grep ^hosts: /etc/nsswitch.conf",
 			}, " 2>&1; ") + " 2>&1"})["resolver"]
 
-			return false, fmt.Sprintf("getent hosts ra.e2e.local = %q, want 10.10.0.1; resolver: %s", dns, diag)
+			return false, fmt.Sprintf("getent hosts ra.e2e.test = %q, want 10.10.0.1; resolver: %s", dns, diag)
 		})
 	}
 
@@ -2421,7 +2423,7 @@ func TestBuiltinRouterHollow(t *testing.T) {
 	t.Run("VR-01 minimega holds the staged router config", func(t *testing.T) {
 		wantContains(t, "minimega router rtr", mmText(t, name, "router rtr"),
 			"Network: 0: [10.10.0.254/24]", "Network: 1: [10.20.0.254/24]", "Network: 2: [10.40.0.254/24]",
-			"10.40.0.100", "10.40.0.110", "10.10.0.1\tra.e2e.local",
+			"10.40.0.100", "10.40.0.110", "10.10.0.1\tra.e2e.test",
 			"Static Routes:", "10.99.0.0/24\t10.20.0.1", "Firewall Chains:", "lan2-in")
 	})
 
@@ -2434,7 +2436,7 @@ func TestBuiltinRouterHollow(t *testing.T) {
 			"dnsmasq dhcp range 10.40.0.254 10.40.0.100 10.40.0.110",
 			"dnsmasq dhcp option router 10.40.0.254 10.40.0.254",
 			"dnsmasq dhcp option dns 10.40.0.254 10.40.0.254",
-			"dnsmasq dns 10.10.0.1 ra.e2e.local",
+			"dnsmasq dns 10.10.0.1 ra.e2e.test",
 			"dnsmasq commit",
 			"bird static 10.99.0.0/24 10.20.0.1 null",
 			"bird commit",
@@ -2483,7 +2485,7 @@ func TestBuiltinRouterHollow(t *testing.T) {
 
 		for _, line := range []string{
 			"ip add 0 10.10.0.254/24",
-			"dnsmasq dns 10.10.0.1 ra.e2e.local",
+			"dnsmasq dns 10.10.0.1 ra.e2e.test",
 			"fw chain lan2-in action drop 10.20.0.0/24 10.10.0.1:22 tcp",
 			"fw chain lan2-in apply in 1",
 		} {
