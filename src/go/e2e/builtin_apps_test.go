@@ -1426,7 +1426,7 @@ func builtinCheckStartupFiles(t *testing.T, exp *experiment) {
 	wantContains(t, "g1-interfaces.sh", readFile(t, filepath.Join(dir, "g1-interfaces.sh")),
 		`ip addr add 10.10.0.1/24 dev "$dev"`,
 		`ip route add default via 10.10.0.200 dev "$dev"`,
-		`echo "nameserver 10.10.0.53" >> /etc/resolv.conf`,
+		`dns+=("10.10.0.53")`,
 		`ip route add 10.99.0.0/24 via 10.10.0.2`,
 		`ip addr add 10.30.0.1/24 dev "$dev"`,
 	)
@@ -1498,7 +1498,11 @@ func builtinCheckStartupGuests(t *testing.T, name string) {
 			builtinCheck{"staged scripts", "ls /etc/phenix/startup | sort | tr '\\n' ' '"},
 			builtinCheck{"scripts run", "journalctl -b -u phenix.service --no-pager -o cat | grep -cx '" + started + "'"},
 			builtinCheck{"last script", "journalctl -b -u phenix.service --no-pager -o cat | grep -x '" + started + "' | tail -n 1"},
-			builtinCheck{"nameserver", "grep -c '^nameserver 10.10.0.53$' /etc/resolv.conf"},
+			// startup hands the server to systemd-resolved when it runs, and
+			// writes /etc/resolv.conf otherwise.
+			builtinCheck{"nameserver", "if systemctl is-active -q systemd-resolved; then " +
+				"resolvectl dns | grep -cE '^Global:.* 10\\.10\\.0\\.53( |$)'; " +
+				"else grep -c '^nameserver 10.10.0.53$' /etc/resolv.conf; fi"},
 			builtinCheck{"static route", "ip route show 10.99.0.0/24 | grep -c 'via 10.10.0.2'"},
 		)
 
@@ -2570,7 +2574,7 @@ func TestBuiltinDefaultAppOrder(t *testing.T) {
 func builtinRenderNodes() []builtinNode {
 	win := func(host, addr, extra string) builtinNode {
 		return builtinNode{
-			host: host, image: ext4Image, os: "windows",
+			host: host, image: domainNTFSImage, os: "windows",
 			ifaces: []builtinIface{{name: "eth0", vlan: "RND", addr: addr}},
 			extra:  extra,
 		}
@@ -2640,6 +2644,7 @@ const builtinRenderApps = `
 func TestBuiltinRender(t *testing.T) {
 	hollowImages(t)
 	builtinMakeP3Image(t)
+	domainNTFSImages(t)
 
 	const name = "e2e-ba-render"
 
@@ -2673,7 +2678,7 @@ func TestBuiltinRender(t *testing.T) {
 func builtinCheckWindows(t *testing.T, name string) {
 	t.Helper()
 
-	mountDisk(t, builtinSnapshot(t, name, "w1"), 1, "-r", "ro,noload", func(root string) {
+	inspectNTFS(t, builtinSnapshot(t, name, "w1"), func(root string) {
 		for path, want := range map[string]string{
 			"phenix/startup/20-startup.ps1": `$computer_info.Rename("w1")`,
 			"phenix/phenix-startup.ps1":     `Get-ChildItem '/phenix/startup/*.ps1'`,
@@ -2695,7 +2700,7 @@ func builtinCheckWindows(t *testing.T, name string) {
 func builtinCheckWindowsC2(t *testing.T, exp *experiment) {
 	t.Helper()
 
-	mountDisk(t, builtinSnapshot(t, exp.name, "wc"), 1, "-r", "ro,noload", func(root string) {
+	inspectNTFS(t, builtinSnapshot(t, exp.name, "wc"), func(root string) {
 		for _, path := range []string{
 			"phenix/startup/20-startup.ps1",
 			"phenix/phenix-startup.ps1",

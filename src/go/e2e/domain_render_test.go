@@ -2900,9 +2900,20 @@ func domainSnapshotDisk(t *testing.T, c *domainCase, vm string) *domainDisk {
 	return d
 }
 
-// domainReadNTFS is inspectDisk for the NTFS fixture: noload is an ext4
-// option, so the partition is mounted read-only with ntfs-3g.
+// domainReadNTFS is inspectDisk for the NTFS fixture.
 func domainReadNTFS(t *testing.T, image string) *domainDisk {
+	t.Helper()
+
+	var d *domainDisk
+
+	inspectNTFS(t, image, func(root string) { d = domainWalk(t, root) })
+
+	return d
+}
+
+// inspectNTFS mounts partition 1 of a disk read-only with ntfs-3g and runs fn
+// on its root: noload is an ext4 option, so inspectDisk cannot mount NTFS.
+func inspectNTFS(t *testing.T, image string, fn func(root string)) {
 	t.Helper()
 
 	nbdMu.Lock()
@@ -2929,7 +2940,7 @@ func domainReadNTFS(t *testing.T, image string) *domainDisk {
 		}
 	}()
 
-	return domainWalk(t, mnt)
+	fn(mnt)
 }
 
 // domainMountNTFS mounts an NTFS partition with ntfs-3g in the foreground,
