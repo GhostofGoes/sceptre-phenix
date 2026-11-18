@@ -74,10 +74,8 @@ func TestNodeValidate(t *testing.T) {
 			node: nodeWithGateways(boolPtr(true), "10.0.0.1", "10.0.1.1"),
 		},
 		{
-			name:    "external key explicitly false is rejected",
-			node:    nodeWithGateways(boolPtr(false), "10.0.0.1"),
-			wantErr: true,
-			substr:  "external key should not be included",
+			name: "external key explicitly false is internal",
+			node: nodeWithGateways(boolPtr(false), "10.0.0.1"),
 		},
 		{
 			name: "internal node, duplicate interface names",
@@ -714,5 +712,87 @@ func TestCheckInjectionModesAcrossNodes(t *testing.T) {
 	err = CheckInjectionModes(baseDir, []ifaces.NodeSpec{node("a", "0700", false), node("b", "0644", true)})
 	if err != nil {
 		t.Errorf("CheckInjectionModes() with a do-not-boot node = %v, want no refusal", err)
+	}
+}
+
+func TestNodeDiskInjects(t *testing.T) {
+	injections := []*Injection{{SrcF: "/a", DstF: "/a"}, {SrcF: "/b", DstF: "/b"}}
+	deletions := []*Deletion{{PathF: "/c"}}
+
+	tests := []struct {
+		name       string
+		osType     string
+		injections []*Injection
+		deletions  []*Deletion
+		want       []string
+	}{
+		{name: "none", osType: "windows"},
+		{
+			name:       "windows injections only",
+			osType:     "windows",
+			injections: injections,
+			want: []string{
+				`disk inject img:1 options "-t lowntfs-3g -o ignore_case" files "/a":"/a"`,
+				`disk inject img:1 options "-t lowntfs-3g -o ignore_case" files "/b":"/b"`,
+			},
+		},
+		{
+			name:      "linux deletions only",
+			osType:    "linux",
+			deletions: deletions,
+			want:      []string{`disk inject img:1 delete files "/c"`},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			n := Node{
+				GeneralF:    &General{HostnameF: "web"},
+				HardwareF:   &Hardware{OSTypeF: test.osType},
+				InjectionsF: test.injections,
+				DeletionsF:  test.deletions,
+			}
+
+			got, err := n.DiskInjects("img", 1, "/base")
+			if err != nil || !slices.Equal(got, test.want) {
+				t.Errorf("DiskInjects() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+// TestNodeDiskInjectsRefusesInjectionWithoutSource checks that the inject
+// commands of the minimega script keep refusing what FileInjects refuses.
+func TestNodeDiskInjectsRefusesInjectionWithoutSource(t *testing.T) {
+	n := Node{
+		GeneralF:    &General{HostnameF: "rtu-1"},
+		HardwareF:   &Hardware{OSTypeF: "windows"},
+		InjectionsF: []*Injection{{DstF: "/etc/ot-sim/ca.pem"}},
+	}
+
+	const want = `node rtu-1: injection to "/etc/ot-sim/ca.pem" has no source`
+
+	if cmds, err := n.DiskInjects("img", 1, "/base"); err == nil || err.Error() != want {
+		t.Errorf("DiskInjects() = %q, %v, want the error %q", cmds, err, want)
+	}
+}
+
+func TestNodeExternal(t *testing.T) {
+	tests := []struct {
+		name string
+		node Node
+		want bool
+	}{
+		{name: "unset external is internal", node: Node{}, want: false},
+		{name: "external true is external", node: Node{ExternalF: boolPtr(true)}, want: true},
+		{name: "external false is internal", node: Node{ExternalF: boolPtr(false)}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.node.External(); got != tt.want {
+				t.Errorf("Node.External() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }

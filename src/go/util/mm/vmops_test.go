@@ -310,7 +310,7 @@ func TestDiskInjectCommands(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := diskInjectCommands(snap, test.part, test.injects, test.deletions)
+			got := diskInjectCommands(snap, test.part, "linux", test.injects, test.deletions)
 			if !reflect.DeepEqual(got, test.want) {
 				t.Errorf("diskInjectCommands = %q, want %q", got, test.want)
 			}

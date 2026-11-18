@@ -178,6 +178,11 @@ Optional values for a node in the topology configuration can include:
     give it different `permissions`, in one node or in two nodes the start
     injects into, are refused: both would get the mode set last.
 
+    On Windows nodes, injection and deletion paths match existing files
+    regardless of case. The inject partition must be NTFS, and the minimega
+    host needs `lowntfs-3g`; without it, minimega silently falls back to a
+    case-sensitive mount.
+
 !!! note
     The minimega script writes a node's `hostname`, `vm_type` and `cpu`, its
     drives' `image`, `interface` and `cache_mode`, its interfaces' `bridge`,

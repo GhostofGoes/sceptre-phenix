@@ -83,7 +83,7 @@ The supported metadata is:
 |----------|----------|--------|--------|
 | `domain_controller` | Linux, RHEL, or CentOS | `domain`, `username`, `password` | Joins the guest to the domain with `realm join`, unless `realm list` already lists it. |
 | `domain_controller` | Windows | `domain`, `ip`, `username`, `password` | Uses `ip` as the first network adapter's DNS server, then joins the domain. |
-| `auto_logon` | Windows | `username`, `password`, and optional `local` | Configures automatic logon and adds the account to the local Administrators group. |
+| `auto_logon` | Windows | `username`, `password`, and optional `local` | Configures automatic logon. |
 
 ##### Linux Domain Join
 
@@ -245,6 +245,12 @@ nodes other than `minirouter` ones (the `vrouter` app sets a Vyatta or VyOS
 router's hostname). A node with `os_type: minirouter` gets only the hostname
 script, delivered like a Linux node's, since minirouter configures its
 interfaces itself.
+
+#### Skipping Hostname Changes
+
+Set the node annotation `phenix/startup-set-hostname: false` on a Topology node
+to keep the guest's existing hostname while still applying timezone, network
+interface, and domain configuration.
 
 ### ntp App
 

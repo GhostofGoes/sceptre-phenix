@@ -67,6 +67,9 @@ leave a one-line pointer to it from `SKILL.md`.
 - Runtime precedence is CLI flags, config file, environment, then defaults.
 - Never delete a live `config.yaml`; use `phenix settings unset` so its watcher
   remains active.
+- For topology node lifecycle decisions, prefer the semantic helpers
+  `ManagedByPhenix()`, `Launchable()`, and `Schedulable()` over directly
+  combining `External()` and `general.do_not_boot` checks.
 
 ## Setup and Common Commands
 
@@ -307,9 +310,14 @@ requests and publishes it to GitHub Pages from `main` (only its deploy job can
 write). `lint.yml` runs every prek hook on all changes. `ci.yml`,
 `frontend.yml`, `lint.yml`, and `examples.yml` run on pushes to `main` and on
 pull requests only, so a push to an open pull request starts each run once; use
-`workflow_dispatch` for a branch with no pull request. Dependabot keeps the
-pinned actions current. Update affected path filters, inputs, generated
-artifacts, tool versions, and local-equivalent commands together. Preserve
+`workflow_dispatch` for a branch with no pull request. `e2e.yml` and
+`packages.yml` skip pushes to `dependabot/**` branches, which their
+pull_request trigger covers. Dependabot opens one weekly PR each for the
+pinned actions and the Go, npm, pip, and container image dependencies; it
+leaves the Go, Node.js, Ubuntu, and Playwright versions to a maintainer (the
+`ignore` rules in `.github/dependabot.yml`). Update affected path filters,
+inputs, generated artifacts, tool versions, and local-equivalent commands
+together. Preserve
 least-privilege permissions, supported action versions, lockfile caches, and
 shared version values.
 

@@ -107,15 +107,34 @@ func (n Node) Commands() []string {
 }
 
 func (n Node) External() bool {
-	// The topology schema uses the `external` key as a way to determine which of
-	// the two node schemas to apply to a configuration. The value is ignored, but
-	// the key must be provided in order to use the less stringent node schema.
-	// Here, if the key is provided, even if the value is false, we consider it to
-	// be an external node.
-	//
-	// NOTE: the `Node.validate` function should error out if external was
-	// intentionally set to false by a user.
-	return n.ExternalF != nil
+	return n.ExternalF != nil && *n.ExternalF
+}
+
+// ManagedByPhenix reports whether Phenix owns this node as a managed minimega
+// VM-like resource. External/HIL nodes remain part of the topology, but Phenix
+// does not schedule or launch them.
+func (n Node) ManagedByPhenix() bool {
+	return !n.External()
+}
+
+// Launchable reports whether Phenix should start this node as a managed VM.
+// Nodes marked do_not_boot remain managed and schedulable, but are not started
+// automatically.
+func (n Node) Launchable() bool {
+	return n.ManagedByPhenix() && !n.doNotBoot()
+}
+
+// Schedulable reports whether this node participates in Phenix scheduling.
+func (n Node) Schedulable() bool {
+	return n.ManagedByPhenix()
+}
+
+func (n Node) doNotBoot() bool {
+	if n.GeneralF == nil || n.GeneralF.DoNotBootF == nil {
+		return false
+	}
+
+	return *n.GeneralF.DoNotBootF
 }
 
 func (n *Node) SetInjections(injections []ifaces.NodeInjection) {
@@ -603,13 +622,7 @@ func (del Deletion) Description() string {
 }
 
 func (n Node) validate() error {
-	if n.ExternalF != nil {
-		if external := *n.ExternalF; !external {
-			return errors.New(
-				"the external key should not be included for internal nodes (even if set to false)",
-			)
-		}
-
+	if n.External() {
 		return nil
 	}
 
@@ -715,6 +728,10 @@ func (n *Node) setDefaults(bridge string) {
 		return
 	}
 
+	if n.GeneralF == nil || n.HardwareF == nil {
+		return
+	}
+
 	if n.GeneralF.VMTypeF == "" {
 		n.GeneralF.VMTypeF = "kvm"
 	}
@@ -799,6 +816,39 @@ func (c C2Delay) Hostname() string {
 
 func (c C2Delay) UseUUID() bool {
 	return c.UseUUIDF
+}
+
+// DiskInjects returns the minimega commands that inject the node's files into,
+// and delete its deletions from, partition part of disk. On a Windows node the
+// commands match paths regardless of case. It refuses an injection or deletion
+// that FileInjects or FileDeletions refuses, which fails the script's
+// rendering.
+func (n Node) DiskInjects(disk string, part int, baseDir string) ([]string, error) {
+	var (
+		target = fmt.Sprintf("%s:%d", disk, part)
+		osType = n.Hardware().OSType()
+		cmds   []string
+	)
+
+	if len(n.Injections()) > 0 {
+		pairs, err := InjectPairs(baseDir, n.Injections())
+		if err != nil {
+			return nil, fmt.Errorf("node %s: %w", n.General().Hostname(), err)
+		}
+
+		cmds = mm.InjectCommands(target, osType, pairs...)
+	}
+
+	if len(n.Deletions()) > 0 {
+		paths, err := n.FileDeletions()
+		if err != nil {
+			return nil, err
+		}
+
+		cmds = append(cmds, mm.DeleteCommand(target, osType, paths))
+	}
+
+	return cmds, nil
 }
 
 // FileInjects returns the injections of the node as the src:dst pairs of the

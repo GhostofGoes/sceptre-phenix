@@ -618,7 +618,7 @@ func (Minimega) RedeployVM(opts ...Option) error { //nolint:funlen // complex lo
 					)
 				}
 
-				err = inject(old.base, diskInjectCommands(old.base, o.injectPart, o.injects, o.deletions)...)
+				err = inject(old.base, diskInjectCommands(old.base, o.injectPart, o.osType, o.injects, o.deletions)...)
 				if err != nil {
 					return err
 				}
@@ -2071,21 +2071,21 @@ func inject(disk string, commands ...string) error {
 
 // diskInjectCommands returns the `disk inject` commands that inject a node's
 // files into partition part of disk and then delete its deletions from it,
-// as the start-time script does. Partition 0 means the node's files are not
-// injected into its disk (the start-time template skips them too), so there
-// are none.
-func diskInjectCommands(disk string, part int, injects, deletions []string) []string {
+// as the start-time script does, matching paths regardless of case on a
+// Windows disk. Partition 0 means the node's files are not injected into its
+// disk (the start-time template skips them too), so there are none.
+func diskInjectCommands(disk string, part int, osType string, injects, deletions []string) []string {
 	if part == 0 {
 		return nil
 	}
 
-	var commands []string
+	var (
+		target   = fmt.Sprintf("%s:%d", disk, part)
+		commands []string
+	)
 
 	if len(injects) > 0 {
-		commands = append(
-			commands,
-			fmt.Sprintf("disk inject %s:%d files %s", disk, part, strings.Join(injects, " ")),
-		)
+		commands = append(commands, InjectCommands(target, osType, injects...)...)
 	}
 
 	if len(deletions) > 0 {
@@ -2095,10 +2095,7 @@ func diskInjectCommands(disk string, part int, injects, deletions []string) []st
 			paths[i] = `"` + mmcli.Escape(path) + `"`
 		}
 
-		commands = append(
-			commands,
-			fmt.Sprintf("disk inject %s:%d delete files %s", disk, part, strings.Join(paths, ",")),
-		)
+		commands = append(commands, DeleteCommand(target, osType, strings.Join(paths, ",")))
 	}
 
 	return commands

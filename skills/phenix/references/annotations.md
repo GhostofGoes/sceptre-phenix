@@ -102,6 +102,13 @@ and removes the annotation. The `delay.c2` checks accept a wait on a node that
 is `do_not_boot` only for this reason at experiment create, and name the
 reason when they refuse it at start.
 
+## `phenix/startup-set-hostname` (`startup` app, `pre-start` stage)
+
+Defaults to `true`. Set `phenix/startup-set-hostname: false` to skip changing
+the guest's hostname while still configuring timezone, interfaces, domain join,
+and auto-logon. The value must be a real YAML boolean (`true` or `false`);
+non-boolean values (such as `"false"` or `0`) are ignored.
+
 ## `vrouter/vyos-password` (`vrouter` app)
 
 Overrides the default `vyos` login password used when templating the boot

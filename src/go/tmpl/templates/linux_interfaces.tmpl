@@ -3,6 +3,8 @@
 # Stop NetworkManager from configuring interfaces and overwriting these settings
 service NetworkManager stop
 
+dns=()
+
 # Check if ip command exists
 if command -v 'ip' &>/dev/null; then
 {{ range $idx, $iface := .Network.Interfaces }}
@@ -26,7 +28,7 @@ if command -v 'ip' &>/dev/null; then
         {{ end }}
     {{ end }}
     {{ range $server := $iface.DNS }}
-    grep -qxF "nameserver {{ $server }}" /etc/resolv.conf 2>/dev/null || echo "nameserver {{ $server }}" >> /etc/resolv.conf
+    dns+=("{{ $server }}")
     {{ end }}
 {{ end }}
 {{ range $route := .Network.Routes }}
@@ -54,10 +56,24 @@ else
         {{ end }}
     {{ end }}
     {{ range $server := $iface.DNS }}
-    grep -qxF "nameserver {{ $server }}" /etc/resolv.conf 2>/dev/null || echo "nameserver {{ $server }}" >> /etc/resolv.conf
+    dns+=("{{ $server }}")
     {{ end }}
 {{ end }}
 {{ range $route := .Network.Routes }}
     route add -net {{ $route.Destination }} gw {{ $route.Next }}
 {{ end }}
+fi
+
+if [ ${#dns[@]} -gt 0 ]; then
+    # systemd-resolved owns and rewrites /etc/resolv.conf, so configure it instead
+    if systemctl is-active -q systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNS=%s\n' "${dns[*]}" > /etc/systemd/resolved.conf.d/phenix.conf
+        systemctl restart systemd-resolved
+    else
+        # the startup script runs at every boot, so add only the missing servers
+        for server in "${dns[@]}"; do
+            grep -qxF "nameserver $server" /etc/resolv.conf 2>/dev/null || echo "nameserver $server" >> /etc/resolv.conf
+        done
+    fi
 fi

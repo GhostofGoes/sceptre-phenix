@@ -97,6 +97,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **NTP App**: ntpsec clients accept replies from their configured server.
+- **Startup App DNS**: On Linux VMs running `systemd-resolved`, the startup app sets the topology's DNS servers in `/etc/systemd/resolved.conf.d/phenix.conf` instead of appending them to `/etc/resolv.conf`, which `systemd-resolved` rewrites when interfaces change.
 - **Web UI Accessibility**: Fixed WCAG A and AA failures that only showed with data: controls that worked only with a mouse, controls with no name, low-contrast colored buttons and tags, dialogs without a dialog role or focus return, and a keyboard trap in the terminal.
 - **Web UI Idle Timeout**: A warning time longer than the idle timeout no longer delays the logout past the timeout, and Settings rejects a warning time that is not shorter than the timeout.
 - **Web UI**: The multi-VM toolbar of a running experiment no longer shows two Restart buttons.

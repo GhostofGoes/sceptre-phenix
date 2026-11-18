@@ -971,13 +971,18 @@ func Redeploy(expName, vmName string, opts ...RedeployOption) error {
 		}
 	}
 
-	var injects, deletions []string
+	var (
+		injects, deletions []string
+		osType             string
+	)
 
 	if o.inject {
 		if o.disk == "" {
 			o.disk = node.Hardware().Drives()[0].Image()
 			o.part = *node.Hardware().Drives()[0].InjectPartition()
 		}
+
+		osType = node.Hardware().OSType()
 
 		injects, deletions, err = redeployFiles(node, exp.Spec.BaseDir())
 		if err != nil {
@@ -995,6 +1000,7 @@ func Redeploy(expName, vmName string, opts ...RedeployOption) error {
 		mm.Deletions(deletions...),
 		mm.InjectPartition(o.part),
 		mm.RecreateSnapshot(o.inject),
+		mm.OSType(osType),
 	}
 
 	err = mm.RedeployVM(mmOpts...)

@@ -25,6 +25,7 @@ type options struct {
 	injects          []string
 	deletions        []string
 	recreateSnapshot bool
+	osType           string
 
 	connectIface int
 	connectVLAN  string
@@ -119,6 +120,14 @@ func Deletions(d ...string) Option {
 func RecreateSnapshot(r bool) Option {
 	return func(o *options) {
 		o.recreateSnapshot = r
+	}
+}
+
+// OSType sets the OS type of the VM's disk, which decides how files are
+// injected into it.
+func OSType(t string) Option {
+	return func(o *options) {
+		o.osType = t
 	}
 }
 

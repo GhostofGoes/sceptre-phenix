@@ -53,6 +53,8 @@ func TestStartupLinuxScriptsCanRunAgain(t *testing.T) {
 	// realm lists joined realms in lower case, as realmd does.
 	fakes := map[string]string{
 		"hostnamectl": "#!/bin/sh\nexit 0\n",
+		// systemd-resolved does not run, so the DNS servers go to resolv.conf.
+		"systemctl": "#!/bin/sh\nexit 3\n",
 		"realm": `#!/bin/sh
 case "$1" in
 list) tr 'A-Z' 'a-z' < "$REALMS" 2>/dev/null ;;
@@ -87,18 +89,23 @@ esac
 	}
 
 	// The interfaces script also reconfigures every interface; only its DNS
-	// lines run here.
-	var dns []string
+	// lines run here: those that collect the servers, and the block at its end
+	// that writes them.
+	dns := []string{"dns=()"}
 
-	for line := range strings.SplitSeq(read(filepath.Join(startupDir, "phenix-web-interfaces.sh")), "\n") {
-		if strings.Contains(line, "/etc/resolv.conf") {
+	interfaces := read(filepath.Join(startupDir, "phenix-web-interfaces.sh"))
+	for line := range strings.SplitSeq(interfaces, "\n") {
+		if strings.Contains(line, "dns+=(") {
 			dns = append(dns, line)
 		}
 	}
 
-	if len(dns) == 0 {
-		t.Fatal("the interfaces script writes no DNS server to /etc/resolv.conf")
+	_, block, found := strings.Cut(interfaces, "\nif [ ${#dns[@]} -gt 0 ]; then")
+	if len(dns) == 1 || !found {
+		t.Fatalf("the interfaces script does not collect and write its DNS servers:\n%s", interfaces)
 	}
+
+	dns = append(dns, "if [ ${#dns[@]} -gt 0 ]; then"+block)
 
 	scripts := map[string]string{
 		"hostname":   strings.ReplaceAll(read(filepath.Join(startupDir, "phenix-web-hostname.sh")), "/etc/hosts", hosts),

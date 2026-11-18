@@ -64,7 +64,8 @@ for a complete, copyable two-node topology):
   and a `dst` or deletion path with a `..` element are refused; `permissions` (octal, at most
   `0777`) are set on a `src` in the experiment's base directory, and on a copy of any other regular
   file; a directory outside the base directory cannot carry `permissions`, and two injections
-  may not give one base-directory `src` different `permissions`
+  may not give one base-directory `src` different `permissions`; on `windows` nodes
+  paths match regardless of case
 - the minimega script writes `hostname`, `vm_type`, `cpu`, drive and interface fields, VLAN
   aliases and schedule hosts unquoted, so phenix refuses one with whitespace, a quote, `\`, `#`
   or a control character, and a `commands` entry or `advanced` setting with a control character

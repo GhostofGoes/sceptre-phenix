@@ -291,3 +291,36 @@ func TestGetClusterHostsReportsAnUnreachableMinimega(t *testing.T) {
 		}
 	}
 }
+
+// TestDiskInjectCommandsMatchWindowsPathsRegardlessOfCase checks that a
+// redeploy deletes files from a Windows disk with the case-insensitive NTFS
+// mount the start-time script uses.
+func TestDiskInjectCommandsMatchWindowsPathsRegardlessOfCase(t *testing.T) {
+	tests := []struct {
+		osType string
+		want   []string
+	}{
+		{
+			osType: "linux",
+			want:   []string{`disk inject vm_snapshot:1 delete files "/etc/old-config","/var/tmp/stale dir"`},
+		},
+		{
+			osType: "windows",
+			want: []string{
+				`disk inject vm_snapshot:1 options "-t lowntfs-3g -o ignore_case" ` +
+					`delete files "/etc/old-config","/var/tmp/stale dir"`,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.osType, func(t *testing.T) {
+			got := diskInjectCommands(
+				"vm_snapshot", 1, test.osType, nil, []string{"/etc/old-config", "/var/tmp/stale dir"},
+			)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("diskInjectCommands() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
