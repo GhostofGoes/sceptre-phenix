@@ -1388,7 +1388,8 @@ spec:
 // namespace; with --treat-mm-errors-as-warnings it must start the other VM and
 // warn about the failed one. Both of phenix's start paths are covered: `vm
 // start all`, and one `vm start` per VM, which phenix uses whenever the
-// topology has an external or delayed node.
+// topology has a delayed node (an external node is not launched at all, so it
+// leaves `vm start all` in place).
 func TestCoreLaunchFailure(t *testing.T) {
 	hollowImages(t)
 
@@ -1448,7 +1449,8 @@ func coreLaunchFailure(t *testing.T, name string, perVM bool) {
 
 	nodes := []string{coreFaultNode("f1", "10.43.0.1"), hollowNode("f2", "LAN", "10.43.0.2", "")}
 	if perVM {
-		nodes = append(nodes, coreExternalNode("fext", "LAN", "10.43.0.3"))
+		// A user-delayed VM is launched but left for the user to start.
+		nodes = append(nodes, hollowNode("fdel", "LAN", "10.43.0.3", "\n    delay:\n      user: true"))
 	}
 
 	exp := coreExperiment(t, name, topology(nodes...), "")
