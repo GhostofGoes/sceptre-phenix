@@ -580,13 +580,17 @@ func (c *Cache) AddFileToCache(fname string) error { //nolint:funlen // complex 
 		// get LogEntry from line
 		var entry LogEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			badLineCount += 1
-			// following line can clog up logs with misformatting logs. Might be a good idea to have one or two
-			// instances. if someone adds a bad logfile to directory we could see a ton of these entries
-			if badLineCount < MaxJSONErrorCount {
-				Warn(
+			// phenix ui and every CLI command write to the log file, and every
+			// CLI command re-reads it, so a line torn by two writers would be
+			// reported on each command's console. Skip it, but count its bytes,
+			// so the byte positions cached for the lines after it stay right.
+			badLineCount++
+			byteCount += len(line)
+
+			if badLineCount <= MaxJSONErrorCount {
+				Debug(
 					TypeSystem,
-					"error with json unmarshal",
+					"skipping a log file line that is not a JSON log entry",
 					"filename",
 					fname,
 					"line",
@@ -599,27 +603,15 @@ func (c *Cache) AddFileToCache(fname string) error { //nolint:funlen // complex 
 			}
 
 			if badLineCount == MaxJSONErrorCount {
-				Warn(
+				Debug(
 					TypeSystem,
-					"error with json unmarshal",
-					"filename",
-					fname,
-					"line",
-					string(line),
-					"error",
-					err,
-					"bad line count",
-					badLineCount,
-				)
-				Warn(
-					TypeSystem,
-					"too many errors with json unmarshal. stopping reports of errors for file",
+					"too many log file lines that are not JSON log entries. stopping reports of them for file",
 					"filename",
 					fname,
 				)
 			}
 
-			continue // ignore for now...
+			continue
 		}
 
 		// update file data for first and last time

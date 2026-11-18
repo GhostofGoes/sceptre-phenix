@@ -69,6 +69,21 @@ func TestNTPLinuxTemplateClientNoServe(t *testing.T) {
 	}
 }
 
+// TestNTPLinuxTemplateClientAcceptsItsSource verifies that the client config
+// lets the configured server's replies through its noserve default, which
+// ntpsec otherwise applies to them.
+func TestNTPLinuxTemplateClientAcceptsItsSource(t *testing.T) {
+	var buf bytes.Buffer
+
+	if err := tmpl.GenerateFromTemplate("ntp_linux.tmpl", app.NTPTemplateData{Source: "10.0.0.1", Server: false}, &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(buf.String(), "\nrestrict 10.0.0.1 notrap nomodify noquery\n") {
+		t.Fatalf("expected a restrict line for the source 10.0.0.1:\n%s", buf.String())
+	}
+}
+
 // TestNTPLinuxTemplateServerServes verifies that ntp_linux.tmpl server config
 // does not include noserve so the VM can serve time to NTP clients.
 func TestNTPLinuxTemplateServerServes(t *testing.T) {

@@ -11,6 +11,9 @@ if command -v 'ip' &>/dev/null; then
     dev=$(ip -oneline -4 link show | grep -iv 'LOOPBACK' | awk 'NR=={{ addInt $idx 1 }} {split($2, devname, ":"); print devname[1]}')
     ip link set dev "$dev" down
     ip addr flush dev "$dev"
+    {{ if gt $iface.MTU 0 }}
+    ip link set dev "$dev" mtu {{ $iface.MTU }}
+    {{ end }}
 
     {{ if or ($iface.QinQ) (eq $iface.Proto "manual") }}
     ip link set dev "$dev" up
@@ -36,6 +39,9 @@ else
 {{ range $idx, $iface := .Network.Interfaces }}
     dev=$(ifconfig -s -a | grep -ivE '^lo|Iface' | awk 'NR=={{ addInt $idx 1 }} { print $1 }')
     ifconfig "$dev" down
+    {{ if gt $iface.MTU 0 }}
+    ifconfig "$dev" mtu {{ $iface.MTU }}
+    {{ end }}
 
     {{ if or ($iface.QinQ) (eq $iface.Proto "manual") }}
     ifconfig "$dev" up
@@ -65,6 +71,9 @@ if [ ${#dns[@]} -gt 0 ]; then
         printf '[Resolve]\nDNS=%s\n' "${dns[*]}" > /etc/systemd/resolved.conf.d/phenix.conf
         systemctl restart systemd-resolved
     else
-        printf 'nameserver %s\n' "${dns[@]}" >> /etc/resolv.conf
+        # the startup script runs at every boot, so add only the missing servers
+        for server in "${dns[@]}"; do
+            grep -qxF "nameserver $server" /etc/resolv.conf 2>/dev/null || echo "nameserver $server" >> /etc/resolv.conf
+        done
     fi
 fi

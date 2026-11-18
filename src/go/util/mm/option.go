@@ -21,10 +21,11 @@ type options struct {
 
 	tags map[string]string
 
-	injectPart int
-	injects    []string
-	deletions  []string
-	osType     string
+	injectPart       int
+	injects          []string
+	deletions        []string
+	recreateSnapshot bool
+	osType           string
 
 	connectIface int
 	connectVLAN  string
@@ -105,9 +106,20 @@ func Injects(i ...string) Option {
 	}
 }
 
+// Deletions sets the paths of the files RedeployVM deletes from a recreated
+// disk snapshot after the injections.
 func Deletions(d ...string) Option {
 	return func(o *options) {
 		o.deletions = d
+	}
+}
+
+// RecreateSnapshot makes RedeployVM recreate the disk snapshot of a VM that
+// runs on one from the redeploy's disk and apply its injections and deletions
+// to it, even when the VM has neither.
+func RecreateSnapshot(r bool) Option {
+	return func(o *options) {
+		o.recreateSnapshot = r
 	}
 }
 
@@ -190,7 +202,8 @@ type c2Options struct {
 	testConn string
 	sendFile string
 
-	mount *bool
+	mount     *bool
+	mountPath string
 
 	timeout time.Duration
 	wait    bool
@@ -260,6 +273,14 @@ func C2Mount() C2Option {
 	return func(o *c2Options) {
 		t := true
 		o.mount = &t
+	}
+}
+
+// C2MountPath sets the host directory C2Mount mounts the VM's filesystem at,
+// instead of the default phenix mount path for the VM.
+func C2MountPath(path string) C2Option {
+	return func(o *c2Options) {
+		o.mountPath = path
 	}
 }
 

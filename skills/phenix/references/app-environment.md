@@ -26,6 +26,7 @@ identify which one applies before debugging a missing variable:
 | `PHENIX_LOG_FILE` | `stderr` | apps, SCORCH, schedulers | App logs stream back to phēnix rather than to a file |
 | `PHENIX_DRYRUN` | `true`/`false` | apps, SCORCH | Whether the run is a dry run |
 | `PHENIX_STORE_ENDPOINT` | `store.endpoint` | apps only | Data store endpoint |
+| `PHENIX_HOSTNAME_SUFFIXES` | `hostname-suffixes` | apps, SCORCH | Comma-separated suffixes phenix trims from host names to tell the headnode; set but empty means none, not the defaults |
 | `PHENIX_SCORCH_STARTTIME` | run start time | SCORCH only | Start time of the SCORCH run |
 
 A user app that needs anything else must read it from the experiment spec on

@@ -44,3 +44,7 @@ streams in.
 ![screenshot](images/exp_netflow_tab.png){: width=800 .center}
 
 To stop netflow capture for the experiment, click the red network icon.
+
+Stopping the experiment also stops its netflow capture. When the experiment is
+stopped outside the web UI, for example with `phenix experiment stop`, phēnix
+ends the netflow stream within about 5 seconds.

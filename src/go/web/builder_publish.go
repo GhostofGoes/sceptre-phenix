@@ -167,7 +167,9 @@ func newBuilderPublishOps() builderPublishOps {
 		createConfig: func(cfg *store.Config) (*store.Config, error) {
 			return config.Create(config.CreateFromConfig(cfg), config.CreateWithValidation())
 		},
-		updateConfig: config.Update,
+		updateConfig: func(name string, cfg *store.Config) error {
+			return config.Update(name, cfg)
+		},
 		createExperiment: func(
 			ctx context.Context,
 			name, topology, scenario string,

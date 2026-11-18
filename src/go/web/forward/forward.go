@@ -2,6 +2,7 @@ package forward
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -14,10 +15,8 @@ import (
 	"golang.org/x/net/websocket"
 
 	"phenix/api/experiment"
-	"phenix/app"
 	"phenix/util/mm"
 	"phenix/util/plog"
-	"phenix/util/pubsub"
 	"phenix/web/broker"
 	bt "phenix/web/broker/brokertypes"
 	ft "phenix/web/forward/forwardtypes"
@@ -27,78 +26,123 @@ import (
 )
 
 const (
-	forwardTickerInterval = 10 * time.Second
+	// forwardTickerInterval paces the reaper and the autotunnel passes.
+	forwardTickerInterval = 5 * time.Second
 	forwardPortBase       = 50000
 	forwardPortRange      = 15000
+
+	// maxTunnelAttempts bounds the local ports a forward tries.
+	maxTunnelAttempts = 10
 )
 
 var (
 	forwards   = make(map[string]ft.Listener) //nolint:gochecknoglobals // global state
 	forwardsMu sync.Mutex                     //nolint:gochecknoglobals // global lock
+
+	// stopping holds the experiments this process is stopping, from the
+	// stopping hook until the stop ends. Guarded by forwardsMu.
+	stopping = make(map[string]struct{}) //nolint:gochecknoglobals // global state
+
+	endExperimentAutotunnels = endAutotunnels //nolint:gochecknoglobals // overridden by tests
 )
 
-func init() { //nolint:gochecknoinits // background worker
-	experiment.RegisterHook("stop", func(stage, name string) {
-		forwardsMu.Lock()
-		defer forwardsMu.Unlock()
+func init() { //nolint:gochecknoinits // experiment hook registration
+	experiment.RegisterHook("stopping", func(_, name string) { stopExperimentForwards(name) })
+	experiment.RegisterHook("stop-end", func(_, name string) { experimentStopped(name) })
+}
 
-		for _, l := range forwards {
-			if l.Exp == name {
-				deleteForward(l)
-			}
-		}
-	})
+// stopExperimentForwards is the stopping hook of an experiment's forwards. It
+// marks the experiment stopping, so createPortForward refuses a forward to it
+// and the autotunnel passes leave it alone until the stop ends, then waits for
+// a pass in progress, which may still ask minimega about its VMs, and forgets
+// its autotunnels: the stopping hooks run before the cleanup apps, and the
+// SCORCH hook may wait minutes. It then drops the forwards before the
+// namespace is cleared: a reaper tick asks minimega about their tunnels, which
+// would create the namespace again.
+func stopExperimentForwards(name string) {
+	forwardsMu.Lock()
+	stopping[name] = struct{}{}
+	forwardsMu.Unlock()
 
+	endExperimentAutotunnels(name)
+	deleteExperimentForwards(name)
+}
+
+// experimentStopped is the stop-end hook of an experiment's forwards. A stop
+// ends with it also when it returns early, because another process stopped or
+// restarted the experiment meanwhile, or panics; otherwise the mark would
+// refuse every forward to the experiment until phenix ui restarts. Once the
+// experiment is stored stopped, createPortForward refuses it as not running.
+func experimentStopped(name string) {
+	forwardsMu.Lock()
+	defer forwardsMu.Unlock()
+
+	delete(stopping, name)
+}
+
+// errExperimentStopping reports a forward to an experiment this process is
+// stopping.
+var errExperimentStopping = errors.New("experiment is stopping")
+
+// refuseStopping is checkNotStopping for a caller that does not hold
+// forwardsMu.
+func refuseStopping(exp, vm string) error {
+	forwardsMu.Lock()
+	defer forwardsMu.Unlock()
+
+	return checkNotStopping(exp, vm)
+}
+
+// checkNotStopping returns errExperimentStopping when this process is
+// stopping exp. The caller holds forwardsMu.
+func checkNotStopping(exp, vm string) error {
+	if _, ok := stopping[exp]; ok {
+		return fmt.Errorf("forwarding to vm %s: %w", vm, errExperimentStopping)
+	}
+
+	return nil
+}
+
+// Start runs phenix ui's port forward service, which reaps forwards whose
+// minimega tunnel is gone and keeps the startup autotunnels of every running
+// experiment, whichever process started it.
+func Start() {
 	go func() {
-		var (
-			ticker       = time.NewTicker(forwardTickerInterval)
-			createTunnel = pubsub.Subscribe("create-tunnel")
-		)
+		ticker := time.NewTicker(forwardTickerInterval)
 
 		for {
-			select {
-			case <-ticker.C:
-				forwardsMu.Lock()
-				reapForwards()
-				forwardsMu.Unlock()
-			case pub := <-createTunnel:
-				tunnel, _ := pub.(app.CreateTunnel)
+			reconcileAutotunnels(time.Now())
 
-				err := createPortForward(
-					tunnel.Experiment,
-					tunnel.VM,
-					tunnel.Sport,
-					tunnel.Dhost,
-					tunnel.Dport,
-					tunnel.User,
-				)
-				if err != nil {
-					plog.Error(
-						plog.TypeSystem,
-						"adding port forward",
-						"exp",
-						tunnel.Experiment,
-						"vm",
-						tunnel.VM,
-						"sport",
-						tunnel.Sport,
-						"host",
-						tunnel.Dhost,
-						"dport",
-						tunnel.Dport,
-						"err",
-						err,
-					)
-				}
-			}
+			<-ticker.C
 		}
 	}()
 }
 
 func createPortForward(exp, vm, src, host, dst, user string) error {
-	var err error
+	_, _, err := addPortForward(exp, vm, src, host, dst, user, false)
 
+	return err
+}
+
+// addPortForward creates a forward and returns it. With adopt, a minimega
+// tunnel already open to the destination, such as one an earlier phenix ui
+// process created, carries the forward instead of a new one; it reports
+// whether it adopted one.
+//
+//nolint:funlen // validation, then creation under the lock
+func addPortForward(exp, vm, src, host, dst, user string, adopt bool) (ft.Listener, bool, error) {
 	listener := ft.Listener{Exp: exp, VM: vm, Owner: user} //nolint:exhaustruct // partial initialization
+
+	if err := refuseStopping(exp, vm); err != nil {
+		return listener, false, err
+	}
+
+	// minimega would create the namespace of a stopped or dry-run experiment.
+	if err := experiment.RequireRunning(exp); err != nil {
+		return listener, false, fmt.Errorf("forwarding to vm %s: %w", vm, err)
+	}
+
+	var err error
 
 	if host == "" {
 		listener.DstHost = "127.0.0.1"
@@ -108,14 +152,14 @@ func createPortForward(exp, vm, src, host, dst, user string) error {
 
 	listener.SrcPort, err = strconv.Atoi(src)
 	if err != nil {
-		return fmt.Errorf("parsing source port %s for forward: %w", src, err)
+		return listener, false, fmt.Errorf("parsing source port %s for forward: %w", src, err)
 	}
 
 	switch strings.ToUpper(dst) {
 	case "VNC":
 		endpoint, err := mm.GetVNCEndpoint(mm.NS(exp), mm.VMName(vm))
 		if err != nil {
-			return fmt.Errorf("getting VNC endpoint for vm %s in experiment %s: %w", vm, exp, err)
+			return listener, false, fmt.Errorf("getting VNC endpoint for vm %s in experiment %s: %w", vm, exp, err)
 		}
 
 		tokens := strings.Split(endpoint, ":")
@@ -129,48 +173,59 @@ func createPortForward(exp, vm, src, host, dst, user string) error {
 	default:
 		info := mm.GetVMInfo(mm.NS(exp), mm.VMName(vm))
 		if len(info) == 0 {
-			return fmt.Errorf("vm %s not found for experiment %s", vm, exp)
+			return listener, false, fmt.Errorf("vm %s not found for experiment %s", vm, exp)
 		}
 
-		listener.ClusterHost = info[0].Host
+		listener.ClusterHost = info.Named(vm).Host
 
 		listener.DstPort, err = strconv.Atoi(dst)
 		if err != nil {
-			return fmt.Errorf("parsing destination port %s for forward: %w", dst, err)
+			return listener, false, fmt.Errorf("parsing destination port %s for forward: %w", dst, err)
 		}
 	}
 
 	forwardsMu.Lock()
 	defer forwardsMu.Unlock()
 
+	// The stopping hook may have run while minimega was queried.
+	if err := checkNotStopping(exp, vm); err != nil {
+		return listener, false, err
+	}
+
 	reapForwards()
 
 	if _, ok := forwards[listener.ToKey()]; ok {
-		return fmt.Errorf("forward already exists for user %s", user)
+		return listener, false, fmt.Errorf("forward already exists for user %s", user)
+	}
+
+	adopted := false
+
+	if adopt && listener.ClusterPort == 0 {
+		listener.ClusterPort, adopted = openTunnelPort(listener)
 	}
 
 	if listener.ClusterPort == 0 {
-		listener.ClusterPort = forwardPortBase + rand.IntN(forwardPortRange) //nolint:gosec // weak random number generator
+		// Another local port is tried when minimega's is taken, a bounded
+		// number of times: the lock every forward request needs is held.
+		for attempt := 1; ; attempt++ {
+			listener.ClusterPort = forwardPortBase + rand.IntN(forwardPortRange) //nolint:gosec // weak random number generator
 
-		for {
 			err = mm.CreateTunnel(
 				mm.NS(exp),
 				mm.VMName(vm),
 				mm.TunnelSourcePort(listener.ClusterPort),
 				mm.TunnelDestinationPort(listener.DstPort),
-				mm.TunnelDestinationHost(host),
+				mm.TunnelDestinationHost(listener.DstHost),
 			)
-			if err != nil {
-				if strings.Contains(err.Error(), "bind: address already in use") {
-					listener.ClusterPort = forwardPortBase + rand.IntN(forwardPortRange) //nolint:gosec // weak random number generator
-
-					continue
-				} else {
-					return fmt.Errorf("creating tunnel: %w", err)
-				}
+			if err == nil {
+				break
 			}
 
-			break
+			portTaken := strings.Contains(err.Error(), "bind: address already in use") &&
+				!errors.Is(err, mm.ErrUnsafeArgument)
+			if !portTaken || attempt == maxTunnelAttempts {
+				return listener, false, fmt.Errorf("creating tunnel: %w", err)
+			}
 		}
 	}
 
@@ -184,7 +239,26 @@ func createPortForward(exp, vm, src, host, dst, user string) error {
 		body,
 	)
 
-	return nil
+	return listener, adopted, nil
+}
+
+// openTunnelPort returns the host port of a minimega tunnel already open to
+// the listener's destination in its VM, if there is one.
+func openTunnelPort(l ft.Listener) (int, bool) {
+	tunnels, _ := mm.GetTunnels(
+		mm.NS(l.Exp),
+		mm.VMName(l.VM),
+		mm.TunnelDestinationHost(l.DstHost),
+		mm.TunnelDestinationPort(l.DstPort),
+	)
+
+	for _, row := range tunnels {
+		if port, err := strconv.Atoi(row["src port"]); err == nil && port > 0 {
+			return port, true
+		}
+	}
+
+	return 0, false
 }
 
 // GetPortForwards - GET /experiments/{exp}/vms/{name}/forwards.
@@ -274,6 +348,13 @@ func CreatePortForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A VNC forward carries the VM's console.
+	if strings.EqualFold(dst, "VNC") && !vncAllowed(role, user, exp, vm) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	err := createPortForward(exp, vm, src, host, dst, user)
 	if err != nil {
 		plog.Error(
@@ -341,11 +422,15 @@ func DeletePortForward(w http.ResponseWriter, r *http.Request) {
 		host = "127.0.0.1"
 	}
 
-	info := mm.GetVMInfo(mm.NS(exp), mm.VMName(vm))
-	if len(info) == 0 {
-		http.Error(w, "vm not found", http.StatusNotFound)
+	// minimega would create the namespace of a stopped or dry-run experiment,
+	// whose forwards the reaper below drops.
+	if experiment.RequireRunning(exp) == nil {
+		info := mm.GetVMInfo(mm.NS(exp), mm.VMName(vm))
+		if len(info) == 0 {
+			http.Error(w, "vm not found", http.StatusNotFound)
 
-		return
+			return
+		}
 	}
 
 	remoteDst, err := strconv.Atoi(dst)
@@ -439,7 +524,7 @@ func GetPortForwardWebSocket(w http.ResponseWriter, r *http.Request) {
 	if listener, ok := forwards[key]; ok {
 		forwardsMu.Unlock()
 
-		websocket.Handler(util.ConnectWSHandler(listener.ClusterEndpoint())).ServeHTTP(w, r)
+		connectForward(w, r, listener, role, user)
 
 		return
 	}
@@ -476,5 +561,30 @@ func GetPortForwardWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	forwardsMu.Unlock()
 
+	connectForward(w, r, listener, role, user)
+}
+
+// connectForward connects the websocket request to the forward's listener.
+// A forward to the VM's VNC endpoint carries its console, so it needs the
+// permission the VNC websocket needs, whoever created the forward.
+func connectForward(w http.ResponseWriter, r *http.Request, listener ft.Listener, role rbac.Role, user string) {
+	if listener.QEMU && !vncAllowed(role, user, listener.Exp, listener.VM) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+
+		return
+	}
+
 	websocket.Handler(util.ConnectWSHandler(listener.ClusterEndpoint())).ServeHTTP(w, r)
+}
+
+// vncAllowed reports whether role may open the console of the VM, as the VNC
+// websocket requires, and logs a refusal.
+func vncAllowed(role rbac.Role, user, exp, vm string) bool {
+	if role.Allowed("vms/vnc", "get", exp+"/"+vm) {
+		return true
+	}
+
+	plog.Warn(plog.TypeSecurity, "vnc port forward not allowed", "user", user, "exp", exp, "vm", vm)
+
+	return false
 }

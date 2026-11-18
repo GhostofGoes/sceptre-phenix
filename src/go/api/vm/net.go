@@ -20,6 +20,10 @@ func Connect(expName, vmName string, iface int, vlan string) error {
 		return errors.New("no VM name provided")
 	}
 
+	if err := requireRunning(expName); err != nil {
+		return err
+	}
+
 	exp, err := experiment.Get(expName)
 	if err != nil {
 		return fmt.Errorf("getting experiment %s: %w", expName, err)
@@ -49,6 +53,10 @@ func Disconnect(expName, vmName string, iface int) error {
 
 	if vmName == "" {
 		return errors.New("no VM name provided")
+	}
+
+	if err := requireRunning(expName); err != nil {
+		return err
 	}
 
 	err := mm.DisconnectVMInterface(mm.NS(expName), mm.VMName(vmName), mm.ConnectInterface(iface))

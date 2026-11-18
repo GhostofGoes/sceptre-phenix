@@ -15,6 +15,11 @@ type Command struct {
 	Filters   []string
 	Namespace string
 	Timeout   time.Duration
+
+	// NoPreprocess sends the command with `.preprocess false`, so minimega
+	// takes its arguments as written: it neither expands $name and ${name} in
+	// them nor fetches arguments starting with file:, http(s):// or tar:.
+	NoPreprocess bool
 }
 
 // NewCommand returns a pointer to a new, initialized command.
@@ -55,8 +60,31 @@ func (c *Command) String() string {
 		cmd = fmt.Sprintf("namespace %q %v", c.Namespace, cmd)
 	}
 
+	// minimega turns preprocessing off for the whole nested command, and
+	// carries the setting to the copies it runs on each namespace host.
+	if c.NoPreprocess {
+		cmd = ".preprocess false " + cmd
+	}
+
 	// Don't record command in history.
 	cmd = fmt.Sprintf(".record false %v", cmd)
 
 	return cmd
+}
+
+// quoteEscaper escapes the characters minicli treats specially inside a
+// double-quoted string (see minimega's pkg/minicli escapedChars).
+var quoteEscaper = strings.NewReplacer( //nolint:gochecknoglobals // immutable
+	`\`, `\\`,
+	`"`, `\"`,
+	"\n", `\n`,
+	"\r", `\r`,
+	"\t", `\t`,
+)
+
+// Escape escapes s for use between double quotes in a minimega command or
+// script, so a value containing quotes, backslashes or line breaks reaches
+// minimega intact instead of ending the quoted string early.
+func Escape(s string) string {
+	return quoteEscaper.Replace(s)
 }

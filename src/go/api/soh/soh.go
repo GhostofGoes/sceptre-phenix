@@ -11,6 +11,7 @@ import (
 
 	"phenix/api/experiment"
 	"phenix/api/vm"
+	"phenix/util/plog"
 )
 
 const defaultEdgeLength = 150
@@ -28,7 +29,11 @@ func Get(expName, statusFilter string) (*Network, error) { //nolint:funlen // co
 
 	// fetch all the VMs in the experiment
 	vms, err := vm.List(expName)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, vm.ErrPartialList):
+		plog.Warn(plog.TypeSystem, "showing the VMs the other hosts listed", "exp", expName, "err", err)
+	case err != nil:
 		return nil, fmt.Errorf("getting experiment %s VMs: %w", expName, err)
 	}
 

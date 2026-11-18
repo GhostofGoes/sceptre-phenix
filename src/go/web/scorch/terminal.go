@@ -32,7 +32,8 @@ type WebTerm struct {
 	Pty  *os.File      `json:"-"`
 	Done chan struct{} `json:"-"`
 
-	key string
+	key  string
+	kill *sync.Once // shared by the copies, so the terminal is killed once
 }
 
 func newWebTerm(exp string, run, loop int, stage, name string) WebTerm {
@@ -44,7 +45,8 @@ func newWebTerm(exp string, run, loop int, stage, name string) WebTerm {
 		Name:  name,
 		Done:  make(chan struct{}),
 
-		key: fmt.Sprintf("%s|%d|%d|%s|%s", exp, run, loop, stage, name),
+		key:  fmt.Sprintf("%s|%d|%d|%s|%s", exp, run, loop, stage, name),
+		kill: new(sync.Once),
 	}
 }
 
@@ -97,8 +99,9 @@ func CreateWebTerminal(
 
 	body, _ := json.Marshal(term)
 
+	// Only those who may watch the terminal hear of it.
 	broker.Broadcast(
-		nil,
+		bt.NewRequestPolicy("experiments", "get", exp),
 		bt.NewResource("apps/scorch", exp, "terminal-create"),
 		body,
 	)
@@ -106,7 +109,21 @@ func CreateWebTerminal(
 	return term.Done, nil
 }
 
+// KillTerminal kills the terminal once, whichever of its context ending and
+// its ExitTerminal requests comes first; a later call does nothing.
 func KillTerminal(term WebTerm) error {
+	if term.kill == nil {
+		return ErrTerminalNotFound
+	}
+
+	var err error
+
+	term.kill.Do(func() { err = killTerminal(term) })
+
+	return err
+}
+
+func killTerminal(term WebTerm) error {
 	close(term.Done)
 
 	webTermMu.Lock()
@@ -115,10 +132,19 @@ func KillTerminal(term WebTerm) error {
 	webTermMu.Unlock()
 
 	broker.Broadcast(
-		nil,
+		bt.NewRequestPolicy("experiments", "get", term.Exp),
 		bt.NewResource("apps/scorch", term.Exp, "terminal-exit"),
 		nil,
 	)
+
+	// However the terminal ends, its output goes, so a later terminal that
+	// gets the same PID does not show it. It goes last, so the process is
+	// killed whoever holds mu.
+	defer func() {
+		mu.Lock()
+		delete(history, term.Pid)
+		mu.Unlock()
+	}()
 
 	defer term.Pty.Close()
 

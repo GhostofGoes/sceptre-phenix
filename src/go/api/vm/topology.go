@@ -1,12 +1,14 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 
 	"phenix/api/experiment"
 	"phenix/util/cache"
 	"phenix/util/mm"
+	"phenix/util/plog"
 )
 
 const defaultEdgeLength = 150
@@ -26,7 +28,11 @@ type edge struct {
 
 func Topology(exp string, ignore []string) (topology, error) {
 	vms, err := List(exp)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, ErrPartialList):
+		plog.Warn(plog.TypeSystem, "showing the VMs the other hosts listed", "exp", exp, "err", err)
+	case err != nil:
 		return topology{}, fmt.Errorf("getting VMs: %w", err)
 	}
 

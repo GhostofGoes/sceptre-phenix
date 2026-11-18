@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"phenix/api/experiment"
 	"phenix/api/workflow"
 	"phenix/store"
 	"phenix/types"
@@ -176,6 +177,18 @@ func unmappedPlanCases() []planCase {
 			wantIs:  workflow.ErrInvalidSpec,
 		},
 		{
+			name:    "auto.create is a dot",
+			spec:    workflow.Spec{Auto: &workflow.Auto{Create: "."}},
+			wantErr: []string{`invalid workflow config: auto.create "." is not a valid experiment name`},
+			wantIs:  workflow.ErrInvalidSpec,
+		},
+		{
+			name:    "auto.create is two dots",
+			spec:    workflow.Spec{Auto: &workflow.Auto{Create: ".."}},
+			wantErr: []string{`invalid workflow config: auto.create ".." is not a valid experiment name`},
+			wantIs:  workflow.ErrInvalidSpec,
+		},
+		{
 			name:     "the reserved name in another letter case, even when it exists",
 			spec:     workflow.Spec{Auto: &workflow.Auto{Create: "ALL", Restart: boolPtr(false)}},
 			existing: []string{"ALL"},
@@ -328,8 +341,9 @@ func TestNewPlanMultipleMapped(t *testing.T) {
 // TestNewPlanNameCheckMatchesSchema runs every auto.create name of the plan
 // rows through the config schema, as the metadata.name of a minimal
 // Experiment config, and checks that NewPlan refuses a name exactly when the
-// schema does. The reserved name all is the one exception: the schema
-// accepts it and only experiment.Create refuses it, in any letter case.
+// schema does. The names experiment.CheckName refuses are the exception: the
+// schema accepts the reserved name all, in any letter case, and "." and "..",
+// and only the experiment create and update paths refuse them.
 func TestNewPlanNameCheckMatchesSchema(t *testing.T) {
 	var names []string
 
@@ -362,9 +376,10 @@ func TestNewPlanNameCheckMatchesSchema(t *testing.T) {
 
 			planRefuses, schemaRefuses := planErr != nil, schemaErr != nil
 
-			if strings.EqualFold(name, "all") {
+			if experiment.CheckName(name) != nil {
 				if !planRefuses || schemaRefuses {
-					t.Errorf("reserved name: NewPlan refuses = %v, schema refuses = %v; want true and false", planRefuses, schemaRefuses)
+					t.Errorf("name experiment.CheckName refuses: NewPlan refuses = %v, schema refuses = %v; want true and false",
+						planRefuses, schemaRefuses)
 				}
 
 				return

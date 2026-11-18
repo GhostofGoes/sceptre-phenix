@@ -11,22 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"phenix/util/mm"
+	"phenix/util/mm/mmcli"
 )
 
 //go:embed templates
 var templatesFS embed.FS
-
-// escapeQuoted escapes s for a double-quoted minimega argument with the
-// escapes minicli reads back (\\, \", \n, \r, \t), keeping the command on one line.
-func escapeQuoted(s string) string {
-	return strings.NewReplacer(
-		`\`, `\\`,
-		`"`, `\"`,
-		"\n", `\n`,
-		"\r", `\r`,
-		"\t", `\t`,
-	).Replace(s)
-}
 
 // GenerateFromTemplate executes the template with the given name using the
 // given data. The result is written to the given writer. The templates used are
@@ -74,8 +65,22 @@ func GenerateFromTemplate(name string, data any, w io.Writer) error {
 				return false
 			}
 		},
-		"stringsJoin":  strings.Join,
-		"escapeQuoted": escapeQuoted,
+		"stringsJoin": strings.Join,
+		// escapeQuoted escapes a value for a double-quoted minimega argument
+		// with the escapes minicli reads back (\\, \", \n, \r, \t),
+		// keeping the command on one line.
+		"escapeQuoted": mmcli.Escape,
+		// mmWord returns value, a what, for a minimega script that writes it
+		// unquoted, refusing one that is empty or that minimega would not read
+		// as one argument (see mm.CheckArgument), which fails the rendering: a
+		// line break would end the script's line and start another command.
+		"mmWord": func(what, value string) (string, error) {
+			if err := mm.CheckArgument(value); err != nil {
+				return "", fmt.Errorf("%s: %w", what, err)
+			}
+
+			return value, nil
+		},
 	}
 
 	tplContent, err := templatesFS.ReadFile(path.Join("templates", name))

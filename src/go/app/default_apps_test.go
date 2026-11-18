@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"phenix/store"
@@ -26,8 +27,38 @@ func TestDefaultAppsEnabled(t *testing.T) {
 			want:        false,
 		},
 		{
-			name:        "invalid value preserves default",
+			name:        "string false disables",
 			annotations: map[string]any{defaultAppsAnnotation: "false"},
+			want:        false,
+		},
+		{
+			name:        "string false in any case disables",
+			annotations: map[string]any{defaultAppsAnnotation: " FALSE "},
+			want:        false,
+		},
+		{
+			name:        "string zero disables",
+			annotations: map[string]any{defaultAppsAnnotation: "0"},
+			want:        false,
+		},
+		{
+			name:        "string true enables",
+			annotations: map[string]any{defaultAppsAnnotation: "True"},
+			want:        true,
+		},
+		{
+			name:        "zero from YAML disables",
+			annotations: map[string]any{defaultAppsAnnotation: 0},
+			want:        false,
+		},
+		{
+			name:        "zero from JSON disables",
+			annotations: map[string]any{defaultAppsAnnotation: float64(0)},
+			want:        false,
+		},
+		{
+			name:        "one enables",
+			annotations: map[string]any{defaultAppsAnnotation: 1},
 			want:        true,
 		},
 	}
@@ -42,6 +73,62 @@ func TestDefaultAppsEnabled(t *testing.T) {
 				t.Fatalf("defaultAppsEnabled() = %t, want %t", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefaultAppsSettingRejectsUnreadableValues(t *testing.T) {
+	for _, value := range []any{"no", "", nil, []any{"false"}} {
+		node := &v1.Node{
+			AnnotationsF: map[string]any{defaultAppsAnnotation: value},
+			GeneralF:     &v1.General{HostnameF: "odd-apps"},
+		}
+
+		_, err := defaultAppsSetting(node)
+		if err == nil {
+			t.Errorf("defaultAppsSetting(%#v) returned no error", value)
+
+			continue
+		}
+
+		if !strings.Contains(err.Error(), "node odd-apps: annotation phenix/default-apps is ") {
+			t.Errorf("defaultAppsSetting(%#v) error = %q, want it to name the node and the annotation", value, err)
+		}
+
+		// Stages that do not check the annotation, such as cleanup, keep the
+		// default apps.
+		if !defaultAppsEnabled(node) {
+			t.Errorf("defaultAppsEnabled(%#v) = false, want true", value)
+		}
+	}
+}
+
+// TestApplyAppsRejectsUnreadableDefaultApps checks that experiment create
+// (configure) and start (pre-start) refuse an annotation the default apps
+// cannot read, and that cleanup still runs.
+func TestApplyAppsRejectsUnreadableDefaultApps(t *testing.T) {
+	exp := &types.Experiment{
+		Metadata: store.ConfigMetadata{Name: "default-apps-unreadable"},
+		Spec: &v1.ExperimentSpec{
+			BaseDirF: t.TempDir(),
+			TopologyF: &v1.TopologySpec{NodesF: []*v1.Node{{
+				AnnotationsF: map[string]any{defaultAppsAnnotation: "no"},
+				GeneralF:     &v1.General{HostnameF: "odd-apps"},
+			}}},
+		},
+		Status: &v1.ExperimentStatus{},
+	}
+
+	want := `node odd-apps: annotation phenix/default-apps is "no", want true or false`
+
+	for _, stage := range []Action{ActionConfigure, ActionPreStart} {
+		err := ApplyApps(t.Context(), exp, Stage(stage), DryRun(true))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ApplyApps(%s) error = %v, want one containing %q", stage, err, want)
+		}
+	}
+
+	if err := ApplyApps(t.Context(), exp, Stage(ActionCleanup), DryRun(true)); err != nil {
+		t.Errorf("ApplyApps(cleanup) error = %v", err)
 	}
 }
 

@@ -1,3 +1,8 @@
 #!/bin/bash
 
+# This script can run more than once, so join only a domain not yet joined.
+if realm list --name-only 2>/dev/null | grep -qixF "{{ .domain_controller.domain }}"; then
+    exit 0
+fi
+
 echo "{{ .domain_controller.password }}" | realm join --user={{ .domain_controller.username }} {{ .domain_controller.domain }}

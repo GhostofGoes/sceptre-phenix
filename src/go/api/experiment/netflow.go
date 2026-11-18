@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"phenix/store"
 	"phenix/util/mm"
 	"phenix/util/plog"
 )
@@ -17,6 +18,10 @@ const (
 	netflowChannelBufferSize = 100
 	netflowMinFieldCount     = 8
 	netflowMaxDatagramSize   = 65535
+
+	// netflowWatchInterval is how often a netflow capture checks the store for
+	// the end of its experiment run.
+	netflowWatchInterval = 5 * time.Second
 )
 
 type Netflow struct {
@@ -24,6 +29,14 @@ type Netflow struct {
 
 	Bridge string
 	Conn   *net.UDPConn
+
+	// startTime is the start time of the experiment run the capture belongs to.
+	startTime string
+
+	// done is closed by Close, and watched when the watcher has returned.
+	done      chan struct{}
+	closeOnce sync.Once
+	watched   chan struct{}
 
 	callbacks map[string]chan map[string]any
 
@@ -36,6 +49,11 @@ func NewNetflow(bridge string, conn *net.UDPConn) *Netflow {
 		mu:     sync.RWMutex{},
 		Bridge: bridge,
 		Conn:   conn,
+
+		startTime: "",
+		done:      make(chan struct{}),
+		closeOnce: sync.Once{},
+		watched:   make(chan struct{}),
 
 		callbacks: make(map[string]chan map[string]any),
 		logMu:     sync.Mutex{},
@@ -121,12 +139,13 @@ func (n *Netflow) Close() {
 
 	n.callbacks = nil
 	n.lastLog = nil
+	n.closeOnce.Do(func() { close(n.done) })
 	_ = n.Conn.Close()
 }
 
 var (
 	netflows  = make(map[string]*Netflow) //nolint:gochecknoglobals // package level registry
-	netflowMu sync.RWMutex                //nolint:gochecknoglobals // package level registry
+	netflowMu sync.Mutex                  //nolint:gochecknoglobals // package level registry
 
 	ErrNetflowNotStarted     = errors.New("netflow not started for experiment")
 	ErrNetflowAlreadyStarted = errors.New("netflow already started for experiment")
@@ -150,22 +169,97 @@ func init() { //nolint:gochecknoinits // package level setup
 	})
 }
 
-func GetNetflow(exp string) *Netflow {
-	netflowMu.RLock()
-	defer netflowMu.RUnlock()
+// netflowStale reports whether flow belongs to an experiment run that has
+// ended: the experiment was deleted, stopped, or started again since the flow
+// started. Stop hooks run only in the process that stops an experiment, so
+// when the CLI stops it, phenix ui still holds the flow of the run that ended.
+// If the store cannot tell, the flow is kept.
+func netflowStale(exp string, flow *Netflow) bool {
+	spec, err := Get(exp)
+	if err != nil {
+		if errors.Is(err, store.ErrNotExist) {
+			return true
+		}
 
-	if flow, ok := netflows[exp]; ok {
-		return flow
+		plog.Warn(plog.TypeSystem, "getting experiment of netflow capture", "exp", exp, "err", err)
+
+		return false
 	}
 
-	return nil
+	return !spec.Running() || spec.Status.StartTime() != flow.startTime
+}
+
+// dropNetflow closes the flow of an experiment run that has ended and removes
+// it from the registry. It sends minimega nothing: clearing the experiment's
+// namespace on stop already deleted the capture, and a command would create the
+// namespace again. The caller holds netflowMu.
+func dropNetflow(exp string, flow *Netflow) {
+	plog.Info(plog.TypeSystem, "dropping netflow capture of an experiment run that ended", "exp", exp)
+
+	flow.Close()
+	delete(netflows, exp)
+}
+
+// currentNetflow returns the netflow capture of the experiment's current run,
+// dropping one left from a run that has ended. The caller holds netflowMu.
+func currentNetflow(exp string) *Netflow {
+	flow, ok := netflows[exp]
+	if !ok {
+		return nil
+	}
+
+	if netflowStale(exp, flow) {
+		dropNetflow(exp, flow)
+
+		return nil
+	}
+
+	return flow
+}
+
+// watchNetflow drops the flow once its experiment run ends, which closes the
+// flow's websockets. Nothing else tells this process that another one, such as
+// the CLI, stopped the experiment. It returns once the flow is closed.
+func watchNetflow(exp string, flow *Netflow, interval time.Duration) {
+	defer close(flow.watched)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-flow.done:
+			return
+		case <-ticker.C:
+			if !netflowStale(exp, flow) {
+				continue
+			}
+
+			netflowMu.Lock()
+
+			if netflows[exp] == flow {
+				dropNetflow(exp, flow)
+			}
+
+			netflowMu.Unlock()
+
+			return
+		}
+	}
+}
+
+func GetNetflow(exp string) *Netflow {
+	netflowMu.Lock()
+	defer netflowMu.Unlock()
+
+	return currentNetflow(exp)
 }
 
 func StartNetflow(exp string) error {
 	netflowMu.Lock()
 	defer netflowMu.Unlock()
 
-	if _, ok := netflows[exp]; ok {
+	if currentNetflow(exp) != nil {
 		return ErrNetflowAlreadyStarted
 	}
 
@@ -174,7 +268,9 @@ func StartNetflow(exp string) error {
 		return ErrExperimentNotFound
 	}
 
-	if !spec.Running() {
+	// A dry run has no bridge or VMs in minimega, which would create the
+	// namespace for the capture commands.
+	if !spec.Running() || spec.DryRun() {
 		return ErrExperimentNotRunning
 	}
 
@@ -213,7 +309,10 @@ func StartNetflow(exp string) error {
 	}
 
 	flow := NewNetflow(spec.Spec.DefaultBridge(), conn)
+	flow.startTime = spec.Status.StartTime()
 	netflows[exp] = flow
+
+	go watchNetflow(exp, flow, netflowWatchInterval)
 
 	go func() {
 		// minimega sends each netflow packet as one datagram of newline-terminated
@@ -304,8 +403,8 @@ func StopNetflow(exp string) error {
 	netflowMu.Lock()
 	defer netflowMu.Unlock()
 
-	flow, ok := netflows[exp]
-	if !ok {
+	flow := currentNetflow(exp)
+	if flow == nil {
 		return ErrNetflowNotStarted
 	}
 

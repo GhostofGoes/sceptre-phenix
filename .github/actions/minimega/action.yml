@@ -1,0 +1,234 @@
+name: Build and start minimega
+description: >-
+  Builds minimega and its companion tools from source on the runner, installs
+  the runtime dependencies (Open vSwitch, QEMU/KVM, qemu-img, nbd, 9p), and
+  starts one minimega daemon as root listening on <base>/minimega. Used by the
+  phenix end-to-end tests through e2e-setup; the apps and images repositories
+  run those tests by calling phenix's E2E workflow, so they test against the
+  same minimega.
+
+inputs:
+  repository:
+    description: GitHub repository to build minimega from (owner/name)
+    required: false
+    default: sandia-minimega/minimega
+  ref:
+    description: >-
+      Git ref of the minimega repository to build. Callers should pass the
+      commit recorded in sceptre-phenix .github/e2e/minimega.ref.
+    required: true
+  path:
+    description: Checkout path, relative to the workspace
+    required: false
+    default: minimega
+  base:
+    description: minimega base directory (-base); the command socket is <base>/minimega
+    required: false
+    default: /tmp/minimega
+  filepath:
+    description: Directory minimega serves files and disk images from (-filepath)
+    required: false
+    default: /phenix/images
+  log-level:
+    description: minimega log level (-level)
+    required: false
+    default: info
+  start:
+    description: Whether to start minimega after building (true/false)
+    required: false
+    default: 'true'
+  abssnapshot:
+    description: >-
+      Pass -abssnapshot so disk snapshots record absolute backing paths, as
+      the phenix docker-compose deployment does (MM_ABSSNAPSHOT=true)
+    required: false
+    default: 'true'
+  require-kvm:
+    description: >-
+      Fail when /dev/kvm is not usable. Real guest images are too slow under
+      TCG emulation for the end-to-end suite.
+    required: false
+    default: 'true'
+  go-cache-dependency-path:
+    description: >-
+      The go.sum files that key the Go module and build cache, one per line;
+      the default is minimega's own. A job that builds other Go modules too
+      names their go.sum files here and turns off caching in its own setup-go:
+      a second cache restores the same directories again and fails on the
+      read-only module files the first one extracted.
+    required: false
+    default: ''
+
+outputs:
+  python:
+    description: Directory containing the generated minimega Python package (pip installable)
+    value: ${{ steps.build.outputs.python }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out minimega
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.path }}
+        persist-credentials: false
+
+    # go-version-file would install exactly the version of the go directive
+    # (go 1.24.0, with none of the standard library fixes since), and the
+    # tools built here go into every image. Build with the newest patch
+    # release of that minor version instead.
+    - name: Read minimega's Go version
+      id: go
+      shell: bash
+      env:
+        GO_MOD: ${{ inputs.path }}/go.mod
+      run: |
+        set -euo pipefail
+        version=$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' "$GO_MOD")
+        if [ -z "$version" ]; then
+          echo "::error::$GO_MOD has no go directive"
+          exit 1
+        fi
+        echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Set up Go for minimega
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ steps.go.outputs.version }}
+        cache-dependency-path: ${{ inputs.go-cache-dependency-path || format('{0}/go.sum', inputs.path) }}
+
+    - name: Install minimega runtime dependencies
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        sudo apt-get update -q
+        # qemu-system-modules-spice provides the QXL VGA device that phenix
+        # requests for Linux guests (`vm config qemu-append -vga qxl`); on
+        # Ubuntu 24.04 it is packaged separately from qemu-system-x86.
+        # ntfs-3g backs `disk inject` into Windows images.
+        sudo apt-get install -y -q --no-install-recommends \
+          build-essential libpcap-dev \
+          openvswitch-switch qemu-system-x86 qemu-kvm qemu-utils \
+          qemu-system-modules-spice \
+          dnsmasq iproute2 isc-dhcp-client ntfs-3g cpu-checker \
+          openssh-client
+        # dnsmasq's service fights systemd-resolved for port 53 on the runner;
+        # minimega only needs the binary.
+        sudo systemctl disable --now dnsmasq 2>/dev/null || true
+
+    - name: Check hardware virtualization
+      shell: bash
+      env:
+        REQUIRE_KVM: ${{ inputs.require-kvm }}
+      run: |
+        set -euo pipefail
+        if [ -e /dev/kvm ] && sudo kvm-ok >/dev/null 2>&1; then
+          # minimega runs QEMU as root, but tools such as qemu-img probes and
+          # test helpers may not; open the device to every local user.
+          sudo chmod 666 /dev/kvm
+          echo "KVM acceleration is available"
+        else
+          if [ "$REQUIRE_KVM" = "true" ]; then
+            echo "::error::/dev/kvm is not usable on this runner; real guests are too slow under TCG"
+            exit 1
+          fi
+          echo "::warning::/dev/kvm is not usable; QEMU will fall back to TCG emulation"
+        fi
+
+    - name: Build minimega and companion tools
+      id: build
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        source scripts/env.bash
+        ./scripts/version.bash
+        # miniccc and minirouter are injected into guest images, protonuke is
+        # used by the protonuke app, and pyapigen generates the Python bindings
+        # the phenix apps use, from this exact daemon so its version check
+        # never fires.
+        go install -ldflags="-s -w" ./cmd/minimega ./cmd/pyapigen
+        # The tools injected into guest images must run on every guest's libc
+        # (the ot-sim image is Ubuntu focal, glibc 2.31; a cgo build on the
+        # runner needs GLIBC_2.34), so build them statically.
+        CGO_ENABLED=0 go install -ldflags="-s -w" \
+          ./cmd/miniccc ./cmd/minirouter ./cmd/protonuke
+        for b in miniccc minirouter protonuke; do
+          if ldd "bin/$b" >/dev/null 2>&1; then
+            echo "::error::bin/$b is dynamically linked"
+            exit 1
+          fi
+        done
+        "$GOBIN/pyapigen" -out lib/minimega.py "$GOBIN/minimega"
+        cp README.md VERSION lib/
+        # Install where sudo's secure_path finds them: phenix runs as root and
+        # execs minimega tools, and tests run `sudo minimega -e ...`.
+        for b in minimega miniccc minirouter protonuke; do
+          sudo install -m 0755 "bin/$b" "/usr/local/bin/$b"
+        done
+        ls -l bin
+        echo "bin=$PWD/bin" >> "$GITHUB_OUTPUT"
+        echo "python=$PWD/lib" >> "$GITHUB_OUTPUT"
+
+    - name: Start Open vSwitch and load kernel modules
+      if: inputs.start == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo modprobe openvswitch
+        # nbd backs `disk inject`; minimega mounts VM filesystems for
+        # `cc mount` over 9p.
+        sudo modprobe nbd max_part=16
+        sudo modprobe 9pnet_fd || sudo modprobe 9pnet || true
+        sudo modprobe 9p || echo "::warning::the 9p module did not load; cc mount will fail"
+        # phenix dials the minimega host name for VNC and netflow; make sure
+        # it resolves on the runner.
+        getent hosts "$(hostname)" >/dev/null || echo "127.0.1.1 $(hostname)" | sudo tee -a /etc/hosts
+        sudo systemctl start openvswitch-switch \
+          || sudo /usr/share/openvswitch/scripts/ovs-ctl start
+        for _ in $(seq 1 30); do
+          if sudo ovs-vsctl show >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        sudo ovs-vsctl --version | head -1
+        sudo ovs-vsctl show
+
+    - name: Start minimega
+      if: inputs.start == 'true'
+      shell: bash
+      env:
+        MM_BIN: ${{ steps.build.outputs.bin }}
+        MM_BASE: ${{ inputs.base }}
+        MM_FILEPATH: ${{ inputs.filepath }}
+        MM_LEVEL: ${{ inputs.log-level }}
+        MM_ABSSNAPSHOT: ${{ inputs.abssnapshot }}
+      run: |
+        set -euo pipefail
+        sudo mkdir -p "$MM_BASE" "$MM_FILEPATH"
+        args=(-nostdin -force -base "$MM_BASE" -filepath "$MM_FILEPATH"
+          -level "$MM_LEVEL" -logfile "$MM_BASE/minimega.log")
+        if [ "$MM_ABSSNAPSHOT" = "true" ]; then args+=(-abssnapshot); fi
+        # The daemon must run as root (taps, OVS, QEMU, nbd). One root shell does
+        # the redirection into the root-owned base directory too, and setsid+nohup
+        # keep the daemon alive after this step's shell; the arguments reach it as
+        # an argument vector, never as shell text.
+        sudo bash -c 'out=$1; shift; setsid nohup "$@" >"$out" 2>&1 &' bash \
+          "$MM_BASE/minimega.stdout" "$MM_BIN/minimega" "${args[@]}"
+        for _ in $(seq 1 30); do
+          if [ -S "$MM_BASE/minimega" ]; then break; fi
+          sleep 1
+        done
+        if [ ! -S "$MM_BASE/minimega" ]; then
+          echo "::error::minimega socket never appeared"
+          sudo cat "$MM_BASE/minimega.stdout" "$MM_BASE/minimega.log" || true
+          exit 1
+        fi
+        version=$(sudo "$MM_BIN/minimega" -base "$MM_BASE" -e version | tail -1)
+        echo "minimega: $version"
+        echo "::group::minimega check (external dependencies)"
+        sudo "$MM_BIN/minimega" -base "$MM_BASE" -e check
+        echo "::endgroup::"

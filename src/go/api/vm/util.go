@@ -49,6 +49,12 @@ func GetNewDiskName(expName, vmName string) (string, error) {
 	return name, nil
 }
 
+// requireRunning refuses an operation that would reach minimega for an
+// experiment whose VMs are not there.
+func requireRunning(expName string) error {
+	return experiment.RequireRunning(expName) //nolint:wrapcheck // the error names the experiment
+}
+
 func getVMImage(expName, vmName string) (string, error) {
 	exp, err := experiment.Get(expName)
 	if err != nil {
@@ -60,8 +66,13 @@ func getVMImage(expName, vmName string) (string, error) {
 		return "", fmt.Errorf("getting vm %s for experiment %s", vmName, expName)
 	}
 
-	// base image from topology
-	return vm.Hardware().Drives()[0].Image(), nil
+	// base image from topology; an external node has no drives
+	drives := vm.Hardware().Drives()
+	if len(drives) == 0 {
+		return "", fmt.Errorf("vm %s of experiment %s has no disk", vmName, expName)
+	}
+
+	return drives[0].Image(), nil
 }
 
 func getBackingImage(path string) (string, error) {
@@ -165,6 +176,12 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 
 	defer func() { _ = in.Close() }()
 
+	// Read the size before the copy: once it ends, in is closed.
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("getting size of %s: %w", src, err)
+	}
+
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -172,26 +189,39 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 
 	defer func() { _ = out.Close() }()
 
-	pw := newProgressWriter(out)
-	cr := newCancelableReader(ctx, in)
-	done := make(chan struct{})
+	var (
+		pw       = newProgressWriter(out)
+		cr       = newCancelableReader(ctx, in)
+		done     = make(chan struct{})
+		reported = make(chan struct{})
+	)
 
+	// The progress reports end before done closes the subscriptions, which a
+	// report still being sent would panic on.
 	go func() {
-		info, _ := in.Stat()
-		size := info.Size()
+		defer close(reported)
+
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 
 		for {
+			progress := 1.0
+			if size := info.Size(); size > 0 {
+				progress = float64(pw.N()) / float64(size)
+			}
+
+			for _, s := range c.subs {
+				select {
+				case s <- progress:
+				case <-done:
+					return
+				}
+			}
+
 			select {
 			case <-done:
 				return
-			default:
-				n := pw.N()
-
-				for _, s := range c.subs {
-					s <- float64(n) / float64(size)
-				}
-
-				time.Sleep(1 * time.Second)
+			case <-ticker.C:
 			}
 		}
 	}()
@@ -199,6 +229,7 @@ func (c copier) copy(ctx context.Context, src, dst string) error {
 	_, err = io.Copy(pw, cr)
 
 	close(done)
+	<-reported
 
 	if err != nil {
 		return err
@@ -254,6 +285,10 @@ func (c cancelableReader) Read(p []byte) (int, error) {
 	}
 }
 
-func getTimestamp() string {
-	return time.Now().Format("20060102_1500")
+// fileTimestamp stamps the name of a file phenix creates, such as a subnet
+// capture or a memory snapshot, with the second t falls in. minimega truncates
+// an existing capture file, so subnetCaptureName adds a suffix to a name that
+// a capture of the interface started within the same second already took.
+func fileTimestamp(t time.Time) string {
+	return t.Format("20060102_150405")
 }

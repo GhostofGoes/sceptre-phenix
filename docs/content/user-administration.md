@@ -164,7 +164,7 @@ Global Viewer does not have `builder` `use`. See the policies in
 |      |      |
 |------|------|
 | Verb | get |
-| Desc | get a specific experiment |
+| Desc | get a specific experiment, watch its SCORCH terminals and read its SCORCH component output |
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 
@@ -221,7 +221,7 @@ Global Viewer does not have `builder` `use`. See the policies in
 |      |      |
 |------|------|
 | Verb | create |
-| Desc | trigger the running stage of an experiment |
+| Desc | trigger the running stage of an experiment, start its SCORCH runs, and type into and exit its SCORCH terminals |
 | Exp. Scoped | yes |
 | Res. Scoped | no |
 

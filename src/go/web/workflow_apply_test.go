@@ -1560,7 +1560,7 @@ func TestApplyWorkflowUpdateWritesExperiment(t *testing.T) {
 
 	body := workflowTestYAML("  auto:\n    restart: false\n  topology: topo\n  scenario: scn\n" +
 		"  vlans:\n    EXP_1: 101\n  schedules:\n    vm1: host1\n    ext1: host2\n" +
-		"  defaultBridge: br0\n  deployMode: all\n  vlanRange:\n    max: 200\n  useGREMesh: true\n")
+		"  defaultBridge: br0\n  deployMode: all\n  vlanRange:\n    min: 100\n    max: 200\n  useGREMesh: true\n")
 	req := applyWorkflowRequest(workflowTestRole(true), "tag=a%3D1&tag=b%3D2", mimeYAML, strings.NewReader(body))
 	assertWorkflowError(
 		t, serveApplyWorkflow(t, req), http.StatusInternalServerError, "unable to write updated experiment foo", "disk full",
@@ -1596,7 +1596,7 @@ func TestApplyWorkflowUpdateWritesExperiment(t *testing.T) {
 		DeployMode:    "all",
 		UseGREMesh:    true,
 		Schedules:     map[string]string{"vm1": "host1"},
-		VLANs:         storedVLANs{Aliases: map[string]int{"EXP_1": 101, "EXP_2": 0}, Min: 0, Max: 200},
+		VLANs:         storedVLANs{Aliases: map[string]int{"EXP_1": 101, "EXP_2": 0}, Min: 100, Max: 200},
 		Scenario:      storedScenario{Apps: []storedApp{{Name: "app1", Metadata: map[string]any{"from": "base"}}}},
 	}
 

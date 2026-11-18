@@ -529,6 +529,50 @@ func TestMMCommandAttach(t *testing.T) {
 	}
 }
 
+// TestMMCommandQuit is a regression test: phenix mm quit stopped minimega but
+// exited 1, because minimega's quit without a delay answers nothing and
+// miniclient reports the disconnect as an error. A disconnect on any other
+// command, a quit with a delay included, still fails the command.
+func TestMMCommandQuit(t *testing.T) {
+	// Like minimega, the fake shuts down without answering a quit without a
+	// delay; it also drops the connection for disconnect and for quit 5.
+	base := fakeMinimega(t, func(req miniclient.Request) []miniclient.Response {
+		switch req.Command {
+		case "quit", "namespace exp quit", "disconnect", "quit 5":
+			return nil
+		default:
+			return []miniclient.Response{{Resp: minicli.Responses{{Host: "mm1"}}, Rendered: "ok"}}
+		}
+	})
+
+	setMinimegaBase(t, base)
+
+	tests := []struct {
+		args    []string
+		wantErr bool
+	}{
+		{args: []string{"quit"}},
+		{args: []string{"-n", "exp", "quit"}},
+		{args: []string{"version"}},
+		{args: []string{"disconnect"}, wantErr: true},
+		{args: []string{"quit", "5"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			cmd := newMMCmd()
+			cmd.SetArgs(tt.args)
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetErr(new(bytes.Buffer))
+
+			err := cmd.Execute()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("phenix mm %v returned %v, want an error: %t", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // fakeMinimega serves minimega's command socket protocol from a temporary
 // base directory, answering each request with the responses from handle. It
 // closes the connection when handle returns no responses.

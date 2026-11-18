@@ -1,0 +1,130 @@
+{
+  "comment": "E2E test shards. Each shard runs on its own runner with its own minimega and phenix ui. 'run' selects test functions by name prefix; 'images' are recipes from sceptre-phenix-images the shard boots (each image is also built and smoke tested in its own job); 'apps' installs sceptre-phenix-apps. The pr tier runs on pushes and pull requests; the nightly tier adds the slow shards.",
+  "pr": [
+    {
+      "name": "core",
+      "run": "^TestCore",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "disk",
+      "run": "^TestDisk",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "config",
+      "run": "^TestConfig",
+      "images": [],
+      "apps": false
+    },
+    {
+      "name": "resilience",
+      "run": "^TestResilience",
+      "images": [],
+      "apps": false
+    },
+    {
+      "name": "builtin",
+      "run": "^TestBuiltin",
+      "images": [
+        "ntp",
+        "minirouter",
+        "e2e"
+      ],
+      "apps": false
+    },
+    {
+      "name": "c2",
+      "run": "^TestC2",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "delay",
+      "run": "^TestDelay",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "ops",
+      "run": "^TestOps",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "net",
+      "run": "^TestNet",
+      "images": [
+        "ntp"
+      ],
+      "apps": false
+    },
+    {
+      "name": "apps",
+      "run": "^TestApps",
+      "images": [
+        "e2e"
+      ],
+      "apps": true
+    },
+    {
+      "name": "scorch-host",
+      "run": "^TestScorchHost",
+      "images": [],
+      "apps": true
+    },
+    {
+      "name": "scorch-guest",
+      "run": "^TestScorchGuest",
+      "images": [
+        "e2e"
+      ],
+      "apps": true
+    },
+    {
+      "name": "domain-render",
+      "run": "^TestDomainRender",
+      "images": [],
+      "apps": true
+    }
+  ],
+  "nightly": [
+    {
+      "name": "scorch-night",
+      "run": "^TestScorchNight",
+      "images": [
+        "e2e"
+      ],
+      "apps": true
+    },
+    {
+      "name": "domain-otsim",
+      "run": "^TestDomainRuntimeOtsim",
+      "images": [
+        "ot-sim",
+        "bennu"
+      ],
+      "apps": true
+    },
+    {
+      "name": "domain-sceptre",
+      "run": "^TestDomainRuntimeSceptre",
+      "images": [
+        "bennu"
+      ],
+      "apps": true
+    }
+  ]
+}

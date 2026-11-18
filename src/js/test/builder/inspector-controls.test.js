@@ -441,7 +441,7 @@ describe('the kind of an interface', () => {
     expect(before).toMatchObject({ name: 'eth0', vlan: 'EXP' });
     expect(formData(wrapper).spec.network.interfaces[0]).toMatchObject({
       type: 'serial',
-      device: '/dev/ttyS0',
+      device: '/dev/ttyphenix0',
     });
     expect(formData(wrapper).spec.network.interfaces[0]).not.toHaveProperty(
       'name',

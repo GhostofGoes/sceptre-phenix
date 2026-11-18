@@ -117,7 +117,8 @@ func newMMCmd() *cobra.Command {
 
 // runMinimegaCommand sends command to minimega and writes the rendered
 // response to out. Errors minimega reports, and a lost connection, are logged
-// and returned.
+// and returned, except the disconnect of a quit without a delay, which
+// minimega never answers.
 func runMinimegaCommand(mm *miniclient.Conn, command string, out io.Writer) error {
 	var errs []error
 
@@ -143,7 +144,7 @@ func runMinimegaCommand(mm *miniclient.Conn, command string, out io.Writer) erro
 		}
 	}
 
-	if err := mm.Error(); err != nil {
+	if err := mm.Error(); err != nil && !quitsAtOnce(command, err) {
 		plog.Error(plog.TypeMinimega, "lost connection to minimega", "command", command, "error", err)
 
 		errs = append(errs, fmt.Errorf("lost connection to minimega: %w", err))
@@ -154,6 +155,18 @@ func runMinimegaCommand(mm *miniclient.Conn, command string, out io.Writer) erro
 	}
 
 	return nil
+}
+
+// quitsAtOnce reports whether err is the disconnect miniclient reports for
+// command, a minimega quit without a delay, alone or in a namespace, which
+// shuts minimega down without answering.
+func quitsAtOnce(command string, err error) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 3 && fields[0] == "namespace" {
+		fields = fields[2:]
+	}
+
+	return len(fields) == 1 && fields[0] == "quit" && err.Error() == "server disconnected"
 }
 
 // minimegaCommand builds the command line sent to minimega. A single argument

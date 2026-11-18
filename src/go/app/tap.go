@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"slices"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -46,9 +45,13 @@ type TapAppStatus struct {
 	Taps []*tap.Tap `mapstructure:"taps" structs:"taps"`
 }
 
-type Tap struct{}
+type Tap struct {
+	options Options
+}
 
-func (Tap) Init(...Option) error {
+func (t *Tap) Init(opts ...Option) error {
+	t.options = NewOptions(opts...)
+
 	return nil
 }
 
@@ -102,9 +105,32 @@ func (t *Tap) createTaps(exp *types.Experiment, stage string) error {
 		return nil
 	}
 
+	if err := validateTaps(amd.Taps); err != nil {
+		return err
+	}
+
+	// A dry run has no VMs to tap, and asking minimega for the experiment's
+	// hosts would create its namespace.
+	if t.options.DryRun {
+		return nil
+	}
+
+	// A trigger runs the stage again while the taps it created before still
+	// exist; delete them, since the new status replaces the one recording them.
+	if err := t.deleteRecordedTaps(exp); err != nil {
+		return fmt.Errorf("deleting the host taps created before: %w", err)
+	}
+
+	exp.Status.SetAppStatus(t.Name(), nil)
+
 	hosts, err := mm.GetNamespaceHosts(exp.Metadata.Name)
 	if err != nil {
 		return fmt.Errorf("getting list of experiment hosts: %w", err)
+	}
+
+	// The host list is empty when minimega cannot be queried.
+	if len(hosts) == 0 {
+		return fmt.Errorf("no minimega hosts found for experiment %s to create host taps on", exp.Metadata.Name)
 	}
 
 	rng := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 1)) //nolint:gosec // weak random number generator
@@ -112,16 +138,12 @@ func (t *Tap) createTaps(exp *types.Experiment, stage string) error {
 	var (
 		host  = hosts[rng.IntN(len(hosts))].Name
 		pairs = t.discoverUsedPairs()
-		vlans []string
 	)
 
 	status := TapAppStatus{Host: host} //nolint:exhaustruct // partial initialization
+	appName := t.Name()
 
 	for _, t := range amd.Taps {
-		if slices.Contains(vlans, t.VLAN) {
-			return fmt.Errorf("tap already created for VLAN %s", t.VLAN)
-		}
-
 		opts := []tap.Option{tap.Experiment(exp.Metadata.Name), tap.UsedPairs(pairs)}
 
 		if subnet, err := netaddr.ParseIPPrefix(t.Subnet); err == nil {
@@ -135,7 +157,17 @@ func (t *Tap) createTaps(exp *types.Experiment, stage string) error {
 
 		pair, err := t.Create(host)
 		if err != nil {
-			return fmt.Errorf("creating host tap for VLAN %s: %w", t.VLAN, err)
+			err = fmt.Errorf("creating host tap for VLAN %s: %w", t.VLAN, err)
+
+			// No status is recorded for a failed stage, so nothing else would
+			// delete the taps already created; record the ones left, if any.
+			if left, delErr := deleteTaps(exp, host, status.Taps); delErr != nil {
+				exp.Status.SetAppStatus(appName, TapAppStatus{Host: host, Taps: left})
+
+				return multierror.Append(err, delErr)
+			}
+
+			return err
 		}
 
 		if !pair.IsZero() {
@@ -145,7 +177,6 @@ func (t *Tap) createTaps(exp *types.Experiment, stage string) error {
 		}
 
 		status.Taps = append(status.Taps, t)
-		vlans = append(vlans, t.VLAN)
 	}
 
 	exp.Status.SetAppStatus(t.Name(), status)
@@ -158,6 +189,11 @@ func (Tap) Running(ctx context.Context, exp *types.Experiment) error {
 }
 
 func (t *Tap) Cleanup(ctx context.Context, exp *types.Experiment) error {
+	return t.deleteRecordedTaps(exp)
+}
+
+// deleteRecordedTaps deletes the taps the app's status records.
+func (t *Tap) deleteRecordedTaps(exp *types.Experiment) error {
 	if _, ok := exp.Status.AppStatus()[t.Name()]; !ok {
 		// No status was ever recorded for this app, meaning its taps were never
 		// created. This happens, for example, when the app is configured to run
@@ -174,24 +210,19 @@ func (t *Tap) Cleanup(ctx context.Context, exp *types.Experiment) error {
 		return fmt.Errorf("getting experiment status for %s app: %w", t.Name(), err)
 	}
 
-	var (
-		host = status.Host
-		errs error
-	)
+	// minimega fails to delete a tap that is gone, so a status that still
+	// listed the deleted taps would fail every later trigger and cleanup.
+	left, err := deleteTaps(exp, status.Host, status.Taps)
+	if err != nil {
+		status.Taps = left
+		exp.Status.SetAppStatus(t.Name(), status)
 
-	for _, t := range status.Taps {
-		t.Init(exp.Spec.DefaultBridge(), tap.Experiment(exp.Metadata.Name))
-
-		err := t.Delete(host)
-		if err != nil {
-			errs = multierror.Append(
-				errs,
-				fmt.Errorf("deleting host tap for VLAN %s: %w", t.VLAN, err),
-			)
-		}
+		return err
 	}
 
-	return errs
+	exp.Status.SetAppStatus(t.Name(), nil)
+
+	return nil
 }
 
 func (t Tap) discoverUsedPairs() []netaddr.IPPrefix {
@@ -216,4 +247,52 @@ func (t Tap) discoverUsedPairs() []netaddr.IPPrefix {
 	}
 
 	return pairs
+}
+
+// validateTaps checks every configured tap before any is created, so a refused
+// configuration leaves nothing on the host.
+func validateTaps(taps []*tap.Tap) error {
+	vlans := make(map[string]struct{}, len(taps))
+
+	for i, tp := range taps {
+		if tp == nil {
+			return fmt.Errorf("taps[%d] of the tap app is empty", i)
+		}
+
+		if _, ok := vlans[tp.VLAN]; ok {
+			return fmt.Errorf("tap already created for VLAN %s", tp.VLAN)
+		}
+
+		vlans[tp.VLAN] = struct{}{}
+
+		if err := tp.Validate(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deleteTaps deletes the given taps from host. It returns the taps it failed
+// to delete and every failure.
+func deleteTaps(exp *types.Experiment, host string, taps []*tap.Tap) ([]*tap.Tap, error) {
+	var (
+		left []*tap.Tap
+		errs error
+	)
+
+	for _, tp := range taps {
+		tp.Init(exp.Spec.DefaultBridge(), tap.Experiment(exp.Metadata.Name))
+
+		err := tp.Delete(host)
+		if err != nil {
+			left = append(left, tp)
+			errs = multierror.Append(
+				errs,
+				fmt.Errorf("deleting host tap for VLAN %s: %w", tp.VLAN, err),
+			)
+		}
+	}
+
+	return left, errs
 }

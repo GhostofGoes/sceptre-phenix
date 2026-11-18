@@ -4,13 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"go.etcd.io/bbolt"
 )
 
-const boltFileMode = 0o600
+const (
+	boltFileMode = 0o600
+	boltDirMode  = 0o750
+)
 
 // boltOpenTimeout bounds the wait for another process to release its lock on the BoltDB file.
 var boltOpenTimeout = 10 * time.Second //nolint:gochecknoglobals // overridden in tests
@@ -39,6 +44,16 @@ func (b *BoltDB) Init(opts ...Option) error {
 	}
 
 	b.path = u.Host + u.Path
+
+	// bbolt creates the database file but not its directory, and the default
+	// directories phenix creates at startup only cover the default endpoint.
+	// A relative path, such as the two-slash bolt://etc/phenix/store.bdb, would
+	// create an empty store under whatever directory phenix runs in.
+	if filepath.IsAbs(b.path) {
+		if err := os.MkdirAll(filepath.Dir(b.path), boltDirMode); err != nil {
+			return fmt.Errorf("creating BoltDB directory: %w", err)
+		}
+	}
 
 	if err := b.open(); err != nil {
 		return fmt.Errorf("initializing BoltDB store: %w", err)
@@ -78,6 +93,7 @@ func (b *BoltDB) InitializeComponent(component Component) error {
 	return nil
 }
 
+// open locks the store and opens the database; Close closes it and unlocks.
 func (b *BoltDB) open() error {
 	b.mu.Lock()
 
@@ -232,6 +248,53 @@ func (b *BoltDB) Update(c *Config) error {
 	}
 
 	return nil
+}
+
+// Modify implements Modify in one BoltDB transaction.
+func (b *BoltDB) Modify(c *Config, change func(*Config) error) error {
+	if err := b.open(); err != nil {
+		return err
+	}
+
+	defer func() { _ = b.Close() }()
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		var v []byte
+
+		bucket := tx.Bucket([]byte(c.Kind))
+		if bucket != nil {
+			v = bucket.Get([]byte(c.Metadata.Name))
+		}
+
+		if v == nil {
+			return fmt.Errorf("%w: key %s does not exist in bucket %s", ErrNotExist, c.Metadata.Name, c.Kind)
+		}
+
+		var stored Config
+
+		if err := json.Unmarshal(v, &stored); err != nil {
+			return fmt.Errorf("unmarshaling config JSON: %w", err)
+		}
+
+		*c = stored
+
+		if err := change(c); err != nil {
+			return err
+		}
+
+		c.Metadata.Updated = time.Now().Format(time.RFC3339)
+
+		v, err := c.StoredJSON()
+		if err != nil {
+			return fmt.Errorf("marshaling config JSON: %w", err)
+		}
+
+		if err := bucket.Put([]byte(c.Metadata.Name), v); err != nil {
+			return fmt.Errorf("writing config JSON to Bolt: %w", err)
+		}
+
+		return nil
+	})
 }
 
 func (b *BoltDB) Delete(c *Config) error {
