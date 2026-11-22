@@ -42,6 +42,7 @@ var (
 	ErrNATInterfaceAddress = errors.New("nat inside interface has no valid address")
 	ErrEmulatorInterface   = errors.New("emulator interface not found")
 	ErrUnsafeVyosPassword  = errors.New("vyos password cannot be written safely")
+	ErrVyosConfigLine      = errors.New("vyos config line is not valid")
 )
 
 type ACLConfig struct {
@@ -363,6 +364,17 @@ func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
 
 						data["snat"] = sources
 						data["dnat"] = destinations
+
+						config, err := vyosConfigLines(md, isVyos)
+						if err != nil {
+							return fmt.Errorf(
+								"processing config metadata for host %s: %w",
+								host.Hostname(),
+								err,
+							)
+						}
+
+						data["config"] = config
 
 						break
 					}
@@ -735,6 +747,70 @@ func vyosPassword(val any) (string, error) {
 	default:
 		return passwd, nil
 	}
+}
+
+// vyosConfigUnsafe holds the characters that vbash, which runs the rendered
+// script, acts on outside single quotes: expansions, quoting, redirections,
+// control operators, comments, and file name patterns.
+const vyosConfigUnsafe = "\"`$;|&<>(){}[]\\#!*?~"
+
+// vyosConfigLines returns the `config` metadata of a router: VyOS
+// configuration commands that the template writes after everything it
+// generates itself, before the commit. Every error wraps ErrVyosConfigLine.
+func vyosConfigLines(md map[string]any, isVyos bool) ([]string, error) {
+	raw, ok := md["config"]
+	if !ok {
+		return nil, nil
+	}
+
+	if !isVyos {
+		return nil, fmt.Errorf("%w: config is only supported for os_type vyos", ErrVyosConfigLine)
+	}
+
+	var lines []string
+
+	err := mapstructure.Decode(raw, &lines)
+	if err != nil {
+		return nil, fmt.Errorf("%w: config is not a list of strings: %w", ErrVyosConfigLine, err)
+	}
+
+	for idx, line := range lines {
+		err := checkVyosConfigLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", idx, err)
+		}
+	}
+
+	return lines, nil
+}
+
+// checkVyosConfigLine refuses a line that vbash would not run as one `set` or
+// `delete` command whose words are exactly the words of the line. The line
+// goes into a script as it is, so nothing in it may be special to the shell
+// outside single quotes.
+func checkVyosConfigLine(line string) error {
+	if !strings.HasPrefix(line, "set ") && !strings.HasPrefix(line, "delete ") {
+		return fmt.Errorf("%w: it does not start with set or delete", ErrVyosConfigLine)
+	}
+
+	quoted := false
+
+	for _, r := range line {
+		switch {
+		case unicode.IsControl(r):
+			return fmt.Errorf("%w: it has a control character", ErrVyosConfigLine)
+		case r == '\'':
+			quoted = !quoted
+		case !quoted && strings.ContainsRune(vyosConfigUnsafe, r):
+			return fmt.Errorf("%w: it has %q outside single quotes", ErrVyosConfigLine, r)
+		}
+	}
+
+	if quoted {
+		return fmt.Errorf("%w: it has an unclosed single quote", ErrVyosConfigLine)
+	}
+
+	return nil
 }
 
 func (Vrouter) processSNMP(md map[string]any) (*SNMPConfig, error) {

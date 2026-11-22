@@ -768,6 +768,22 @@ spec:
     * `reordering`: percentage of reordered packets for interface and direction
       this traffic policy is applied to, from 0 to 100.
 
+* `config`: if present, a list of VyOS configuration commands that phēnix
+  writes after the configuration it generates and before the commit. Use it
+  for what the other options cannot express, for example BGP, tunnel
+  interfaces, or logging. Each line is one `set` or `delete` command. A line
+  that starts with anything else is an error, and so is a line with a control
+  character, a double quote, or a character the shell acts on (such as `;`,
+  `$`, or a backtick) outside single quotes. Only VyOS routers accept it: on
+  any other router it is an error.
+
+    ``` yaml title="vrouter config example"
+    config:
+      - set protocols bgp system-as 64505
+      - set protocols bgp neighbor 203.0.113.1 remote-as 64500
+      - set protocols bgp neighbor 203.0.113.1 address-family ipv4-unicast
+    ```
+
 !!! important
     The `ingress` and `egress` setting for ACLs are from the perspective of the
     network segment the specified interface is connected to, not from the

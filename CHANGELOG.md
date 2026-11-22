@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - **Web UI Help**: Added a Help link to the documentation in the footer.
+- **vrouter App**: Added the `config` option, a list of VyOS `set` and `delete` commands that phēnix writes after the configuration it generates and before the commit, for what the app's other options can't express (BGP, BFD, tunnel interfaces). phēnix refuses a line that the router's shell would not run as one command.
 - **Image Releases**: `phenix image create` recognizes the Debian releases `trixie` and `forky`.
 - **SCORCH**: Support the `cleanup` stage in the built-in `tap` component for reliable tap teardown on run completion or cancellation.
 - **Topology Builder**:
