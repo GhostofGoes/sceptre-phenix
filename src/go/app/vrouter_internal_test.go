@@ -1112,6 +1112,55 @@ func TestVrouterPreStartVyosConfigAbsent(t *testing.T) {
 // TestVrouterPreStartVyosConfigErrors verifies that PreStart refuses a config
 // line the vbash script would not run as one VyOS command, and config on a
 // router that is not VyOS.
+// TestVrouterPreStartVyosConfigHosts checks that config is refused on a host
+// whose vrouter metadata PreStart would otherwise drop without a word.
+func TestVrouterPreStartVyosConfigHosts(t *testing.T) {
+	t.Parallel()
+
+	external := true
+
+	tests := []struct {
+		name string
+		node func() *v1.Node
+	}{
+		{name: "no node of that name", node: func() *v1.Node { return vrouterNode("other", osTypeVyos) }},
+		{name: "not a router or firewall", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.TypeF = "VirtualMachine"
+
+			return n
+		}},
+		{name: "external", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.ExternalF = &external
+
+			return n
+		}},
+		{name: "default apps off", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.AnnotationsF = map[string]any{defaultAppsAnnotation: false}
+
+			return n
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			md := map[string]any{"config": []any{"set system host-name a"}}
+			exp := vrouterExperiment(t, vrouterScenario(vrouterApp(md)), tt.node())
+
+			var v Vrouter
+
+			err := v.PreStart(t.Context(), exp)
+			if !errors.Is(err, ErrVyosConfigLine) {
+				t.Errorf("PreStart() error = %v, want ErrVyosConfigLine", err)
+			}
+		})
+	}
+}
+
 func TestVrouterPreStartVyosConfigErrors(t *testing.T) {
 	t.Parallel()
 
