@@ -1132,6 +1132,9 @@ func TestVrouterPreStartVyosConfigErrors(t *testing.T) {
 		{name: "second line of two", osType: osTypeVyos, lines: []any{"set system host-name a", "save"}},
 		{name: "not a list", osType: osTypeVyos, lines: "set system host-name a"},
 		{name: "vyatta", osType: "vyatta", lines: []any{"set system host-name a"}},
+		{name: "minirouter", osType: "minirouter", lines: []any{"set system host-name a"}},
+		{name: "shell option", osType: osTypeVyos, lines: []any{"set -xk"}},
+		{name: "quoted shell option", osType: osTypeVyos, lines: []any{"set '-n'"}},
 	}
 
 	for _, tt := range tests {

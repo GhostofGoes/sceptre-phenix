@@ -188,8 +188,53 @@ func (v Vrouter) Configure(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
+// checkVyosConfigHosts refuses a `config` list on a vrouter host whose router
+// PreStart does not render as VyOS: a host with no node in the topology, a
+// node with the default apps off, a node that is not a router or firewall, or
+// a router whose os_type is not vyos. PreStart would skip such a node before
+// it reads the host's metadata, and drop the lines without a word.
+func checkVyosConfigHosts(exp *types.Experiment) error {
+	for _, app := range exp.Apps() {
+		if app.Name() != appNameVrouter {
+			continue
+		}
+
+		for _, host := range app.Hosts() {
+			if _, ok := host.Metadata()["config"]; !ok {
+				continue
+			}
+
+			node := exp.Spec.Topology().FindNodeByName(host.Hostname())
+
+			var why string
+
+			switch {
+			case node == nil:
+				why = "no node of that name is in the topology"
+			case node.External() || !defaultAppsEnabled(node):
+				why = "the default apps do not run on the node"
+			case !strings.EqualFold(node.Type(), "router") && !strings.EqualFold(node.Type(), "firewall"):
+				why = "the node is not a router or firewall"
+			case !strings.EqualFold(node.Hardware().OSType(), osTypeVyos):
+				why = "config is only supported for os_type vyos"
+			default:
+				continue
+			}
+
+			return fmt.Errorf("processing config metadata for host %s: %w: %s", host.Hostname(), ErrVyosConfigLine, why)
+		}
+	}
+
+	return nil
+}
+
 //nolint:cyclop,funlen,gocyclo,maintidx // complex logic
 func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
+	err := checkVyosConfigHosts(exp)
+	if err != nil {
+		return err
+	}
+
 	var (
 		ntpServers = exp.Spec.Topology().FindNodesWithLabels("ntp-server")
 		ntpAddr    string
@@ -787,10 +832,25 @@ func vyosConfigLines(md map[string]any, isVyos bool) ([]string, error) {
 // checkVyosConfigLine refuses a line that vbash would not run as one `set` or
 // `delete` command whose words are exactly the words of the line. The line
 // goes into a script as it is, so nothing in it may be special to the shell
-// outside single quotes.
+// outside single quotes. The first word after the verb must start with a
+// lowercase letter, as every VyOS configuration node does: VyOS's `set` hands
+// `set -...` and `set +...` to the shell's own `set` builtin (vyatta-cfg,
+// VyOS T1604), which would change the options of the script that commits the
+// configuration.
 func checkVyosConfigLine(line string) error {
-	if !strings.HasPrefix(line, "set ") && !strings.HasPrefix(line, "delete ") {
+	var rest string
+
+	switch {
+	case strings.HasPrefix(line, "set "):
+		rest = line[len("set "):]
+	case strings.HasPrefix(line, "delete "):
+		rest = line[len("delete "):]
+	default:
 		return fmt.Errorf("%w: it does not start with set or delete", ErrVyosConfigLine)
+	}
+
+	if rest == "" || rest[0] < 'a' || rest[0] > 'z' {
+		return fmt.Errorf("%w: the word after set or delete does not start with a lowercase letter", ErrVyosConfigLine)
 	}
 
 	quoted := false

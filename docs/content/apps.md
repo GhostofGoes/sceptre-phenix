@@ -771,11 +771,13 @@ spec:
 * `config`: if present, a list of VyOS configuration commands that phēnix
   writes after the configuration it generates and before the commit. Use it
   for what the other options cannot express, for example BGP, tunnel
-  interfaces, or logging. Each line is one `set` or `delete` command. A line
-  that starts with anything else is an error, and so is a line with a control
+  interfaces, or logging. Each line is one `set` or `delete` command, and the
+  word after the verb starts with a lowercase letter, as every VyOS
+  configuration node does (VyOS hands `set -x` and `set +o` to the shell's own
+  `set`). A line that does not is an error, and so is a line with a control
   character, a double quote, or a character the shell acts on (such as `;`,
-  `$`, or a backtick) outside single quotes. Only VyOS routers accept it: on
-  any other router it is an error.
+  `$`, or a backtick) outside single quotes. Only routers and firewalls with
+  `os_type: vyos` accept it: for any other host it is an error.
 
     ``` yaml title="vrouter config example"
     config:

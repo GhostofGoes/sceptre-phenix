@@ -61,9 +61,11 @@ func vrouterConfigSpecial() []string {
 }
 
 // genVrouterConfigLine draws lines that mostly start as a VyOS command. Their
-// words are plain, single-quoted, or one of vrouterConfigSpecial.
+// words are plain, single-quoted, or one of vrouterConfigSpecial. Some plain
+// words are options of the shell's own `set`, which VyOS's `set` hands on
+// when they come first.
 func genVrouterConfigLine() *rapid.Generator[string] {
-	plain := []string{"a", "b1", "ab1", "10.0.0.1/24", "a=b", "x-y_z", "é", "", "", " "}
+	plain := []string{"a", "b1", "ab1", "10.0.0.1/24", "a=b", "x-y_z", "é", "", "", " ", "-x", "+o", "--", "-n", "''-e"}
 	special := vrouterConfigSpecial()
 
 	return rapid.Custom(func(t *rapid.T) string {
@@ -107,11 +109,27 @@ func vrouterConfigBashDir(t *testing.T) string {
 	return dir
 }
 
+// vrouterConfigVyos stands in for how a VyOS script runs `set` and `delete`:
+// each is an alias of vyatta_cfg_run, which hands `set -...` and `set +...`
+// to the shell's own `set` (vyatta-cfg, VyOS T1604) and otherwise passes the
+// words on. The stand-in prints the words instead, and reports any change to
+// the shell's options after the line.
+const vrouterConfigVyos = `vyatta_cfg_run() {
+  if [[ "$1" == "set" && "$2" =~ ^(-|\+).* ]]; then set "${@:2}"; return; fi
+  printf '%s\0' "$@"
+}
+shopt -s expand_aliases
+alias set='vyatta_cfg_run set' delete='vyatta_cfg_run delete'
+before=$-
+`
+
 // vrouterConfigBashDiff runs a line in bash as source text, which is what it
-// is in the rendered script, and compares the words bash gives the command
-// with the words of the line. It returns the difference as (-want +got).
+// is in the rendered script, after vrouterConfigVyos, and compares the words
+// the command receives with the words of the line. It returns the difference
+// as (-want +got); a change to the shell's options shows as an extra word.
 func vrouterConfigBashDiff(dir, line string) (string, error) {
-	cmd := exec.Command("bash", "--noprofile", "--norc", "-c", `args() { printf '%s\0' "$@"; }; args `+line)
+	script := vrouterConfigVyos + line + "\n" + `[[ $- == "$before" ]] || printf 'shell options now %s\0' "$-"` + "\n"
+	cmd := exec.Command("bash", "--noprofile", "--norc", "-c", script)
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
@@ -191,6 +209,22 @@ func TestCheckVyosConfigLineMatchesBash(t *testing.T) {
 	})
 }
 
+// TestCheckVyosConfigLineRefusesEach puts each character the shell acts on
+// between two letters. The list is written out here, not taken from
+// vyosConfigUnsafe, so that dropping a character from that list fails.
+func TestCheckVyosConfigLineRefusesEach(t *testing.T) {
+	t.Parallel()
+
+	for _, r := range "\"`$;|&<>(){}[]\\#!*?~" {
+		line := "set system host-name a" + string(r) + "b"
+
+		err := checkVyosConfigLine(line)
+		if !errors.Is(err, ErrVyosConfigLine) {
+			t.Errorf("checkVyosConfigLine(%q) = %v, want ErrVyosConfigLine", line, err)
+		}
+	}
+}
+
 // TestCheckVyosConfigLine checks lines a router configuration needs, and
 // lines that would run something else.
 func TestCheckVyosConfigLine(t *testing.T) {
@@ -232,6 +266,16 @@ func TestCheckVyosConfigLine(t *testing.T) {
 		{name: "tab", line: "set system host-name\ta"},
 		{name: "unclosed quote", line: "set system login banner pre-login 'hello"},
 		{name: "quote opens after text", line: "set system host-name a'; reboot"},
+		{name: "shell option", line: "set -xk"},
+		{name: "noexec", line: "set -n"},
+		{name: "quoted shell option", line: "set '-n'"},
+		{name: "empty quote before option", line: "set ''-e"},
+		{name: "plus option", line: "set +o posix"},
+		{name: "end of options", line: "set -- a"},
+		{name: "option after two spaces", line: "set  -x"},
+		{name: "delete option", line: "delete -x"},
+		{name: "quoted first word", line: "set 'system' host-name a"},
+		{name: "upper-case first word", line: "set System host-name a"},
 	}
 
 	for _, tt := range tests {

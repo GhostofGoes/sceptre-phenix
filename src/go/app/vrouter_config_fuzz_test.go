@@ -11,10 +11,16 @@ import (
 // vrouterConfigQuoted matches a single-quoted part of a line.
 var vrouterConfigQuoted = regexp.MustCompile(`'[^']*'`)
 
+// vrouterConfigShellChars is the model's own list of the characters the shell
+// acts on outside single quotes, kept apart from vyosConfigUnsafe so that the
+// fuzz test does not check the list against itself.
+const vrouterConfigShellChars = "\"`$;|&<>(){}[]\\#!*?~"
+
 // FuzzCheckVyosConfigLine checks checkVyosConfigLine against a model of a safe
-// line: it starts with set or delete, has no control character, and what is
-// left when the single-quoted parts are taken out has no quote and nothing
-// the shell acts on. A refused line gives ErrVyosConfigLine.
+// line: it starts with set or delete and a space, the next character is a
+// lowercase letter, it has no control character, and what is left when the
+// single-quoted parts are taken out has no quote and nothing the shell acts
+// on. A refused line gives ErrVyosConfigLine.
 func FuzzCheckVyosConfigLine(f *testing.F) {
 	for _, seed := range []string{
 		"set protocols bgp system-as 64505",
@@ -31,15 +37,23 @@ func FuzzCheckVyosConfigLine(f *testing.F) {
 		"set system login banner pre-login 'hello",
 		"set system host-name a'; reboot",
 		"set system host-name \xff",
+		"set -xk",
+		"set '-n'",
+		"delete -x",
 	} {
 		f.Add(seed)
 	}
 
 	f.Fuzz(func(t *testing.T, line string) {
 		bare := vrouterConfigQuoted.ReplaceAllString(line, "")
-		safe := (strings.HasPrefix(line, "set ") || strings.HasPrefix(line, "delete ")) &&
+		rest, verb := strings.CutPrefix(line, "set ")
+		if !verb {
+			rest, verb = strings.CutPrefix(line, "delete ")
+		}
+
+		safe := verb && rest != "" && rest[0] >= 'a' && rest[0] <= 'z' &&
 			!strings.ContainsFunc(line, unicode.IsControl) &&
-			!strings.ContainsAny(bare, "'"+vyosConfigUnsafe)
+			!strings.ContainsAny(bare, "'"+vrouterConfigShellChars)
 
 		err := checkVyosConfigLine(line)
 		if safe && err != nil {
