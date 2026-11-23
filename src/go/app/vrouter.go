@@ -837,6 +837,12 @@ func vyosConfigLines(md map[string]any, isVyos bool) ([]string, error) {
 // `set -...` and `set +...` to the shell's own `set` builtin (vyatta-cfg,
 // VyOS T1604), which would change the options of the script that commits the
 // configuration.
+//
+// The check guards against a line the shell would misread, not against the
+// line's author: `config` has full control of the router. VyOS's own
+// `system task-scheduler` runs commands, and while it completes a line VyOS
+// evaluates the output of completion scripts, some of which print values that
+// earlier lines stored.
 func checkVyosConfigLine(line string) error {
 	var rest string
 

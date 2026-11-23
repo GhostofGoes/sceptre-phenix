@@ -777,7 +777,11 @@ spec:
   `set`). A line that does not is an error, and so is a line with a control
   character, a double quote, or a character the shell acts on (such as `;`,
   `$`, or a backtick) outside single quotes. Only routers and firewalls with
-  `os_type: vyos` accept it: for any other host it is an error.
+  `os_type: vyos` accept it: for any other host it is an error. The check
+  catches a mistake, not a hostile author: whoever writes `config` controls
+  the router, since VyOS configuration can run commands
+  (`system task-scheduler`) and VyOS evaluates what some completion scripts
+  print, including values that an earlier line stored.
 
     ``` yaml title="vrouter config example"
     config:

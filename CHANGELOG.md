@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - **Web UI Help**: Added a Help link to the documentation in the footer.
-- **vrouter App**: Added the `config` option, a list of VyOS `set` and `delete` commands that phēnix writes after the configuration it generates and before the commit, for what the app's other options can't express (BGP, BFD, tunnel interfaces). phēnix refuses a line that is not one plain `set` or `delete`: one whose next word does not start with a lowercase letter (VyOS hands `set -x` to the shell's own `set`), or that has a control character or a shell metacharacter outside single quotes. It also refuses `config` on a host that is not a VyOS router or firewall, which would otherwise drop it.
+- **vrouter App**: Added the `config` option, a list of VyOS `set` and `delete` commands that phēnix writes after the configuration it generates and before the commit, for what the app's other options can't express (BGP, BFD, tunnel interfaces). phēnix refuses a line that is not one plain `set` or `delete`: one whose next word does not start with a lowercase letter (VyOS hands `set -x` to the shell's own `set`), or that has a control character or a shell metacharacter outside single quotes. It also refuses `config` on a host that is not a VyOS router or firewall, which would otherwise drop it. The check catches mistakes, not a hostile author: `config` gives full control of the router.
 - **Image Releases**: `phenix image create` recognizes the Debian releases `trixie` and `forky`.
 - **SCORCH**: Support the `cleanup` stage in the built-in `tap` component for reliable tap teardown on run completion or cancellation.
 - **Topology Builder**:

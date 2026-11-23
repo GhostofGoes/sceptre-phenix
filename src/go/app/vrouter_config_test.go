@@ -56,7 +56,7 @@ func vrouterConfigWords(line string) []string {
 func vrouterConfigSpecial() []string {
 	return []string{
 		"[ab]", "[!x]", "a*", "?", "{a,b}", "~", "$HOME", "$(echo a)", "`echo a`",
-		"a;b", "a|b", "a&b", ">x", "<a", "#a", "!!", `\a`, `"a"`, "'", "\n", "\t",
+		"a;b", "a|b", "a&b", ">x", "<a", "#a", "!!", "a(b", "a)", "(", `\a`, `"a"`, "'", "\n", "\t",
 	}
 }
 
