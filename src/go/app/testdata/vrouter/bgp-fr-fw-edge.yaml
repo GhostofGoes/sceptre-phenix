@@ -1,0 +1,182 @@
+# The `bgp` metadata that gives the routing lines of the router fr-fw-edge of the
+# CherryMountain WAN (bgp-fr-fw-edge.lines). TestVyosBGPLinesParity compares the two.
+bgp:
+  localAS: 64505
+  routerID: 198.18.105.1
+  logNeighborChanges: true
+  multipath:
+    ebgp: 2
+    asPathRelax: true
+  networks:
+    - 10.10.0.0/16
+    - 10.20.0.0/16
+    - 10.30.0.0/16
+    - 10.40.0.0/16
+    - 198.18.105.0/24
+  neighbors:
+    - address: 203.0.113.1
+      remoteAS: 64500
+      description: ShadeCast Cable
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      softReconfigurationInbound: true
+      import: {routeMap: FROM-ISP}
+      export: {routeMap: OWN-ONLY}
+    - address: 198.18.101.1
+      remoteAS: 64501
+      description: Tumbleweed Fiber
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      softReconfigurationInbound: true
+      import: {routeMap: FROM-ISP}
+      export: {routeMap: OWN-ONLY}
+    - address: 10.255.0.1
+      remoteAS: 65020
+      description: overlay fc-a
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      import: {routeMap: OVERLAY-PRIMARY-FC}
+      export: {routeMap: OVERLAY-OUT}
+    - address: 10.255.0.3
+      remoteAS: 65020
+      description: overlay fc-b
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      import: {routeMap: OVERLAY-BACKUP-FC}
+      export: {routeMap: OVERLAY-OUT}
+    - address: 10.255.0.5
+      remoteAS: 65030
+      description: overlay ep-a
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      import: {routeMap: OVERLAY-PRIMARY-EP}
+      export: {routeMap: OVERLAY-OUT}
+    - address: 10.255.0.7
+      remoteAS: 65030
+      description: overlay ep-b
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      import: {routeMap: OVERLAY-BACKUP-EP}
+      export: {routeMap: OVERLAY-OUT}
+    - address: 10.255.0.9
+      remoteAS: 65040
+      description: overlay cs-a
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      import: {routeMap: OVERLAY-PRIMARY-CS}
+      export: {routeMap: OVERLAY-OUT}
+  bfdProfiles:
+    - name: WAN
+      transmitInterval: 1000
+      receiveInterval: 1000
+      multiplier: 3
+  prefixLists:
+    - name: SITE-FR
+      rules:
+        - {rule: 10, action: permit, prefix: 10.10.0.0/16, le: 24}
+        - {rule: 20, action: permit, prefix: 10.20.0.0/16, le: 24}
+        - {rule: 30, action: permit, prefix: 10.30.0.0/16, le: 24}
+        - {rule: 40, action: permit, prefix: 10.40.0.0/16, le: 24}
+    - name: SITE-NETS
+      rules:
+        - {rule: 10, action: permit, prefix: 10.10.0.0/16, le: 24}
+        - {rule: 20, action: permit, prefix: 10.20.0.0/16, le: 24}
+        - {rule: 30, action: permit, prefix: 10.30.0.0/16, le: 24}
+        - {rule: 40, action: permit, prefix: 10.40.0.0/16, le: 24}
+        - {rule: 50, action: permit, prefix: 10.11.0.0/16, le: 24}
+        - {rule: 60, action: permit, prefix: 10.21.0.0/16, le: 24}
+        - {rule: 70, action: permit, prefix: 10.12.0.0/16, le: 24}
+        - {rule: 80, action: permit, prefix: 10.22.0.0/16, le: 24}
+        - {rule: 90, action: permit, prefix: 10.32.0.0/16, le: 24}
+        - {rule: 100, action: permit, prefix: 10.42.0.0/16, le: 24}
+        - {rule: 110, action: permit, prefix: 192.168.10.0/24}
+        - {rule: 120, action: permit, prefix: 192.168.20.0/24}
+        - {rule: 130, action: permit, prefix: 192.168.30.0/24}
+    - name: SITE-FC
+      rules:
+        - {rule: 10, action: permit, prefix: 10.11.0.0/16, le: 24}
+        - {rule: 20, action: permit, prefix: 10.21.0.0/16, le: 24}
+    - name: SITE-EP
+      rules:
+        - {rule: 10, action: permit, prefix: 10.12.0.0/16, le: 24}
+        - {rule: 20, action: permit, prefix: 10.22.0.0/16, le: 24}
+        - {rule: 30, action: permit, prefix: 10.32.0.0/16, le: 24}
+        - {rule: 40, action: permit, prefix: 10.42.0.0/16, le: 24}
+    - name: SITE-CS
+      rules:
+        - {rule: 10, action: permit, prefix: 192.168.10.0/24}
+        - {rule: 20, action: permit, prefix: 192.168.20.0/24}
+        - {rule: 30, action: permit, prefix: 192.168.30.0/24}
+    - name: INTERNET
+      rules:
+        - {rule: 1, action: deny, prefix: 10.0.0.0/8, le: 32}
+        - {rule: 2, action: deny, prefix: 172.16.0.0/12, le: 32}
+        - {rule: 3, action: deny, prefix: 192.168.0.0/16, le: 32}
+        - {rule: 10, action: permit, prefix: 0.0.0.0/0, le: 24}
+    - name: OWN
+      rules:
+        - {rule: 10, action: permit, prefix: 198.18.105.0/24}
+  routeMaps:
+    - name: OVERLAY-PRIMARY-CS
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-CS}
+          set: {localPreference: 200}
+    - name: OVERLAY-BACKUP-CS
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-CS}
+          set: {localPreference: 100}
+    - name: OVERLAY-PRIMARY-EP
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-EP}
+          set: {localPreference: 200}
+    - name: OVERLAY-BACKUP-EP
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-EP}
+          set: {localPreference: 100}
+    - name: OVERLAY-PRIMARY-FC
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-FC}
+          set: {localPreference: 200}
+    - name: OVERLAY-BACKUP-FC
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-FC}
+          set: {localPreference: 100}
+    - name: OVERLAY-OUT
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: SITE-NETS}
+    - name: FROM-ISP
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: INTERNET}
+    - name: OWN-ONLY
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: OWN}
+    - name: SET-SOURCE
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: INTERNET}
+          set: {src: 198.18.105.1}
+        - rule: 15
+          action: permit
+          match: {prefixList: SITE-NETS}
+          set: {src: 10.20.30.1}
+        - rule: 20
+          action: permit

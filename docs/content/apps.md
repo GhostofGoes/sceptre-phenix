@@ -576,6 +576,92 @@ spec:
                 corruption: 5
                 loss: 10
                 reordering: 5
+            bgp:
+              localAS: 64512
+              routerID: 10.255.0.1
+              logNeighborChanges: true
+              multipath:
+                ebgp: 2
+                ibgp: 2
+                asPathRelax: true
+              networks:
+                - 198.18.105.0/24
+              redistribute:
+                - protocol: connected
+                  routeMap: TO-ISP
+                  metric: 10
+              neighbors:
+                - address: 198.18.0.1
+                  remoteAS: 64500
+                  description: ShadeCast Cable
+                  updateSource: eth1
+                  ebgpMultihop: 2
+                  password: s3cret
+                  shutdown: false
+                  timers:
+                    keepalive: 3
+                    holdtime: 9
+                    connectRetry: 5
+                  bfd: true
+                  bfdProfile: WAN
+                  nexthopSelf: true
+                  softReconfigurationInbound: true
+                  defaultOriginate: true
+                  defaultOriginateRouteMap: TO-ISP
+                  import:
+                    routeMap: FROM-ISP
+                    prefixList: PUBLIC
+                  export:
+                    routeMap: TO-ISP
+                    prefixList: OWN
+              bfdProfiles:
+                - name: WAN
+                  transmitInterval: 1000
+                  receiveInterval: 1000
+                  multiplier: 3
+              prefixLists:
+                - name: PUBLIC
+                  rules:
+                    - rule: 10
+                      action: deny
+                      prefix: 10.0.0.0/8
+                      ge: 8
+                      le: 32
+                    - rule: 20
+                      action: permit
+                      prefix: 0.0.0.0/0
+                      le: 24
+                - name: OWN
+                  rules:
+                    - rule: 10
+                      action: permit
+                      prefix: 198.18.105.0/24
+              communityLists:
+                - name: FROM-CUSTOMERS
+                  rules:
+                    - rule: 10
+                      action: permit
+                      regex: "_64512:1_"
+              routeMaps:
+                - name: FROM-ISP
+                  rules:
+                    - rule: 10
+                      action: permit
+                      match:
+                        prefixList: PUBLIC
+                        communityList: FROM-CUSTOMERS
+                      set:
+                        localPreference: 200
+                        community: "64512:1"
+                        src: 10.255.0.1
+                        metric: 10
+                        asPathPrepend: [64512, 64512]
+                - name: TO-ISP
+                  rules:
+                    - rule: 10
+                      action: permit
+                      match:
+                        prefixList: OWN
 ```
 
 #### vrouter Scenario Options
@@ -770,8 +856,9 @@ spec:
 
 * `config`: if present, a list of VyOS configuration commands that phēnix
   writes after the configuration it generates and before the commit. Use it
-  for what the other options cannot express, for example BGP, tunnel
-  interfaces, or logging. Each line is one `set` or `delete` command, and the
+  for what the other options cannot express, for example tunnel interfaces,
+  static routes to a blackhole, or logging. A line can also change or extend
+  what `bgp` wrote. Each line is one `set` or `delete` command, and the
   word after the verb starts with a lowercase letter, as every VyOS
   configuration node does (VyOS hands `set -x` and `set +o` to the shell's own
   `set`). A line that does not is an error, and so is a line with a control
@@ -785,9 +872,284 @@ spec:
 
     ``` yaml title="vrouter config example"
     config:
-      - set protocols bgp system-as 64505
-      - set protocols bgp neighbor 203.0.113.1 remote-as 64500
-      - set protocols bgp neighbor 203.0.113.1 address-family ipv4-unicast
+      - set interfaces dummy dum0 address 198.18.105.1/32
+      - set protocols static route 198.18.105.0/24 blackhole distance 250
+      - set system time-zone UTC
+    ```
+
+* `bgp`: if present, phēnix configures BGP on the router, with the lists and
+  route maps that its neighbors use. The keys do not depend on the kind of
+  router. phēnix checks the block and then writes it as commands of the
+  router, after the system settings and before the lines of `config`. An
+  error stops the experiment before it starts. The error names the neighbor,
+  the list, or the rule that is wrong.
+
+    * `localAS`: AS number of the router, from 1 to 4294967294. This is
+      required.
+
+    * `routerID`: router ID, as an IPv4 address.
+
+    * `logNeighborChanges`: if true, the router logs each neighbor that comes
+      up or goes down.
+
+    * `multipath`: how many equal paths to one prefix the router uses.
+
+        * `ebgp`: maximum number of paths from neighbors in another AS, from
+          1 to 256.
+
+        * `ibgp`: maximum number of paths from neighbors in the same AS, from
+          1 to 256.
+
+        * `asPathRelax`: if true, paths through different ASes are equal
+          when their AS paths have the same length.
+
+    * `networks`: list of IPv4 prefixes that the router announces.
+
+    * `redistribute`: list of protocols whose routes the router announces.
+
+        * `protocol`: `connected`, `static`, `ospf`, `kernel`, or `rip`. This
+          is required. A protocol can be in the list only once.
+
+        * `routeMap`: name of a route map that filters or changes the routes.
+
+        * `metric`: metric of the routes, from 0 to 4294967295.
+
+    * `neighbors`: list of BGP neighbors. The router has one session with
+      each.
+
+        * `address`: IPv4 address of the neighbor. This is required. Two
+          neighbors cannot have the same address. The address cannot be the
+          address of an interface of the router.
+
+        * `remoteAS`: AS number of the neighbor, from 1 to 4294967294. This
+          is required.
+
+        * `description`: text that describes the neighbor. It cannot have a
+          single quote or a control character. VyOS accepts at most 255
+          characters.
+
+        * `updateSource`: source address of the session. Give an IPv4
+          address, or the name of an interface of the router in the
+          [topology](configuration.md#topology). For a name, phēnix writes
+          the address of that interface.
+
+        * `ebgpMultihop`: maximum number of hops to a neighbor in another AS
+          that is not directly connected, from 1 to 255.
+
+        * `password`: MD5 password of the session. It cannot be empty, have a
+          single quote or a control character, or be longer than 80 bytes.
+          VyOS also refuses a space. phēnix writes the password into the boot
+          script of the router, as it does the IPsec `secret`.
+
+        * `shutdown`: if true, the router keeps the neighbor in its
+          configuration but does not open the session.
+
+        * `timers`: timers of the session, in seconds.
+
+            * `keepalive`: time between keepalive messages, from 1 to 65535.
+
+            * `holdtime`: time without a message after which the session
+              goes down. It is 0, which turns the timer off, or from 3 to
+              65535. Give `keepalive` and `holdtime` together, because VyOS
+              ignores one without the other. `keepalive` must be less than
+              `holdtime`, unless `holdtime` is 0.
+
+            * `connectRetry`: time between attempts to connect, from 1 to
+              65535.
+
+        * `bfd`: if true, BFD with its default timers watches the session.
+
+        * `bfdProfile`: name of a BFD profile. BFD with the timers of the
+          profile watches the session. This also turns BFD on.
+
+        * `nexthopSelf`: if true, the router sends its own address as the
+          next hop of the routes.
+
+        * `softReconfigurationInbound`: if true, the router keeps the routes
+          that the neighbor sent, so that a change of policy needs no new
+          copy from the neighbor.
+
+        * `defaultOriginate`: if true, the router sends the neighbor a
+          default route.
+
+        * `defaultOriginateRouteMap`: name of a route map. The router sends
+          the default route only while a route in its BGP table matches the
+          route map. This also turns `defaultOriginate` on.
+
+        * `import`: what filters the routes that the neighbor sends.
+
+            * `routeMap`: name of a route map.
+
+            * `prefixList`: name of a prefix list.
+
+        * `export`: what filters the routes that the router sends to the
+          neighbor. It takes the same keys as `import`.
+
+    * `bfdProfiles`: list of BFD profiles.
+
+        * `name`: name of the profile. VyOS accepts at most 32 characters.
+
+        * `transmitInterval`: minimum time between sent packets, in
+          milliseconds, from 10 to 60000.
+
+        * `receiveInterval`: minimum time between received packets, in
+          milliseconds, from 10 to 60000.
+
+        * `multiplier`: number of lost packets after which the session goes
+          down, from 2 to 255.
+
+    * `prefixLists`: list of prefix lists. A prefix list needs a `name` and
+      at least one rule in `rules`.
+
+        * `rule`: number of the rule, from 1 to 65535. A lower number comes
+          first. Two rules of a list cannot have the same number.
+
+        * `action`: `permit` or `deny`.
+
+        * `prefix`: IPv4 prefix to match.
+
+        * `ge`: if present, the rule matches the prefixes inside `prefix`
+          with at least this length. It is from the length of `prefix` to
+          32.
+
+        * `le`: if present, the rule matches the prefixes inside `prefix`
+          with at most this length. It is from `ge`, or from the length of
+          `prefix`, to 32.
+
+    * `communityLists`: list of community lists. A community list needs a
+      `name` and at least one rule in `rules`.
+
+        * `rule`: number of the rule, from 1 to 65535.
+
+        * `action`: `permit` or `deny`.
+
+        * `regex`: regular expression that the communities of a route must
+          match. It cannot be empty or have a single quote or a control
+          character.
+
+    * `routeMaps`: list of route maps. A route map needs a `name` and at
+      least one rule in `rules`.
+
+        * `rule`: number of the rule, from 1 to 65535.
+
+        * `action`: `permit` or `deny`.
+
+        * `match`: what a route must match. A rule without `match` matches
+          every route.
+
+            * `prefixList`: name of a prefix list.
+
+            * `communityList`: name of a community list.
+
+        * `set`: what the rule changes in a route that it permits.
+
+            * `localPreference`: local preference, from 0 to 4294967295.
+
+            * `community`: one community that replaces the communities of
+              the route. It is `AA:NN` with each number from 0 to 65535, or
+              a name such as `no-export`, `no-advertise`, or `local-as`.
+
+            * `src`: IPv4 address that the router uses as the source of its
+              own packets on the route. VyOS uses it only in a route map
+              that a line of `config` applies to the routes that BGP
+              installs, such as
+              `set system ip protocol bgp route-map NAME`.
+
+            * `metric`: metric, from 0 to 4294967295.
+
+            * `asPathPrepend`: list of AS numbers to put in front of the AS
+              path.
+
+    The `bgp` option has these limits:
+
+    * Only routers and firewalls with `os_type: vyos` accept it today. For
+      any other host it is an error.
+
+    * It supports IPv4 unicast routes only. An IPv6 address or prefix is an
+      error.
+
+    * A prefix cannot have bits set after its length. Write `10.0.0.0/8`, not
+      `10.1.2.3/8`.
+
+    * A key that phēnix does not know is an error.
+
+    * The name of a BFD profile, a prefix list, a community list, or a route
+      map starts with a letter. The other characters are letters, digits,
+      `-`, or `_`. Two items of the same kind cannot have the same name.
+
+    * Each name that the block uses must be defined. Define it in the `bgp`
+      block, or with a line of `config` on the same host that starts with
+      `set policy route-map NAME`, `set policy prefix-list NAME`,
+      `set policy community-list NAME`, or `set protocols bfd profile NAME`
+      and has more words after the name. VyOS refuses the whole
+      configuration when a route map, a prefix list, or a community list is
+      missing, and the router then starts with no configuration.
+
+    Use `config` for everything that `bgp` does not cover, for example IPv6,
+    peer groups, or route reflectors.
+
+    In this example, an edge router announces its own prefix to two ISPs. It
+    accepts only a default route from each ISP, and it uses both default
+    routes. The line of `config` adds a static route that drops the packets
+    for addresses of the prefix that the router has no other route to.
+
+    ``` yaml title="vrouter bgp example"
+    bgp:
+      localAS: 64505
+      routerID: 198.18.105.1
+      multipath:
+        ebgp: 2
+        asPathRelax: true
+      networks:
+        - 198.18.105.0/24
+      neighbors:
+        - address: 203.0.113.1
+          remoteAS: 64500
+          description: ShadeCast Cable
+          bfdProfile: WAN
+          import:
+            routeMap: FROM-ISP
+          export:
+            routeMap: TO-ISP
+        - address: 198.18.101.1
+          remoteAS: 64501
+          description: Tumbleweed Fiber
+          bfdProfile: WAN
+          import:
+            routeMap: FROM-ISP
+          export:
+            routeMap: TO-ISP
+      bfdProfiles:
+        - name: WAN
+          transmitInterval: 1000
+          receiveInterval: 1000
+          multiplier: 3
+      prefixLists:
+        - name: DEFAULT
+          rules:
+            - rule: 10
+              action: permit
+              prefix: 0.0.0.0/0
+        - name: OWN
+          rules:
+            - rule: 10
+              action: permit
+              prefix: 198.18.105.0/24
+      routeMaps:
+        - name: FROM-ISP
+          rules:
+            - rule: 10
+              action: permit
+              match:
+                prefixList: DEFAULT
+        - name: TO-ISP
+          rules:
+            - rule: 10
+              action: permit
+              match:
+                prefixList: OWN
+    config:
+      - set protocols static route 198.18.105.0/24 blackhole distance 250
     ```
 
 !!! important

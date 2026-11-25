@@ -43,6 +43,7 @@ var (
 	ErrEmulatorInterface   = errors.New("emulator interface not found")
 	ErrUnsafeVyosPassword  = errors.New("vyos password cannot be written safely")
 	ErrVyosConfigLine      = errors.New("vyos config line is not valid")
+	ErrBGPConfig           = errors.New("bgp config is not valid")
 )
 
 type ACLConfig struct {
@@ -188,49 +189,66 @@ func (v Vrouter) Configure(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
-// checkVyosConfigHosts refuses a `config` list on a vrouter host whose router
-// PreStart does not render as VyOS: a host with no node in the topology, a
-// node with the default apps off, a node that is not a router or firewall, or
-// a router whose os_type is not vyos. PreStart would skip such a node before
-// it reads the host's metadata, and drop the lines without a word.
-func checkVyosConfigHosts(exp *types.Experiment) error {
+// checkVrouterHosts refuses `config` or `bgp` metadata on a vrouter host
+// that PreStart does not render with it: a host with no node in the topology,
+// a node with the default apps off, a node that is not a router or firewall,
+// or a router whose os_type cannot take the key. PreStart would skip such a
+// node before it reads the host's metadata, or render it without the key, and
+// drop the metadata without a word.
+func checkVrouterHosts(exp *types.Experiment) error {
+	keys := []struct {
+		name    string
+		err     error
+		osTypes []string
+	}{
+		{name: "config", err: ErrVyosConfigLine, osTypes: []string{osTypeVyos}},
+		{name: "bgp", err: ErrBGPConfig, osTypes: bgpOSTypes()},
+	}
+
 	for _, app := range exp.Apps() {
 		if app.Name() != appNameVrouter {
 			continue
 		}
 
 		for _, host := range app.Hosts() {
-			if _, ok := host.Metadata()["config"]; !ok {
-				continue
-			}
-
 			node := exp.Spec.Topology().FindNodeByName(host.Hostname())
 
-			var why string
+			for _, key := range keys {
+				if _, ok := host.Metadata()[key.name]; !ok {
+					continue
+				}
 
-			switch {
-			case node == nil:
-				why = "no node of that name is in the topology"
-			case node.External() || !defaultAppsEnabled(node):
-				why = "the default apps do not run on the node"
-			case !strings.EqualFold(node.Type(), "router") && !strings.EqualFold(node.Type(), "firewall"):
-				why = "the node is not a router or firewall"
-			case !strings.EqualFold(node.Hardware().OSType(), osTypeVyos):
-				why = "config is only supported for os_type vyos"
-			default:
-				continue
+				if why := vrouterKeyDropped(node, key.name, key.osTypes); why != "" {
+					return fmt.Errorf("processing %s metadata for host %s: %w: %s", key.name, host.Hostname(), key.err, why)
+				}
 			}
-
-			return fmt.Errorf("processing config metadata for host %s: %w: %s", host.Hostname(), ErrVyosConfigLine, why)
 		}
 	}
 
 	return nil
 }
 
+// vrouterKeyDropped says why PreStart does not render the metadata key of a
+// vrouter host whose node is node, or "" if it does. osTypes holds the
+// os_types that can take the key.
+func vrouterKeyDropped(node ifaces.NodeSpec, key string, osTypes []string) string {
+	switch {
+	case node == nil:
+		return "no node of that name is in the topology"
+	case node.External() || !defaultAppsEnabled(node):
+		return "the default apps do not run on the node"
+	case !strings.EqualFold(node.Type(), "router") && !strings.EqualFold(node.Type(), "firewall"):
+		return "the node is not a router or firewall"
+	case !slices.Contains(osTypes, strings.ToLower(node.Hardware().OSType())):
+		return key + " is only supported for os_type " + strings.Join(osTypes, ", ")
+	default:
+		return ""
+	}
+}
+
 //nolint:cyclop,funlen,gocyclo,maintidx // complex logic
 func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
-	err := checkVyosConfigHosts(exp)
+	err := checkVrouterHosts(exp)
 	if err != nil {
 		return err
 	}
@@ -420,6 +438,17 @@ func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
 						}
 
 						data["config"] = config
+
+						bgp, err := bgpLines(md, node.Hardware().OSType(), node.Network().Interfaces(), config)
+						if err != nil {
+							return fmt.Errorf(
+								"processing bgp metadata for host %s: %w",
+								host.Hostname(),
+								err,
+							)
+						}
+
+						data["bgp"] = bgp
 
 						break
 					}
@@ -787,11 +816,17 @@ func vyosPassword(val any) (string, error) {
 		return "", fmt.Errorf("%w: it is not a string", ErrUnsafeVyosPassword)
 	case passwd == "":
 		return "", fmt.Errorf("%w: it is empty", ErrUnsafeVyosPassword)
-	case strings.ContainsFunc(passwd, func(r rune) bool { return r == '\'' || unicode.IsControl(r) }):
+	case !singleQuotable(passwd):
 		return "", fmt.Errorf("%w: it has a single quote or a control character", ErrUnsafeVyosPassword)
 	default:
 		return passwd, nil
 	}
+}
+
+// singleQuotable reports whether a script can hold text between single
+// quotes: text with no single quote and no control character.
+func singleQuotable(text string) bool {
+	return !strings.ContainsFunc(text, func(r rune) bool { return r == '\'' || unicode.IsControl(r) })
 }
 
 // vyosConfigUnsafe holds the characters that vbash, which runs the rendered

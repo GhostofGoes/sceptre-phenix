@@ -1,0 +1,101 @@
+# Every key of the `bgp` metadata of the vrouter app. The first item of each
+# list sets every key of that item: TestBGPFixtureSetsEveryField checks it.
+# The password is a placeholder.
+bgp:
+  localAS: 64512
+  routerID: 10.255.0.1
+  logNeighborChanges: true
+  multipath:
+    ebgp: 2
+    ibgp: 4
+    asPathRelax: true
+  networks:
+    - 198.18.105.0/24
+    - 10.20.0.0/16
+  redistribute:
+    - protocol: connected
+      routeMap: LOCAL
+      metric: 10
+    - protocol: static
+    - protocol: ospf
+      metric: 20
+    - protocol: kernel
+      routeMap: LOCAL
+    - protocol: rip
+  neighbors:
+    - address: 198.18.0.1
+      remoteAS: 64500
+      description: ShadeCast, the first ISP
+      updateSource: WAN0
+      ebgpMultihop: 2
+      password: not-a-real-key
+      shutdown: true
+      timers:
+        keepalive: 3
+        holdtime: 9
+        connectRetry: 5
+      bfd: true
+      bfdProfile: WAN
+      nexthopSelf: true
+      softReconfigurationInbound: true
+      defaultOriginate: true
+      defaultOriginateRouteMap: DEFAULT-IF-TRANSIT
+      import: {routeMap: FROM-ISP, prefixList: PUBLIC}
+      export: {routeMap: TO-ISP, prefixList: OWN}
+    - address: 198.18.0.5
+      remoteAS: 64501
+      updateSource: 10.255.0.1
+      timers: {connectRetry: 10}
+      bfd: true
+      defaultOriginate: true
+    - address: 10.255.0.2
+      remoteAS: 64512
+  bfdProfiles:
+    - name: WAN
+      transmitInterval: 1000
+      receiveInterval: 500
+      multiplier: 3
+    - name: DEFAULTS
+  prefixLists:
+    - name: PUBLIC
+      rules:
+        - {rule: 10, action: deny, prefix: 10.0.0.0/8, ge: 8, le: 32}
+        - {rule: 20, action: permit, prefix: 0.0.0.0/0, le: 24}
+    - name: OWN
+      rules:
+        - {rule: 10, action: permit, prefix: 198.18.105.0/24}
+  communityLists:
+    - name: FROM-CUSTOMERS
+      rules:
+        - {rule: 10, action: permit, regex: "_64512:1_"}
+        - {rule: 20, action: deny, regex: "^(64512|64513):[0-9]+$"}
+  routeMaps:
+    - name: FROM-ISP
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: PUBLIC, communityList: FROM-CUSTOMERS}
+          set:
+            localPreference: 200
+            community: "64512:1"
+            src: 10.255.0.1
+            metric: 10
+            asPathPrepend: [64512, 64512]
+        - rule: 20
+          action: deny
+    - name: TO-ISP
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: OWN}
+          set: {community: no-export, asPathPrepend: [64512]}
+    - name: DEFAULT-IF-TRANSIT
+      rules:
+        - rule: 10
+          action: permit
+          match: {communityList: FROM-CUSTOMERS}
+    - name: LOCAL
+      rules:
+        - rule: 10
+          action: permit
+          set: {localPreference: 0, metric: 0}

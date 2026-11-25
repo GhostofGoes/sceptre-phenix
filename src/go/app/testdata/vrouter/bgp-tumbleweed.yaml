@@ -1,0 +1,104 @@
+# The `bgp` metadata that gives the routing lines of the router tumbleweed of the
+# CherryMountain WAN (bgp-tumbleweed.lines). TestVyosBGPLinesParity compares the two.
+bgp:
+  localAS: 64501
+  routerID: 198.18.101.254
+  logNeighborChanges: true
+  networks:
+    - 198.18.101.0/24
+  neighbors:
+    - address: 198.18.0.9
+      remoteAS: 64496
+      description: Continental Backbone, Denver
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      import: {routeMap: FROM-PROVIDER}
+      export: {routeMap: TO-UPSTREAM}
+    - address: 198.18.0.17
+      remoteAS: 64500
+      description: ShadeCast Cable
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      import: {routeMap: FROM-PEER}
+      export: {routeMap: TO-UPSTREAM}
+    - address: 198.18.0.22
+      remoteAS: 64502
+      description: Marmot Wireless
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      import: {routeMap: FROM-CUSTOMER}
+      export: {routeMap: TO-CUSTOMER}
+    - address: 198.18.101.2
+      remoteAS: 64505
+      description: Head office and Front Range brewery edge
+      timers: {keepalive: 3, holdtime: 9, connectRetry: 5}
+      bfdProfile: WAN
+      defaultOriginateRouteMap: DEFAULT-IF-TRANSIT
+      import: {routeMap: FROM-CUST-FR-FW-EDGE}
+      export: {routeMap: TO-CUSTOMER}
+  bfdProfiles:
+    - name: WAN
+      transmitInterval: 1000
+      receiveInterval: 1000
+      multiplier: 3
+  prefixLists:
+    - name: PUBLIC
+      rules:
+        - {rule: 1, action: deny, prefix: 10.0.0.0/8, le: 32}
+        - {rule: 2, action: deny, prefix: 172.16.0.0/12, le: 32}
+        - {rule: 3, action: deny, prefix: 192.168.0.0/16, le: 32}
+        - {rule: 10, action: deny, prefix: 0.0.0.0/0}
+        - {rule: 15, action: permit, prefix: 0.0.0.0/0, le: 24}
+    - name: OWN
+      rules:
+        - {rule: 10, action: permit, prefix: 198.18.101.0/24}
+    - name: CUST-FR-FW-EDGE
+      rules:
+        - {rule: 10, action: permit, prefix: 198.18.105.0/24}
+    - name: TRANSIT
+      rules:
+        - {rule: 10, action: permit, prefix: 198.18.0.0/24}
+        - {rule: 20, action: permit, prefix: 198.18.110.0/24}
+  communityLists:
+    - name: FROM-CUSTOMERS
+      rules:
+        - {rule: 10, action: permit, regex: "_64501:1_"}
+  routeMaps:
+    - name: TO-UPSTREAM
+      rules:
+        - rule: 10
+          action: permit
+          match: {communityList: FROM-CUSTOMERS}
+        - rule: 20
+          action: permit
+          match: {prefixList: OWN}
+    - name: TO-CUSTOMER
+      rules:
+        - rule: 10
+          action: permit
+    - name: FROM-CUSTOMER
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: PUBLIC}
+          set: {localPreference: 200, community: "64501:1"}
+    - name: FROM-PEER
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: PUBLIC}
+          set: {localPreference: 150, community: "64501:2"}
+    - name: FROM-PROVIDER
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: PUBLIC}
+          set: {localPreference: 100, community: "64501:3"}
+    - name: FROM-CUST-FR-FW-EDGE
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: CUST-FR-FW-EDGE}
+          set: {localPreference: 200, community: "64501:1"}
+    - name: DEFAULT-IF-TRANSIT
+      rules:
+        - rule: 10
+          action: permit
+          match: {prefixList: TRANSIT}
