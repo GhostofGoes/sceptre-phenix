@@ -8,6 +8,8 @@
 {{- $emulators := index . "emulators" -}}
 {{- $snat := index . "snat" -}}
 {{- $dnat := index . "dnat" -}}
+{{- $bgp := index . "bgp" -}}
+{{- $config := index . "config" -}}
 {{- if $vyos -}}
 #!/bin/vbash
 source /opt/vyatta/etc/functions/script-template
@@ -268,6 +270,18 @@ set system login user vyos authentication plaintext-password '{{ $passwd }}'
 {{- range $idx, $iface := $node.Network.Interfaces }}
     {{- range $dnsServer := $iface.DNS }}
 set system name-server {{ $dnsServer }}
+    {{- end }}
+{{- end }}
+{{- if $bgp }}
+# ---------------------------------- BGP ----------------------------------
+    {{- range $line := $bgp }}
+{{ $line }}
+    {{- end }}
+{{- end }}
+{{- if $config }}
+# ------------------------------ Extra config -----------------------------
+    {{- range $line := $config }}
+{{ $line }}
     {{- end }}
 {{- end }}
 commit

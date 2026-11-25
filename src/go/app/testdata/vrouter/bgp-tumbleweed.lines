@@ -1,0 +1,85 @@
+set protocols bfd profile WAN interval transmit 1000
+set protocols bfd profile WAN interval receive 1000
+set protocols bfd profile WAN interval multiplier 3
+set policy prefix-list PUBLIC rule 1 action deny
+set policy prefix-list PUBLIC rule 1 prefix 10.0.0.0/8
+set policy prefix-list PUBLIC rule 1 le 32
+set policy prefix-list PUBLIC rule 2 action deny
+set policy prefix-list PUBLIC rule 2 prefix 172.16.0.0/12
+set policy prefix-list PUBLIC rule 2 le 32
+set policy prefix-list PUBLIC rule 3 action deny
+set policy prefix-list PUBLIC rule 3 prefix 192.168.0.0/16
+set policy prefix-list PUBLIC rule 3 le 32
+set policy prefix-list PUBLIC rule 10 action deny
+set policy prefix-list PUBLIC rule 10 prefix 0.0.0.0/0
+set policy prefix-list PUBLIC rule 15 action permit
+set policy prefix-list PUBLIC rule 15 prefix 0.0.0.0/0
+set policy prefix-list PUBLIC rule 15 le 24
+set policy community-list FROM-CUSTOMERS rule 10 action permit
+set policy community-list FROM-CUSTOMERS rule 10 regex '_64501:1_'
+set policy route-map TO-UPSTREAM rule 10 action permit
+set policy route-map TO-UPSTREAM rule 10 match community community-list FROM-CUSTOMERS
+set policy route-map TO-UPSTREAM rule 20 action permit
+set policy route-map TO-UPSTREAM rule 20 match ip address prefix-list OWN
+set policy route-map TO-CUSTOMER rule 10 action permit
+set protocols bgp system-as 64501
+set protocols bgp parameters router-id 198.18.101.254
+set protocols bgp parameters log-neighbor-changes
+set policy prefix-list OWN rule 10 action permit
+set policy prefix-list OWN rule 10 prefix 198.18.101.0/24
+set policy route-map FROM-CUSTOMER rule 10 action permit
+set policy route-map FROM-CUSTOMER rule 10 match ip address prefix-list PUBLIC
+set policy route-map FROM-CUSTOMER rule 10 set local-preference 200
+set policy route-map FROM-CUSTOMER rule 10 set community replace 64501:1
+set policy route-map FROM-PEER rule 10 action permit
+set policy route-map FROM-PEER rule 10 match ip address prefix-list PUBLIC
+set policy route-map FROM-PEER rule 10 set local-preference 150
+set policy route-map FROM-PEER rule 10 set community replace 64501:2
+set policy route-map FROM-PROVIDER rule 10 action permit
+set policy route-map FROM-PROVIDER rule 10 match ip address prefix-list PUBLIC
+set policy route-map FROM-PROVIDER rule 10 set local-preference 100
+set policy route-map FROM-PROVIDER rule 10 set community replace 64501:3
+set protocols bgp address-family ipv4-unicast network 198.18.101.0/24
+set protocols static route 198.18.101.0/24 blackhole distance 250
+set protocols bgp neighbor 198.18.0.9 remote-as 64496
+set protocols bgp neighbor 198.18.0.9 description 'Continental Backbone, Denver'
+set protocols bgp neighbor 198.18.0.9 timers keepalive 3
+set protocols bgp neighbor 198.18.0.9 timers holdtime 9
+set protocols bgp neighbor 198.18.0.9 timers connect 5
+set protocols bgp neighbor 198.18.0.9 address-family ipv4-unicast route-map import FROM-PROVIDER
+set protocols bgp neighbor 198.18.0.9 address-family ipv4-unicast route-map export TO-UPSTREAM
+set protocols bgp neighbor 198.18.0.17 remote-as 64500
+set protocols bgp neighbor 198.18.0.17 description 'ShadeCast Cable'
+set protocols bgp neighbor 198.18.0.17 timers keepalive 3
+set protocols bgp neighbor 198.18.0.17 timers holdtime 9
+set protocols bgp neighbor 198.18.0.17 timers connect 5
+set protocols bgp neighbor 198.18.0.17 address-family ipv4-unicast route-map import FROM-PEER
+set protocols bgp neighbor 198.18.0.17 address-family ipv4-unicast route-map export TO-UPSTREAM
+set protocols bgp neighbor 198.18.0.22 remote-as 64502
+set protocols bgp neighbor 198.18.0.22 description 'Marmot Wireless'
+set protocols bgp neighbor 198.18.0.22 timers keepalive 3
+set protocols bgp neighbor 198.18.0.22 timers holdtime 9
+set protocols bgp neighbor 198.18.0.22 timers connect 5
+set protocols bgp neighbor 198.18.0.22 address-family ipv4-unicast route-map import FROM-CUSTOMER
+set protocols bgp neighbor 198.18.0.22 address-family ipv4-unicast route-map export TO-CUSTOMER
+set policy prefix-list CUST-FR-FW-EDGE rule 10 action permit
+set policy prefix-list CUST-FR-FW-EDGE rule 10 prefix 198.18.105.0/24
+set policy route-map FROM-CUST-FR-FW-EDGE rule 10 action permit
+set policy route-map FROM-CUST-FR-FW-EDGE rule 10 match ip address prefix-list CUST-FR-FW-EDGE
+set policy route-map FROM-CUST-FR-FW-EDGE rule 10 set local-preference 200
+set policy route-map FROM-CUST-FR-FW-EDGE rule 10 set community replace 64501:1
+set protocols bgp neighbor 198.18.101.2 address-family ipv4-unicast default-originate route-map DEFAULT-IF-TRANSIT
+set protocols bgp neighbor 198.18.101.2 remote-as 64505
+set protocols bgp neighbor 198.18.101.2 description 'Head office and Front Range brewery edge'
+set protocols bgp neighbor 198.18.101.2 timers keepalive 3
+set protocols bgp neighbor 198.18.101.2 timers holdtime 9
+set protocols bgp neighbor 198.18.101.2 timers connect 5
+set protocols bgp neighbor 198.18.101.2 bfd profile WAN
+set protocols bgp neighbor 198.18.101.2 address-family ipv4-unicast route-map import FROM-CUST-FR-FW-EDGE
+set protocols bgp neighbor 198.18.101.2 address-family ipv4-unicast route-map export TO-CUSTOMER
+set policy prefix-list TRANSIT rule 10 action permit
+set policy prefix-list TRANSIT rule 10 prefix 198.18.0.0/24
+set policy prefix-list TRANSIT rule 20 action permit
+set policy prefix-list TRANSIT rule 20 prefix 198.18.110.0/24
+set policy route-map DEFAULT-IF-TRANSIT rule 10 action permit
+set policy route-map DEFAULT-IF-TRANSIT rule 10 match ip address prefix-list TRANSIT

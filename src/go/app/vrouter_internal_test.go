@@ -1064,3 +1064,141 @@ func TestVrouterProcessIPSec(t *testing.T) {
 		t.Errorf("preshared key for another site pair = %q, want a new key", got)
 	}
 }
+
+// TestVrouterPreStartVyosConfig verifies that the `config` metadata of a VyOS
+// router is written verbatim after the generated configuration and before the
+// commit, so that it can add what the template cannot render (BGP, tunnel
+// interfaces) and can override what it does render.
+func TestVrouterPreStartVyosConfig(t *testing.T) {
+	t.Parallel()
+
+	md := map[string]any{"config": []any{
+		"set protocols bgp system-as 64505",
+		"set protocols bgp neighbor 203.0.113.1 remote-as 64500",
+		"set policy as-path-list TRANSIT rule 10 regex '^64500_'",
+		"delete service ntp",
+	}}
+	got := renderVrouter(t, vrouterExperiment(t, vrouterScenario(vrouterApp(md)), vrouterNode("rtr", osTypeVyos)))
+
+	want := "# ------------------------------ Extra config -----------------------------\n" +
+		"set protocols bgp system-as 64505\n" +
+		"set protocols bgp neighbor 203.0.113.1 remote-as 64500\n" +
+		"set policy as-path-list TRANSIT rule 10 regex '^64500_'\n" +
+		"delete service ntp\n" +
+		"commit\n" +
+		"save\n" +
+		"exit"
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), want) {
+		t.Errorf("rendered config does not end with the extra config and the commit:\n%q", got[max(0, len(got)-len(want)-20):])
+	}
+
+	if hostname := strings.Index(got, "set system host-name rtr"); hostname < 0 ||
+		hostname > strings.Index(got, "set protocols bgp system-as") {
+		t.Errorf("extra config is not after the generated configuration:\n%s", got)
+	}
+}
+
+// TestVrouterPreStartVyosConfigAbsent verifies that a router without `config`
+// metadata gets no extra config section.
+func TestVrouterPreStartVyosConfigAbsent(t *testing.T) {
+	t.Parallel()
+
+	got := renderVrouter(t, vrouterExperiment(t, vrouterScenario(vrouterApp(map[string]any{})), vrouterNode("rtr", osTypeVyos)))
+	if strings.Contains(got, "Extra config") {
+		t.Errorf("rendered config has an extra config section without config metadata:\n%s", got)
+	}
+}
+
+// TestVrouterPreStartVyosConfigErrors verifies that PreStart refuses a config
+// line the vbash script would not run as one VyOS command, and config on a
+// router that is not VyOS.
+// TestVrouterPreStartVyosConfigHosts checks that config is refused on a host
+// whose vrouter metadata PreStart would otherwise drop without a word.
+func TestVrouterPreStartVyosConfigHosts(t *testing.T) {
+	t.Parallel()
+
+	external := true
+
+	tests := []struct {
+		name string
+		node func() *v1.Node
+	}{
+		{name: "no node of that name", node: func() *v1.Node { return vrouterNode("other", osTypeVyos) }},
+		{name: "not a router or firewall", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.TypeF = "VirtualMachine"
+
+			return n
+		}},
+		{name: "external", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.ExternalF = &external
+
+			return n
+		}},
+		{name: "default apps off", node: func() *v1.Node {
+			n := vrouterNode("rtr", osTypeVyos)
+			n.AnnotationsF = map[string]any{defaultAppsAnnotation: false}
+
+			return n
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			md := map[string]any{"config": []any{"set system host-name a"}}
+			exp := vrouterExperiment(t, vrouterScenario(vrouterApp(md)), tt.node())
+
+			var v Vrouter
+
+			err := v.PreStart(t.Context(), exp)
+			if !errors.Is(err, ErrVyosConfigLine) {
+				t.Errorf("PreStart() error = %v, want ErrVyosConfigLine", err)
+			}
+		})
+	}
+}
+
+func TestVrouterPreStartVyosConfigErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		osType string
+		lines  any
+	}{
+		{name: "not set or delete", osType: osTypeVyos, lines: []any{"commit"}},
+		{name: "shell command", osType: osTypeVyos, lines: []any{"reboot now"}},
+		{name: "second command", osType: osTypeVyos, lines: []any{"set system host-name a; reboot"}},
+		{name: "command substitution", osType: osTypeVyos, lines: []any{"set system host-name $(hostname)"}},
+		{name: "backtick", osType: osTypeVyos, lines: []any{"set system host-name `hostname`"}},
+		{name: "newline", osType: osTypeVyos, lines: []any{"set system host-name a\nreboot"}},
+		{name: "file name pattern", osType: osTypeVyos, lines: []any{"set system host-name [ab]"}},
+		{name: "unclosed quote", osType: osTypeVyos, lines: []any{"set system login banner pre-login 'hello"}},
+		{name: "double quote", osType: osTypeVyos, lines: []any{"set system host-name \"a\""}},
+		{name: "second line of two", osType: osTypeVyos, lines: []any{"set system host-name a", "save"}},
+		{name: "not a list", osType: osTypeVyos, lines: "set system host-name a"},
+		{name: "vyatta", osType: "vyatta", lines: []any{"set system host-name a"}},
+		{name: "minirouter", osType: "minirouter", lines: []any{"set system host-name a"}},
+		{name: "shell option", osType: osTypeVyos, lines: []any{"set -xk"}},
+		{name: "quoted shell option", osType: osTypeVyos, lines: []any{"set '-n'"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			md := map[string]any{"config": tt.lines}
+			exp := vrouterExperiment(t, vrouterScenario(vrouterApp(md)), vrouterNode("rtr", tt.osType))
+
+			var v Vrouter
+
+			err := v.PreStart(t.Context(), exp)
+			if !errors.Is(err, ErrVyosConfigLine) {
+				t.Errorf("PreStart() with config %v error = %v, want ErrVyosConfigLine", tt.lines, err)
+			}
+		})
+	}
+}

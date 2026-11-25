@@ -1,0 +1,73 @@
+set protocols bfd profile WAN interval transmit 1000
+set protocols bfd profile WAN interval receive 500
+set protocols bfd profile WAN interval multiplier 3
+set protocols bfd profile DEFAULTS
+set policy prefix-list PUBLIC rule 10 action deny
+set policy prefix-list PUBLIC rule 10 prefix 10.0.0.0/8
+set policy prefix-list PUBLIC rule 10 ge 8
+set policy prefix-list PUBLIC rule 10 le 32
+set policy prefix-list PUBLIC rule 20 action permit
+set policy prefix-list PUBLIC rule 20 prefix 0.0.0.0/0
+set policy prefix-list PUBLIC rule 20 le 24
+set policy prefix-list OWN rule 10 action permit
+set policy prefix-list OWN rule 10 prefix 198.18.105.0/24
+set policy community-list FROM-CUSTOMERS rule 10 action permit
+set policy community-list FROM-CUSTOMERS rule 10 regex '_64512:1_'
+set policy community-list FROM-CUSTOMERS rule 20 action deny
+set policy community-list FROM-CUSTOMERS rule 20 regex '^(64512|64513):[0-9]+$'
+set policy route-map FROM-ISP rule 10 action permit
+set policy route-map FROM-ISP rule 10 match ip address prefix-list PUBLIC
+set policy route-map FROM-ISP rule 10 match community community-list FROM-CUSTOMERS
+set policy route-map FROM-ISP rule 10 set local-preference 200
+set policy route-map FROM-ISP rule 10 set community replace 64512:1
+set policy route-map FROM-ISP rule 10 set src 10.255.0.1
+set policy route-map FROM-ISP rule 10 set metric 10
+set policy route-map FROM-ISP rule 10 set as-path prepend '64512 64512'
+set policy route-map FROM-ISP rule 20 action deny
+set policy route-map TO-ISP rule 10 action permit
+set policy route-map TO-ISP rule 10 match ip address prefix-list OWN
+set policy route-map TO-ISP rule 10 set community replace no-export
+set policy route-map TO-ISP rule 10 set as-path prepend '64512'
+set policy route-map DEFAULT-IF-TRANSIT rule 10 action permit
+set policy route-map DEFAULT-IF-TRANSIT rule 10 match community community-list FROM-CUSTOMERS
+set policy route-map LOCAL rule 10 action permit
+set policy route-map LOCAL rule 10 set local-preference 0
+set policy route-map LOCAL rule 10 set metric 0
+set protocols bgp system-as 64512
+set protocols bgp parameters router-id 10.255.0.1
+set protocols bgp parameters log-neighbor-changes
+set protocols bgp parameters bestpath as-path multipath-relax
+set protocols bgp address-family ipv4-unicast network 198.18.105.0/24
+set protocols bgp address-family ipv4-unicast network 10.20.0.0/16
+set protocols bgp address-family ipv4-unicast redistribute connected route-map LOCAL
+set protocols bgp address-family ipv4-unicast redistribute connected metric 10
+set protocols bgp address-family ipv4-unicast redistribute static
+set protocols bgp address-family ipv4-unicast redistribute ospf metric 20
+set protocols bgp address-family ipv4-unicast redistribute kernel route-map LOCAL
+set protocols bgp address-family ipv4-unicast redistribute rip
+set protocols bgp address-family ipv4-unicast maximum-paths ebgp 2
+set protocols bgp address-family ipv4-unicast maximum-paths ibgp 4
+set protocols bgp neighbor 198.18.0.1 remote-as 64500
+set protocols bgp neighbor 198.18.0.1 description 'ShadeCast, the first ISP'
+set protocols bgp neighbor 198.18.0.1 timers keepalive 3
+set protocols bgp neighbor 198.18.0.1 timers holdtime 9
+set protocols bgp neighbor 198.18.0.1 timers connect 5
+set protocols bgp neighbor 198.18.0.1 bfd profile WAN
+set protocols bgp neighbor 198.18.0.1 update-source 198.18.0.2
+set protocols bgp neighbor 198.18.0.1 ebgp-multihop 2
+set protocols bgp neighbor 198.18.0.1 password 'not-a-real-key'
+set protocols bgp neighbor 198.18.0.1 shutdown
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast nexthop-self
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast soft-reconfiguration inbound
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast default-originate route-map DEFAULT-IF-TRANSIT
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast route-map import FROM-ISP
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast route-map export TO-ISP
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast prefix-list import PUBLIC
+set protocols bgp neighbor 198.18.0.1 address-family ipv4-unicast prefix-list export OWN
+set protocols bgp neighbor 198.18.0.5 remote-as 64501
+set protocols bgp neighbor 198.18.0.5 timers connect 10
+set protocols bgp neighbor 198.18.0.5 bfd
+set protocols bgp neighbor 198.18.0.5 update-source 10.255.0.1
+set protocols bgp neighbor 198.18.0.5 address-family ipv4-unicast default-originate
+set protocols bgp neighbor 10.255.0.2 remote-as 64512
+set protocols bgp neighbor 10.255.0.2 address-family ipv4-unicast

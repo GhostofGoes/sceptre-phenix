@@ -42,6 +42,8 @@ var (
 	ErrNATInterfaceAddress = errors.New("nat inside interface has no valid address")
 	ErrEmulatorInterface   = errors.New("emulator interface not found")
 	ErrUnsafeVyosPassword  = errors.New("vyos password cannot be written safely")
+	ErrVyosConfigLine      = errors.New("vyos config line is not valid")
+	ErrBGPConfig           = errors.New("bgp config is not valid")
 )
 
 type ACLConfig struct {
@@ -187,8 +189,70 @@ func (v Vrouter) Configure(ctx context.Context, exp *types.Experiment) error {
 	return nil
 }
 
+// checkVrouterHosts refuses `config` or `bgp` metadata on a vrouter host
+// that PreStart does not render with it: a host with no node in the topology,
+// a node with the default apps off, a node that is not a router or firewall,
+// or a router whose os_type cannot take the key. PreStart would skip such a
+// node before it reads the host's metadata, or render it without the key, and
+// drop the metadata without a word.
+func checkVrouterHosts(exp *types.Experiment) error {
+	keys := []struct {
+		name    string
+		err     error
+		osTypes []string
+	}{
+		{name: "config", err: ErrVyosConfigLine, osTypes: []string{osTypeVyos}},
+		{name: "bgp", err: ErrBGPConfig, osTypes: bgpOSTypes()},
+	}
+
+	for _, app := range exp.Apps() {
+		if app.Name() != appNameVrouter {
+			continue
+		}
+
+		for _, host := range app.Hosts() {
+			node := exp.Spec.Topology().FindNodeByName(host.Hostname())
+
+			for _, key := range keys {
+				if _, ok := host.Metadata()[key.name]; !ok {
+					continue
+				}
+
+				if why := vrouterKeyDropped(node, key.name, key.osTypes); why != "" {
+					return fmt.Errorf("processing %s metadata for host %s: %w: %s", key.name, host.Hostname(), key.err, why)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// vrouterKeyDropped says why PreStart does not render the metadata key of a
+// vrouter host whose node is node, or "" if it does. osTypes holds the
+// os_types that can take the key.
+func vrouterKeyDropped(node ifaces.NodeSpec, key string, osTypes []string) string {
+	switch {
+	case node == nil:
+		return "no node of that name is in the topology"
+	case node.External() || !defaultAppsEnabled(node):
+		return "the default apps do not run on the node"
+	case !strings.EqualFold(node.Type(), "router") && !strings.EqualFold(node.Type(), "firewall"):
+		return "the node is not a router or firewall"
+	case !slices.Contains(osTypes, strings.ToLower(node.Hardware().OSType())):
+		return key + " is only supported for os_type " + strings.Join(osTypes, ", ")
+	default:
+		return ""
+	}
+}
+
 //nolint:cyclop,funlen,gocyclo,maintidx // complex logic
 func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
+	err := checkVrouterHosts(exp)
+	if err != nil {
+		return err
+	}
+
 	var (
 		ntpServers = exp.Spec.Topology().FindNodesWithLabels("ntp-server")
 		ntpAddr    string
@@ -363,6 +427,28 @@ func (v *Vrouter) PreStart(ctx context.Context, exp *types.Experiment) error {
 
 						data["snat"] = sources
 						data["dnat"] = destinations
+
+						config, err := vyosConfigLines(md, isVyos)
+						if err != nil {
+							return fmt.Errorf(
+								"processing config metadata for host %s: %w",
+								host.Hostname(),
+								err,
+							)
+						}
+
+						data["config"] = config
+
+						bgp, err := bgpLines(md, node.Hardware().OSType(), node.Network().Interfaces(), config)
+						if err != nil {
+							return fmt.Errorf(
+								"processing bgp metadata for host %s: %w",
+								host.Hostname(),
+								err,
+							)
+						}
+
+						data["bgp"] = bgp
 
 						break
 					}
@@ -730,11 +816,102 @@ func vyosPassword(val any) (string, error) {
 		return "", fmt.Errorf("%w: it is not a string", ErrUnsafeVyosPassword)
 	case passwd == "":
 		return "", fmt.Errorf("%w: it is empty", ErrUnsafeVyosPassword)
-	case strings.ContainsFunc(passwd, func(r rune) bool { return r == '\'' || unicode.IsControl(r) }):
+	case !singleQuotable(passwd):
 		return "", fmt.Errorf("%w: it has a single quote or a control character", ErrUnsafeVyosPassword)
 	default:
 		return passwd, nil
 	}
+}
+
+// singleQuotable reports whether a script can hold text between single
+// quotes: text with no single quote and no control character.
+func singleQuotable(text string) bool {
+	return !strings.ContainsFunc(text, func(r rune) bool { return r == '\'' || unicode.IsControl(r) })
+}
+
+// vyosConfigUnsafe holds the characters that vbash, which runs the rendered
+// script, acts on outside single quotes: expansions, quoting, redirections,
+// control operators, comments, and file name patterns.
+const vyosConfigUnsafe = "\"`$;|&<>(){}[]\\#!*?~"
+
+// vyosConfigLines returns the `config` metadata of a router: VyOS
+// configuration commands that the template writes after everything it
+// generates itself, before the commit. Every error wraps ErrVyosConfigLine.
+func vyosConfigLines(md map[string]any, isVyos bool) ([]string, error) {
+	raw, ok := md["config"]
+	if !ok {
+		return nil, nil
+	}
+
+	if !isVyos {
+		return nil, fmt.Errorf("%w: config is only supported for os_type vyos", ErrVyosConfigLine)
+	}
+
+	var lines []string
+
+	err := mapstructure.Decode(raw, &lines)
+	if err != nil {
+		return nil, fmt.Errorf("%w: config is not a list of strings: %w", ErrVyosConfigLine, err)
+	}
+
+	for idx, line := range lines {
+		err := checkVyosConfigLine(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", idx, err)
+		}
+	}
+
+	return lines, nil
+}
+
+// checkVyosConfigLine refuses a line that vbash would not run as one `set` or
+// `delete` command whose words are exactly the words of the line. The line
+// goes into a script as it is, so nothing in it may be special to the shell
+// outside single quotes. The first word after the verb must start with a
+// lowercase letter, as every VyOS configuration node does: VyOS's `set` hands
+// `set -...` and `set +...` to the shell's own `set` builtin (vyatta-cfg,
+// VyOS T1604), which would change the options of the script that commits the
+// configuration.
+//
+// The check guards against a line the shell would misread, not against the
+// line's author: `config` has full control of the router. VyOS's own
+// `system task-scheduler` runs commands, and while it completes a line VyOS
+// evaluates the output of completion scripts, some of which print values that
+// earlier lines stored.
+func checkVyosConfigLine(line string) error {
+	var rest string
+
+	switch {
+	case strings.HasPrefix(line, "set "):
+		rest = line[len("set "):]
+	case strings.HasPrefix(line, "delete "):
+		rest = line[len("delete "):]
+	default:
+		return fmt.Errorf("%w: it does not start with set or delete", ErrVyosConfigLine)
+	}
+
+	if rest == "" || rest[0] < 'a' || rest[0] > 'z' {
+		return fmt.Errorf("%w: the word after set or delete does not start with a lowercase letter", ErrVyosConfigLine)
+	}
+
+	quoted := false
+
+	for _, r := range line {
+		switch {
+		case unicode.IsControl(r):
+			return fmt.Errorf("%w: it has a control character", ErrVyosConfigLine)
+		case r == '\'':
+			quoted = !quoted
+		case !quoted && strings.ContainsRune(vyosConfigUnsafe, r):
+			return fmt.Errorf("%w: it has %q outside single quotes", ErrVyosConfigLine, r)
+		}
+	}
+
+	if quoted {
+		return fmt.Errorf("%w: it has an unclosed single quote", ErrVyosConfigLine)
+	}
+
+	return nil
 }
 
 func (Vrouter) processSNMP(md map[string]any) (*SNMPConfig, error) {
